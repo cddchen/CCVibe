@@ -1,57 +1,68 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DaemonClient } from "../lib/daemonClient";
 
+export type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
 type Ctx = {
   client: DaemonClient | null;
+  status: ConnectionStatus;
   connected: boolean;
   error: string | null;
   token: string;
-  setToken: (t: string) => void;
   wsUrl: string;
-  setWsUrl: (u: string, reconnectNow?: boolean) => void;
-  reconnect: () => void;
+  connect: (wsUrl: string, token: string) => void;
+  disconnect: () => void;
 };
 
 const DaemonCtx = createContext<Ctx | null>(null);
 
 export function DaemonProvider({ children }: { children: ReactNode }) {
-  const [token, setTokenState] = useState(() => localStorage.getItem("cc_daemon_token") || "");
-  const [wsUrl, setWsUrlState] = useState(() => localStorage.getItem("cc_daemon_ws_url") || "");
+  const [token, setToken] = useState(() => localStorage.getItem("cc_daemon_token") || "");
+  const [wsUrl, setWsUrl] = useState(() => localStorage.getItem("cc_daemon_ws_url") || "");
   const [client, setClient] = useState<DaemonClient | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [status, setStatus] = useState<ConnectionStatus>(() =>
+    localStorage.getItem("cc_daemon_token") ? "connecting" : "disconnected",
+  );
   const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
+  const [attempt, setAttempt] = useState(() => (localStorage.getItem("cc_daemon_token") ? 1 : 0));
 
-  const reconnect = () => setTick((t) => t + 1);
-
-  const setToken = (t: string) => {
-    setTokenState(t);
-    localStorage.setItem("cc_daemon_token", t);
-    reconnect();
+  const connect = (nextWsUrl: string, nextToken: string) => {
+    localStorage.setItem("cc_daemon_ws_url", nextWsUrl);
+    localStorage.setItem("cc_daemon_token", nextToken);
+    setWsUrl(nextWsUrl);
+    setToken(nextToken);
+    setError(null);
+    setStatus("connecting");
+    setAttempt((a) => a + 1);
   };
 
-  const setWsUrl = (u: string, reconnectNow = false) => {
-    setWsUrlState(u);
-    localStorage.setItem("cc_daemon_ws_url", u);
-    if (reconnectNow) reconnect();
+  const disconnect = () => {
+    client?.close();
+    setStatus("disconnected");
   };
 
   useEffect(() => {
+    if (attempt === 0) return;
     const c = new DaemonClient(token);
     setClient(c);
-    setConnected(false);
+    setStatus("connecting");
     setError(null);
     c.connect()
-      .then(() => setConnected(true))
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .then(() => setStatus("connected"))
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setStatus("disconnected");
+      });
     return () => {
       c.close();
     };
-  }, [token, wsUrl, tick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt]);
 
   const value = useMemo(
-    () => ({ client, connected, error, token, setToken, wsUrl, setWsUrl, reconnect }),
-    [client, connected, error, token, wsUrl],
+    () => ({ client, status, connected: status === "connected", error, token, wsUrl, connect, disconnect }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, status, error, token, wsUrl],
   );
 
   return <DaemonCtx.Provider value={value}>{children}</DaemonCtx.Provider>;

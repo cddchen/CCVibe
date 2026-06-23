@@ -1,3 +1,5 @@
+import { buildWsUrl, defaultWsBase } from "./wsUrl";
+
 export type RpcResult<T> = { id: number; result: T } | { id: number; error: { code: number; message: string } };
 
 export type HistorySession = {
@@ -53,20 +55,8 @@ export class DaemonClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const q = this.token ? `?token=${encodeURIComponent(this.token)}` : "";
-      const override = localStorage.getItem("cc_daemon_ws_url")?.trim();
-      let url: string;
-      if (override) {
-        let base = override.replace(/\/$/, "");
-        if (!base.includes("/ws")) base = `${base}/ws`;
-        url = `${base}${q}`;
-      } else if (import.meta.env.DEV) {
-        url = `/ws${q}`;
-      } else {
-        const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        url = `${proto}//${location.host}/ws${q}`;
-      }
-      this.ws = new WebSocket(url);
+      const base = localStorage.getItem("cc_daemon_ws_url")?.trim() || defaultWsBase();
+      this.ws = new WebSocket(buildWsUrl(base, this.token));
       this.ws.onopen = async () => {
         try {
           if (this.token) await this.call("auth", { token: this.token });

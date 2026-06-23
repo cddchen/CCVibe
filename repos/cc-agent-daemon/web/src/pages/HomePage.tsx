@@ -24,7 +24,7 @@ function formatTime(iso?: string) {
 }
 
 export function HomePage() {
-  const { client, connected, error, token, setToken, wsUrl, setWsUrl } = useDaemon();
+  const { client, connected, error, disconnect } = useDaemon();
   const [sessionList, setSessionList] = useState<SessionListData>(() => getCachedSessionList() ?? { workspaces: [], sessionsByPath: {} });
   const [loading, setLoading] = useState(false);
   const [newPath, setNewPath] = useState("");
@@ -65,29 +65,21 @@ export function HomePage() {
               {connected ? "已连接 daemon" : error ? `未连接：${error}` : "连接中…"}
             </p>
           </div>
-          <div className="flex items-start gap-3">
-            <div className="flex max-w-md flex-1 flex-col items-end gap-2 text-sm">
-              <input
-                type="text"
-                placeholder="WS 地址（局域网直连 daemon 时填 ws://本机IP:4733）"
-                className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                value={wsUrl}
-                onChange={(e) => setWsUrl(e.target.value, false)}
-                onBlur={(e) => setWsUrl(e.target.value, true)}
-              />
-              <div className="flex w-full justify-end gap-2">
-                <input
-                  type="password"
-                  placeholder="Token（局域网必填）"
-                  className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-900"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                />
-                <button type="button" onClick={() => void load(true)} className="shrink-0 rounded-xl bg-zinc-900 px-3 py-1.5 text-white hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700">
-                  刷新
-                </button>
-              </div>
-            </div>
+          <div className="flex items-center gap-2 text-sm">
+            <button
+              type="button"
+              onClick={() => void load(true)}
+              className="rounded-xl bg-zinc-900 px-3 py-1.5 text-white hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+            >
+              刷新
+            </button>
+            <button
+              type="button"
+              onClick={disconnect}
+              className="rounded-xl border border-zinc-200 px-3 py-1.5 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              切换连接
+            </button>
             <ThemeToggle />
           </div>
         </div>

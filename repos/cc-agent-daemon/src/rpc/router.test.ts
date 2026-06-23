@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { dispatch } from "./router.js";
 import type { AppContext } from "../app/context.js";
 import type { ClientConnection } from "./connection.js";
@@ -115,6 +115,37 @@ describe("dispatch", () => {
         params: { workspacePath: dir },
       });
       expect(res).toMatchObject({ jsonrpc: "2.0", id: 6, error: { code: -32603 } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("workspace.checkTrust returns trusted false until workspace.add", async () => {
+    const ctx = mockCtx(null);
+    const conn = mockConn(true);
+    const dir = mkdtempSync(join(tmpdir(), "ccd-trust-"));
+    try {
+      const res1 = await dispatch(ctx, conn, {
+        jsonrpc: "2.0",
+        id: 10,
+        method: "workspace.checkTrust",
+        params: { path: dir },
+      });
+      expect(res1).toMatchObject({
+        jsonrpc: "2.0",
+        id: 10,
+        result: { trusted: false, parent: dirname(realpathSync(dir)) },
+      });
+
+      await dispatch(ctx, conn, { jsonrpc: "2.0", id: 11, method: "workspace.add", params: { path: dir } });
+
+      const res2 = await dispatch(ctx, conn, {
+        jsonrpc: "2.0",
+        id: 12,
+        method: "workspace.checkTrust",
+        params: { path: dir },
+      });
+      expect(res2).toMatchObject({ jsonrpc: "2.0", id: 12, result: { trusted: true } });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

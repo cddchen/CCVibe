@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { VirtualMessageList } from "../components/VirtualMessageList";
+import { QuestionPicker } from "../components/QuestionPicker";
+import { parseAskUserQuestion } from "../lib/askUserQuestion";
 import { useDaemon } from "../context/DaemonContext";
 import { useChatNotify } from "../context/ChatNotifyContext";
 import { useTurnStream } from "../hooks/useTurnStream";
@@ -27,11 +29,13 @@ import {
 } from "../lib/chatModelControls";
 import { chatNotifyBindOptions, shouldReplaceChatUrlFromInit } from "../lib/chatSessionRouting";
 import {
+  clearCachedSessionList,
   getCachedSessionList,
   loadSessionList,
   sessionGroups,
   type SessionListData,
 } from "../lib/sessionListCache";
+import { type TrustInfo } from "../lib/workspaceTrust";
 import {
   CHAT_FOLLOW_OUTPUT_KEY,
   CHAT_SIDEBAR_OPEN_KEY,
@@ -101,6 +105,7 @@ function titleForSession(sessionId: string | null) {
 }
 
 export function ChatPage() {
+  const navigate = useNavigate();
   const { workspacePath: wpEnc, sessionId: sessionIdParam } = useParams();
   const workspacePath = wpEnc ? decodeURIComponent(wpEnc) : "";
   const historySessionId = sessionIdParam ? decodeURIComponent(sessionIdParam) : null;
@@ -125,6 +130,8 @@ export function ChatPage() {
   const [sidebarExpanded, setSidebarExpanded] = useState<Record<string, boolean>>(() => readExpandedPreference(HOME_EXPANDED_DIRS_KEY));
   const [followOutput, setFollowOutput] = useState(() => readBooleanPreference(CHAT_FOLLOW_OUTPUT_KEY, true));
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [trusted, setTrusted] = useState(false);
+  const [trustPrompt, setTrustPrompt] = useState<TrustInfo | null>(null);
   const [perm, setPerm] = useState<PermissionRequest | null>(null);
   const [permissionUpdatedInput, setPermissionUpdatedInput] = useState("{}");
   const [permissionDenyMessage, setPermissionDenyMessage] = useState("用户拒绝");
@@ -299,6 +306,30 @@ export function ChatPage() {
   const hydratedRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!client || !connected || !workspacePath) return;
+    let cancelled = false;
+    setTrusted(false);
+    setTrustPrompt(null);
+    void client.call<TrustInfo>("workspace.checkTrust", { path: workspacePath })
+      .then((info) => {
+        if (cancelled) return;
+        if (info.trusted) {
+          setTrusted(true);
+          setTrustPrompt(null);
+        } else {
+          setTrusted(false);
+          setTrustPrompt(info);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, connected, workspacePath]);
+
+  useEffect(() => {
     if (!historySessionId) {
       hydratedRef.current = null;
       setMessages([]);
@@ -308,6 +339,7 @@ export function ChatPage() {
       return;
     }
     if (!client || !connected || !workspacePath) return;
+    if (!trusted) return;
     if (hydratedRef.current === historySessionId) return;
 
     let cancelled = false;
@@ -354,7 +386,7 @@ export function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [client, connected, workspacePath, historySessionId, modelOptions]);
+  }, [client, connected, workspacePath, historySessionId, modelOptions, trusted]);
 
   useEffect(() => {
     return () => {
@@ -473,6 +505,7 @@ export function ChatPage() {
   };
 
   const send = async () => {
+    if (!trusted) return;
     const text = input.trim();
     if (!text || !client || busy) return;
     setInput("");
@@ -520,6 +553,38 @@ export function ChatPage() {
         denyMessage: permissionDenyMessage,
       }));
       setPerm(null);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const askQuestion = useMemo(
+    () => (perm?.toolName === "AskUserQuestion" ? parseAskUserQuestion(perm.input) : null),
+    [perm],
+  );
+
+  const respondAsk = async (updatedInput: Record<string, unknown> | null) => {
+    if (!client || !perm) return;
+    try {
+      await client.call(
+        "permission.respond",
+        updatedInput
+          ? { sessionId: perm.sessionId, requestId: perm.requestId, behavior: "allow", updatedInput }
+          : { sessionId: perm.sessionId, requestId: perm.requestId, behavior: "deny", message: "用户取消了问题" },
+      );
+      setPerm(null);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const trustDir = async (path: string) => {
+    if (!client) return;
+    try {
+      await client.call("workspace.add", { path });
+      clearCachedSessionList();
+      setTrustPrompt(null);
+      setTrusted(true);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e));
     }
@@ -698,6 +763,14 @@ export function ChatPage() {
 
           <footer className="shrink-0 z-10 border-t border-zinc-200 bg-white/90 p-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90 md:p-4">
             <div className="mx-auto flex max-w-4xl flex-col gap-3 rounded-3xl border border-zinc-200 bg-zinc-50/80 p-3 shadow-lg shadow-zinc-200/50 dark:border-zinc-800 dark:bg-zinc-900/70 dark:shadow-black/20">
+              {askQuestion ? (
+                <QuestionPicker
+                  ask={askQuestion}
+                  onSubmit={(u) => void respondAsk(u)}
+                  onCancel={() => void respondAsk(null)}
+                />
+              ) : (
+              <>
               <div className="flex items-end gap-2">
                 <textarea
                   ref={textareaRef}
@@ -794,12 +867,29 @@ export function ChatPage() {
                   </select>
                 </div>
               </div>
+              </>
+              )}
             </div>
           </footer>
         </div>
       </div>
 
-      {perm && (
+      {trustPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-lg rounded-3xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
+            <h3 className="mb-1 font-medium">信任此工作目录?</h3>
+            <p className="mb-4 break-all font-mono text-sm text-zinc-500">{trustPrompt.path}</p>
+            <p className="mb-4 text-sm text-zinc-500">该目录尚未加入信任列表,信任后才能打开会话。</p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button type="button" className="rounded-xl bg-zinc-100 px-4 py-2 text-sm hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700" onClick={() => navigate("/")}>取消</button>
+              <button type="button" className="rounded-xl bg-zinc-100 px-4 py-2 text-sm hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700" onClick={() => void trustDir(trustPrompt.parent)}>信任父目录</button>
+              <button type="button" className="rounded-xl bg-violet-600 px-4 py-2 text-sm text-white hover:bg-violet-500" onClick={() => void trustDir(trustPrompt.path)}>信任此目录</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {perm && !askQuestion && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-2xl rounded-3xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
             <h3 className="mb-1 font-medium">工具权限</h3>

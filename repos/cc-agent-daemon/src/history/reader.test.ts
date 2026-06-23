@@ -86,7 +86,31 @@ describe("history reader", () => {
     ]);
 
     const projects = await listAllLocalProjects();
-    expect(projects).toEqual([expect.objectContaining({ workspacePath: workspace, sessions: [] })]);
+    expect(projects).toEqual([
+      expect.objectContaining({
+        workspacePath: workspace,
+        sessions: [expect.objectContaining({ sessionId: "s1", messageCount: 1 })],
+      }),
+    ]);
+  });
+
+  it("listAllLocalProjects populates sessions and excludes agent-* files", async () => {
+    const claudeHome = tempDir("ccd-claude-home-");
+    const workspace = tempDir("ccd-workspace-");
+    process.env.CLAUDE_HOME = claudeHome;
+
+    writeSession(claudeHome, workspace, "visible-1", [
+      { uuid: "u1", type: "user", timestamp: "2026-01-01T00:00:00.000Z" },
+      { uuid: "a1", parentUuid: "u1", type: "assistant", timestamp: "2026-01-01T00:00:01.000Z" },
+    ]);
+    writeSession(claudeHome, workspace, "agent-hidden", [
+      { uuid: "x", type: "assistant", timestamp: "2026-01-01T00:00:02.000Z" },
+    ]);
+
+    const projects = await listAllLocalProjects();
+    expect(projects).toHaveLength(1);
+    expect(projects[0].sessions.map((s) => s.sessionId)).toEqual(["visible-1"]);
+    expect(projects[0].sessions[0].messageCount).toBe(2);
   });
 
   it("loads a session and rebuilds the latest parent chain", async () => {

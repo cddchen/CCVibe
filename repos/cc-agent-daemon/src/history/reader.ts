@@ -74,7 +74,8 @@ export async function listAllLocalProjects(): Promise<LocalProjectSessions[]> {
     const sessionFiles = names.filter((name) => name.endsWith(".jsonl") && !name.startsWith("agent-"));
     if (sessionFiles.length === 0) continue;
     const discoveredPath = await readWorkspacePathFromProject(root, encodedDir, sessionFiles);
-    out.push({ workspacePath: discoveredPath ?? workspacePath, encodedDir, sessions: [] });
+    const sessions = await listSessionsInDir(join(root, encodedDir));
+    out.push({ workspacePath: discoveredPath ?? workspacePath, encodedDir, sessions });
   }
   out.sort((a, b) => a.workspacePath.localeCompare(b.workspacePath));
   return out;

@@ -20,12 +20,14 @@ import {
   historyLoadParams,
   workspaceAddParams,
   workspaceRemoveParams,
+  workspaceCheckTrustParams,
   permissionRespondParams,
 } from "./schemas.js";
+import { dirname, resolve } from "node:path";
 import { assertCwdAllowed, canonicalPath } from "../security/workspaceGuard.js";
 import { validateToken } from "../security/auth.js";
 import { listAllLocalProjects, listSessions, loadSessionMessages } from "../history/reader.js";
-import { encodeProjectPath, projectSessionsDir } from "../history/paths.js";
+import { projectSessionsDir } from "../history/paths.js";
 import { log } from "../logger.js";
 import { readClaudePersonalSettings } from "../settings/reader.js";
 
@@ -213,29 +215,15 @@ const handlers: Record<string, Handler> = {
 
   "history.listAllLocal": async (ctx, conn) => {
     requireAuth(conn, ctx);
-    const allowedRoots = ctx.store.getWorkspacePaths();
-    const allowedByEncodedDir = new Map<string, string>();
-    for (const root of allowedRoots) {
-      try {
-        const workspacePath = canonicalPath(root);
-        allowedByEncodedDir.set(encodeProjectPath(workspacePath), workspacePath);
-      } catch {}
-    }
-    const projects = await Promise.all(
-      (await listAllLocalProjects()).map(async (project) => {
-        const workspacePath = allowedByEncodedDir.get(project.encodedDir);
-        if (workspacePath) {
-          return { ...project, workspacePath, sessions: await listSessions(workspacePath) };
-        }
+    const projects = (await listAllLocalProjects())
+      .map((project) => {
+        let workspacePath = project.workspacePath;
         try {
-          assertCwdAllowed(project.workspacePath, allowedRoots);
-          const canonicalWorkspacePath = canonicalPath(project.workspacePath);
-          return { ...project, workspacePath: canonicalWorkspacePath, sessions: await listSessions(canonicalWorkspacePath) };
-        } catch {
-          return project;
-        }
-      }),
-    );
+          workspacePath = canonicalPath(project.workspacePath);
+        } catch {}
+        return { ...project, workspacePath };
+      })
+      .filter((p) => p.sessions.length > 0);
     log.info("rpc history.listAllLocal", {
       projects: projects.length,
       sessions: projects.reduce((n, x) => n + x.sessions.length, 0),
@@ -272,6 +260,24 @@ const handlers: Record<string, Handler> = {
     return {
       workspace: ctx.store.addWorkspace(p.path),
     };
+  }),
+
+  "workspace.checkTrust": withSchema(workspaceCheckTrustParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    const roots = ctx.store.getWorkspacePaths();
+    let path: string;
+    try {
+      path = canonicalPath(p.path);
+    } catch {
+      path = resolve(p.path);
+    }
+    const parent = dirname(path);
+    let trusted = false;
+    try {
+      assertCwdAllowed(p.path, roots);
+      trusted = true;
+    } catch {}
+    return { trusted, path, parent };
   }),
 
   "workspace.remove": withSchema(workspaceRemoveParams, async (ctx, conn, p) => {

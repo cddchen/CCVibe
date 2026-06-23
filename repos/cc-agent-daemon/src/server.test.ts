@@ -599,6 +599,60 @@ describe("startServer", () => {
     ws.close();
   });
 
+  it("returns local history sessions even without an allowlist entry", async () => {
+    const claudeHome = tempDir("ccd-claude-home-");
+    process.env.CLAUDE_HOME = claudeHome;
+    const workspace = tempDir("ccd-workspace-");
+    const workspacePath = realpathSync(workspace);
+    writeHistorySession(claudeHome, workspacePath, "untrusted-1");
+    writeHistorySession(claudeHome, workspacePath, "agent-hidden");
+
+    const ctx = makeContext(tempDir("ccd-server-"), null);
+    const server = await startServer(ctx, { ...ctx.config, port: 0 });
+    servers.push(server);
+    const ws = await openWs(wsUrl(server));
+
+    const allLocal = await rpc<{
+      result: { projects: Array<{ workspacePath: string; sessions: Array<{ sessionId: string }> }> };
+    }>(ws, 1, "history.listAllLocal");
+    const project = allLocal.result.projects.find((p) => p.workspacePath === workspacePath);
+    expect(project?.sessions.map((s) => s.sessionId)).toEqual(["untrusted-1"]);
+    ws.close();
+  });
+
+  it("workspace.checkTrust reflects allowlist before and after workspace.add", async () => {
+    const workspace = tempDir("ccd-workspace-");
+    const workspacePath = realpathSync(workspace);
+    const parentPath = join(workspacePath, "..");
+
+    const ctx = makeContext(tempDir("ccd-server-"), null);
+    const server = await startServer(ctx, { ...ctx.config, port: 0 });
+    servers.push(server);
+    const ws = await openWs(wsUrl(server));
+
+    const before = await rpc<{ result: { trusted: boolean; path: string; parent: string } }>(
+      ws,
+      1,
+      "workspace.checkTrust",
+      { path: workspace },
+    );
+    expect(before.result.trusted).toBe(false);
+    expect(before.result.path).toBe(workspacePath);
+    expect(realpathSync(before.result.parent)).toBe(realpathSync(parentPath));
+
+    await rpc(ws, 2, "workspace.add", { path: workspace });
+
+    const after = await rpc<{ result: { trusted: boolean; path: string } }>(
+      ws,
+      3,
+      "workspace.checkTrust",
+      { path: workspace },
+    );
+    expect(after.result.trusted).toBe(true);
+    expect(after.result.path).toBe(workspacePath);
+    ws.close();
+  });
+
   it("reads history sessions and messages over websocket after workspace.add", async () => {
     const claudeHome = tempDir("ccd-claude-home-");
     process.env.CLAUDE_HOME = claudeHome;

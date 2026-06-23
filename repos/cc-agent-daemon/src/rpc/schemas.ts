@@ -59,6 +59,7 @@ export const historyLoadParams = z.object({
 
 export const workspaceAddParams = z.object({ path: z.string().min(1) });
 export const workspaceRemoveParams = z.object({ id: z.string().min(1) });
+export const workspaceCheckTrustParams = z.object({ path: z.string().min(1) });
 
 export const permissionRespondParams = z.object({
   sessionId: z.string().min(1),
