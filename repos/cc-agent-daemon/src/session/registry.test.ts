@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PermissionRegistry } from "../permission/registry.js";
 import type { ClientConnection } from "../rpc/connection.js";
 import { SessionRegistry } from "./registry.js";
@@ -89,5 +89,64 @@ describe("SessionRegistry", () => {
 
     expect(stopped).toEqual([runtimeId]);
     expect(registry.get(runtimeId)).toBeUndefined();
+  });
+
+  describe("idle reclaim", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("stops and unregisters after detach when session completed", async () => {
+      let onMessage: ((msg: unknown) => void) | undefined;
+      const stopped: string[] = [];
+      const engine: EngineAdapter = {
+        start: async (_opts, hooks, runtimeId) => {
+          onMessage = hooks.onMessage;
+          return { runtimeId };
+        },
+        send: async () => {},
+        interrupt: async () => {},
+        setPermissionMode: async () => {},
+        stop: async (runtimeId) => {
+          stopped.push(runtimeId);
+        },
+      };
+      const registry = new SessionRegistry(() => engine, new PermissionRegistry(), 1000);
+      const conn = mockConn();
+      const runtimeId = await registry.create({ cwd: process.cwd() }, conn);
+      onMessage?.({ type: "result", subtype: "success" });
+      registry.onClientDisconnect(conn.id);
+      vi.advanceTimersByTime(1000);
+      await vi.runAllTimersAsync();
+      expect(stopped).toEqual([runtimeId]);
+      expect(registry.get(runtimeId)).toBeUndefined();
+    });
+
+    it("does not stop a running session when unsubscribed", async () => {
+      const stopped: string[] = [];
+      const engine: EngineAdapter = {
+        start: async (_opts, hooks, runtimeId) => {
+          hooks.onMessage({ type: "system", subtype: "init", session_id: "sdk" });
+          return { runtimeId };
+        },
+        send: async () => {},
+        interrupt: async () => {},
+        setPermissionMode: async () => {},
+        stop: async (runtimeId) => {
+          stopped.push(runtimeId);
+        },
+      };
+      const registry = new SessionRegistry(() => engine, new PermissionRegistry(), 1000);
+      const conn = mockConn();
+      const runtimeId = await registry.create({ cwd: process.cwd() }, conn);
+      registry.onClientDisconnect(conn.id);
+      vi.advanceTimersByTime(1000);
+      await vi.runAllTimersAsync();
+      expect(stopped).toEqual([]);
+      expect(registry.get(runtimeId)).toBeDefined();
+    });
   });
 });

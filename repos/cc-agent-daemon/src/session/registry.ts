@@ -11,6 +11,7 @@ export class SessionRegistry {
   constructor(
     private engineFactory: () => EngineAdapter,
     private permissions: PermissionRegistry,
+    private reclaimIdleMs = 300_000,
   ) {}
 
   get(sessionId: string): SessionRunner | undefined {
@@ -66,13 +67,13 @@ export class SessionRegistry {
     const engine = this.engineFactory();
     const runner = new SessionRunner(runtimeId, opts.cwd, engine);
     runner.subscribe(permissionConn);
-    runner.setTerminalCleanup(() => {
-      setTimeout(() => {
-        const sid = runner.sessionId ?? runtimeId;
-        this.permissions.denyAllForSession(sid);
-        this.unregisterRunner(runner);
-      }, 60_000).unref();
-    });
+    runner.setReclaimHandler(async () => {
+      if (runner.subscriberCount() > 0) return;
+      const sid = runner.sessionId ?? runtimeId;
+      await runner.stop();
+      this.permissions.denyAllForSession(sid);
+      this.unregisterRunner(runner);
+    }, this.reclaimIdleMs);
     this.registerRunner([runtimeId], runner);
     log.info("session.create start", { runtimeId, cwd: opts.cwd });
     await runner.startWithEngine(opts, this.permissions, permissionConn, (sid) => {

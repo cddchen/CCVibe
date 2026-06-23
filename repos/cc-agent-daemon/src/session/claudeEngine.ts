@@ -8,9 +8,11 @@ type ActiveQuery = {
     streamInput?: (msg: unknown) => Promise<void>;
     interrupt?: () => Promise<void>;
     setPermissionMode?: (m: PermissionMode) => Promise<void>;
+    close?: () => void;
   };
   inputPush: (content: string) => void;
   inputDone: boolean;
+  abort: AbortController;
 };
 
 export function createClaudeEngine(): EngineAdapter {
@@ -55,9 +57,11 @@ export function createClaudeEngine(): EngineAdapter {
               }
             : undefined;
 
+      const abort = new AbortController();
       const q = query({
         prompt: inputStream(),
         options: {
+          abortController: abort,
           cwd: opts.cwd,
           model: opts.model,
           permissionMode,
@@ -83,7 +87,7 @@ export function createClaudeEngine(): EngineAdapter {
         },
       }) as ActiveQuery["q"];
 
-      active.set(runtimeId, { q, inputPush: push, inputDone: false });
+      active.set(runtimeId, { q, inputPush: push, inputDone: false, abort });
 
       void (async () => {
         try {
@@ -126,6 +130,19 @@ export function createClaudeEngine(): EngineAdapter {
     },
 
     async stop(runtimeId) {
+      const a = active.get(runtimeId);
+      if (a) {
+        try {
+          a.abort.abort();
+        } catch {
+          /* ignore */
+        }
+        try {
+          a.q.close?.();
+        } catch {
+          /* ignore */
+        }
+      }
       active.delete(runtimeId);
     },
   };

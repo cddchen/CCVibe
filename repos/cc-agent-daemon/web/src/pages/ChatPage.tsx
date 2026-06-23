@@ -367,16 +367,24 @@ export function ChatPage() {
           setCustomModel((current) => customModelFromObservedModel(lastAssistant.model ?? "", modelOptions, current));
         }
 
-        const { sessionId } = await client.call<{ sessionId: string }>("session.resume", {
+        const live = await client.call<{ attached: boolean; sessionId?: string }>("session.attachIfLive", {
           sessionId: historySessionId,
-          cwd: workspacePath,
-          permissionMode: permissionModeRef.current,
-          model: modelRef.current,
-          effort: effortRef.current,
         });
         if (cancelled) return;
-        setLiveSessionId(sessionId);
-        await client.call("session.attach", { sessionId });
+        if (live.attached && live.sessionId) {
+          setLiveSessionId(live.sessionId);
+        } else {
+          const { sessionId } = await client.call<{ sessionId: string }>("session.resume", {
+            sessionId: historySessionId,
+            cwd: workspacePath,
+            permissionMode: permissionModeRef.current,
+            model: modelRef.current,
+            effort: effortRef.current,
+          });
+          if (cancelled) return;
+          setLiveSessionId(sessionId);
+          await client.call("session.attach", { sessionId });
+        }
         setStatus(null);
       } catch (e) {
         setStatus(e instanceof Error ? e.message : String(e));

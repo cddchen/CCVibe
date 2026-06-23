@@ -114,6 +114,8 @@ const handlers: Record<string, Handler> = {
     assertCwdAllowed(p.cwd, ctx.store.getWorkspacePaths());
     const workspacePath = canonicalPath(p.cwd);
     conn.permissionClientId = conn.id;
+    const existing = ctx.sessions.get(p.sessionId);
+    if (existing) await ctx.sessions.remove(p.sessionId);
     const sessionId = await ctx.sessions.create(
       {
         cwd: workspacePath,
@@ -165,6 +167,15 @@ const handlers: Record<string, Handler> = {
     if (!runner) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown session");
     await runner.setPermissionMode(p.mode);
     return { ok: true };
+  }),
+
+  "session.attachIfLive": withSchema(sessionIdParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    const runner = ctx.sessions.get(p.sessionId);
+    if (!runner) return { attached: false };
+    conn.permissionClientId = conn.id;
+    runner.subscribe(conn);
+    return { attached: true, sessionId: runner.sessionId ?? p.sessionId };
   }),
 
   "session.attach": withSchema(sessionIdParams, async (ctx, conn, p) => {

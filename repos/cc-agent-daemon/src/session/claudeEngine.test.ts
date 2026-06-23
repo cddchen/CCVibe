@@ -58,6 +58,30 @@ describe("createClaudeEngine", () => {
     );
   });
 
+  it("stop aborts the query controller and calls close on the subprocess", async () => {
+    const close = vi.fn();
+    queryMock.mockReturnValue({
+      close,
+      async *[Symbol.asyncIterator]() {
+        await new Promise(() => {});
+      },
+    });
+    const engine = createClaudeEngine();
+    await engine.start(
+      { cwd: "/tmp/project" },
+      { onMessage: () => {}, canUseTool: async () => ({ behavior: "deny", message: "no" }) },
+      "runtime-stop",
+    );
+    const options = queryMock.mock.calls.at(-1)?.[0]?.options as {
+      abortController?: AbortController;
+    };
+    expect(options.abortController).toBeInstanceOf(AbortController);
+    expect(options.abortController!.signal.aborted).toBe(false);
+    await engine.stop("runtime-stop");
+    expect(options.abortController!.signal.aborted).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("passes every Claude SDK permission mode through to query options", async () => {
     const modes: PermissionMode[] = ["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"];
 

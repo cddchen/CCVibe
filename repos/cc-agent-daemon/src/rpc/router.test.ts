@@ -171,4 +171,93 @@ describe("dispatch", () => {
     const res = await dispatch(ctx, conn, { jsonrpc: "2.0", id: 8, method: "session.listActive" });
     expect(res).toEqual({ jsonrpc: "2.0", id: 8, result: { sessions: [] } });
   });
+
+  it("session.attachIfLive attaches to an existing runner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ccd-attach-"));
+    try {
+      const ctx = mockCtx(null);
+      const conn = mockConn(true);
+      await dispatch(ctx, conn, { jsonrpc: "2.0", id: 20, method: "workspace.add", params: { path: dir } });
+      const created = await dispatch(ctx, conn, {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "session.create",
+        params: { cwd: dir },
+      });
+      const sessionId = (created as { result: { sessionId: string } }).result.sessionId;
+      const res = await dispatch(ctx, conn, {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "session.attachIfLive",
+        params: { sessionId },
+      });
+      expect(res).toMatchObject({
+        jsonrpc: "2.0",
+        id: 22,
+        result: { attached: true, sessionId },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("session.attachIfLive returns attached false when no runner", async () => {
+    const ctx = mockCtx(null);
+    const conn = mockConn(true);
+    const res = await dispatch(ctx, conn, {
+      jsonrpc: "2.0",
+      id: 23,
+      method: "session.attachIfLive",
+      params: { sessionId: "missing-session" },
+    });
+    expect(res).toEqual({ jsonrpc: "2.0", id: 23, result: { attached: false } });
+  });
+
+  it("session.resume supersedes an existing live runner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ccd-resume-"));
+    const stopped: string[] = [];
+    let createCount = 0;
+    try {
+      const ctx = mockCtx(null);
+      const permissions = new PermissionRegistry();
+      const sessions = new SessionRegistry(
+        () => {
+          createCount++;
+          return {
+            start: async (_opts, hooks, runtimeId) => {
+              hooks.onMessage({ type: "system", subtype: "init", session_id: "disk-sess" });
+              return { runtimeId };
+            },
+            send: async () => {},
+            interrupt: async () => {},
+            setPermissionMode: async () => {},
+            stop: async (runtimeId) => {
+              stopped.push(runtimeId);
+            },
+          };
+        },
+        permissions,
+      );
+      (ctx as { sessions: typeof sessions }).sessions = sessions;
+      const conn = mockConn(true);
+      await dispatch(ctx, conn, { jsonrpc: "2.0", id: 30, method: "workspace.add", params: { path: dir } });
+      await dispatch(ctx, conn, {
+        jsonrpc: "2.0",
+        id: 31,
+        method: "session.create",
+        params: { cwd: dir },
+      });
+      const resumed = await dispatch(ctx, conn, {
+        jsonrpc: "2.0",
+        id: 32,
+        method: "session.resume",
+        params: { sessionId: "disk-sess", cwd: dir },
+      });
+      expect(stopped).toHaveLength(1);
+      expect(createCount).toBe(2);
+      expect(resumed).toMatchObject({ jsonrpc: "2.0", id: 32, result: { sessionId: expect.any(String) } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

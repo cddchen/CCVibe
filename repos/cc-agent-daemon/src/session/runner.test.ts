@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { SessionRunner, type EngineAdapter } from "./runner.js";
 import type { ClientConnection } from "../rpc/connection.js";
 
@@ -67,6 +67,52 @@ describe("SessionRunner", () => {
     expect(a._sent[0]).toMatchObject({
       method: "session/status",
       params: { sessionId: "sess-1", runtimeId: "r1", status: "running" },
+    });
+  });
+
+  describe("idle reclaim", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("reclaims when unsubscribed and not running", () => {
+      const reclaim = vi.fn();
+      const runner = new SessionRunner("r1", "/tmp", mockEngine());
+      runner.setReclaimHandler(reclaim, 1000);
+      runner.setStatus("completed");
+      const a = mockConn();
+      runner.subscribe(a);
+      runner.unsubscribe(a.id);
+      vi.advanceTimersByTime(1000);
+      expect(reclaim).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not reclaim while status is running", () => {
+      const reclaim = vi.fn();
+      const runner = new SessionRunner("r1", "/tmp", mockEngine());
+      runner.setReclaimHandler(reclaim, 1000);
+      runner.setStatus("running");
+      const a = mockConn();
+      runner.subscribe(a);
+      runner.unsubscribe(a.id);
+      vi.advanceTimersByTime(1000);
+      expect(reclaim).not.toHaveBeenCalled();
+    });
+
+    it("cancels reclaim when resubscribed", () => {
+      const reclaim = vi.fn();
+      const runner = new SessionRunner("r1", "/tmp", mockEngine());
+      runner.setReclaimHandler(reclaim, 1000);
+      runner.setStatus("completed");
+      const a = mockConn();
+      runner.subscribe(a);
+      runner.unsubscribe(a.id);
+      runner.subscribe(a);
+      vi.advanceTimersByTime(1000);
+      expect(reclaim).not.toHaveBeenCalled();
     });
   });
 });

@@ -30,6 +30,9 @@ export class SessionRunner {
   private status: SessionStatus = "starting";
   private engine: EngineAdapter;
   private onTerminal?: () => void;
+  private idleTimer?: ReturnType<typeof setTimeout>;
+  private idleMs = 300_000;
+  private onReclaim?: () => void;
 
   constructor(
     runtimeId: string,
@@ -45,12 +48,32 @@ export class SessionRunner {
     return this.status;
   }
 
+  setReclaimHandler(fn: () => void, idleMs?: number): void {
+    this.onReclaim = fn;
+    if (idleMs !== undefined) this.idleMs = idleMs;
+  }
+
+  private scheduleReclaim(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if (this.subscriberCount() === 0 && this.status !== "running" && this.status !== "starting") {
+        this.onReclaim?.();
+      }
+    }, this.idleMs);
+    this.idleTimer.unref?.();
+  }
+
   subscribe(conn: ClientConnection): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
+    }
     this.subscribers.set(conn.id, conn);
   }
 
   unsubscribe(connId: string): void {
     this.subscribers.delete(connId);
+    if (this.subscriberCount() === 0) this.scheduleReclaim();
   }
 
   subscriberCount(): number {
