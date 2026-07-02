@@ -9,6 +9,10 @@ describe("defaultWsBase", () => {
   it("uses wss:// for https pages", () => {
     expect(defaultWsBase({ protocol: "https:", hostname: "example.com" })).toBe("wss://example.com:4733");
   });
+
+  it("uses same origin when on Vite dev port (WS proxied to daemon)", () => {
+    expect(defaultWsBase({ protocol: "http:", hostname: "localhost", port: "5174" })).toBe("ws://localhost:5174");
+  });
 });
 
 describe("buildWsUrl", () => {

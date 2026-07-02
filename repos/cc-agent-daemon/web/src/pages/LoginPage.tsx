@@ -6,7 +6,7 @@ import { defaultWsBase } from "../lib/wsUrl";
 export function LoginPage() {
   const { connect, status, error, token, wsUrl } = useDaemon();
   const [base, setBase] = useState(() => wsUrl || defaultWsBase());
-  const [tok, setTok] = useState(token);
+  const [tok, setTok] = useState(() => token || (import.meta.env.DEV ? "cddchen" : ""));
   const [showToken, setShowToken] = useState(false);
   const connecting = status === "connecting";
 

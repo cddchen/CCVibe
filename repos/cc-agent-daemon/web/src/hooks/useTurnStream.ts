@@ -77,6 +77,21 @@ export function useTurnStream(setMessages: React.Dispatch<React.SetStateAction<C
     }, 1000);
   }, [setMessages, stopTimer, patchTurnMessage]);
 
+  const ensureActiveTurn = useCallback(() => {
+    if (turnActiveRef.current) return;
+    turnActiveRef.current = true;
+    turnId.current = `a-${Date.now()}`;
+    turnStartRef.current = Date.now();
+    stopTimer();
+    timerRef.current = setInterval(() => {
+      if (!turnActiveRef.current || turnStartRef.current === null) return;
+      const elapsedSeconds = Math.floor((Date.now() - turnStartRef.current) / 1000);
+      if (elapsedSeconds <= 0) return;
+      metricsRef.current = { ...metricsRef.current, elapsedSeconds };
+      patchTurnMessage(true);
+    }, 1000);
+  }, [stopTimer, patchTurnMessage]);
+
   const resetTurn = useCallback(() => {
     stopTimer();
     turnActiveRef.current = false;
@@ -135,12 +150,12 @@ export function useTurnStream(setMessages: React.Dispatch<React.SetStateAction<C
       }
 
       if (!turnActiveRef.current) {
-        return;
+        ensureActiveTurn();
       }
 
       patchTurnMessage(true);
     },
-    [endTurn, patchTurnMessage],
+    [endTurn, ensureActiveTurn, patchTurnMessage],
   );
 
   return { beginTurn, onSdkEvent, endTurn, resetTurn, toolResults };

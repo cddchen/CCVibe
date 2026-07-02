@@ -6,7 +6,9 @@ import { QuestionPicker } from "../components/QuestionPicker";
 import { parseAskUserQuestion } from "../lib/askUserQuestion";
 import { useDaemon } from "../context/DaemonContext";
 import { useChatNotify } from "../context/ChatNotifyContext";
+import { useActiveSessions, type ActiveKind } from "../hooks/useActiveSessions";
 import { useTurnStream } from "../hooks/useTurnStream";
+import { activeBadgeClassName, activeBadgeLabel } from "../lib/activeSessionBadge";
 import {
   EFFORT_OPTIONS,
   MODEL_OPTIONS,
@@ -27,7 +29,11 @@ import {
   selectedModelValue,
   type ModelKind,
 } from "../lib/chatModelControls";
-import { chatNotifyBindOptions, shouldReplaceChatUrlFromInit } from "../lib/chatSessionRouting";
+import {
+  chatNotifyBindOptions,
+  runStateFromDaemonStatus,
+  shouldReplaceChatUrlFromInit,
+} from "../lib/chatSessionRouting";
 import {
   clearCachedSessionList,
   getCachedSessionList,
@@ -81,6 +87,24 @@ function statusLabel(state: SessionRunState | undefined) {
   return null;
 }
 
+function sessionRowBadgeLabel(
+  sessionId: string,
+  sessionStates: Record<string, SessionRunState>,
+  activeMap: Record<string, ActiveKind>,
+): { text: string; className: string } | null {
+  const run = statusLabel(sessionStates[sessionId]);
+  if (run) {
+    return {
+      text: run,
+      className:
+        "shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-950/50 dark:text-violet-300",
+    };
+  }
+  const kind = activeMap[sessionId];
+  if (!kind) return null;
+  return { text: activeBadgeLabel(kind), className: activeBadgeClassName(kind) };
+}
+
 function replaceChatUrl(workspacePath: string, sessionId: string) {
   const path = `/chat/${encodeURIComponent(workspacePath)}/${encodeURIComponent(sessionId)}`;
   window.history.replaceState(null, "", path);
@@ -110,7 +134,8 @@ export function ChatPage() {
   const workspacePath = wpEnc ? decodeURIComponent(wpEnc) : "";
   const historySessionId = sessionIdParam ? decodeURIComponent(sessionIdParam) : null;
 
-  const { client, connected } = useDaemon();
+  const { client, connected, reconnectNonce } = useDaemon();
+  const activeMap = useActiveSessions(client, connected, reconnectNonce);
   const { bind } = useChatNotify();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [historyToolResults, setHistoryToolResults] = useState<Record<string, ToolResultState>>({});
@@ -306,6 +331,12 @@ export function ChatPage() {
   const hydratedRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (reconnectNonce === 0) return;
+    hydratedRef.current = null;
+    streamRef.current.resetTurn();
+  }, [reconnectNonce]);
+
+  useEffect(() => {
     if (!client || !connected || !workspacePath) return;
     let cancelled = false;
     setTrusted(false);
@@ -367,23 +398,23 @@ export function ChatPage() {
           setCustomModel((current) => customModelFromObservedModel(lastAssistant.model ?? "", modelOptions, current));
         }
 
-        const live = await client.call<{ attached: boolean; sessionId?: string }>("session.attachIfLive", {
+        const live = await client.call<{
+          attached: boolean;
+          sessionId?: string;
+          status?: string;
+        }>("session.attachIfLive", {
           sessionId: historySessionId,
         });
         if (cancelled) return;
         if (live.attached && live.sessionId) {
           setLiveSessionId(live.sessionId);
+          registerSessionAliases([live.sessionId, historySessionId]);
+          setRunStateForIds(
+            [live.sessionId, historySessionId],
+            runStateFromDaemonStatus(live.status),
+          );
         } else {
-          const { sessionId } = await client.call<{ sessionId: string }>("session.resume", {
-            sessionId: historySessionId,
-            cwd: workspacePath,
-            permissionMode: permissionModeRef.current,
-            model: modelRef.current,
-            effort: effortRef.current,
-          });
-          if (cancelled) return;
-          setLiveSessionId(sessionId);
-          await client.call("session.attach", { sessionId });
+          setRunStateForIds([historySessionId], "completed");
         }
         setStatus(null);
       } catch (e) {
@@ -394,7 +425,40 @@ export function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [client, connected, workspacePath, historySessionId, modelOptions, trusted]);
+  }, [client, connected, workspacePath, historySessionId, modelOptions, trusted, reconnectNonce]);
+
+  /** Re-attach when switching back to a session (hydration may be skipped via hydratedRef). */
+  useEffect(() => {
+    if (!client || !connected || !workspacePath || !historySessionId || !trusted) return;
+
+    let cancelled = false;
+    const diskId = historySessionId;
+
+    void (async () => {
+      try {
+        const live = await client.call<{
+          attached: boolean;
+          sessionId?: string;
+          status?: string;
+        }>("session.attachIfLive", { sessionId: diskId });
+        if (cancelled) return;
+        if (live.attached && live.sessionId) {
+          setLiveSessionId(live.sessionId);
+          registerSessionAliases([live.sessionId, diskId]);
+          setRunStateForIds([live.sessionId, diskId], runStateFromDaemonStatus(live.status));
+        } else {
+          setRunStateForIds([diskId], "completed");
+        }
+      } catch (e) {
+        console.warn("[ChatPage] syncLiveAttach failed", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      void client.call("session.detach", { sessionId: diskId }).catch(() => {});
+    };
+  }, [client, connected, workspacePath, historySessionId, trusted, reconnectNonce]);
 
   useEffect(() => {
     return () => {
@@ -654,7 +718,7 @@ export function ChatPage() {
                           + 新对话
                         </Link>
                         {g.sessions.map((s) => {
-                          const runLabel = statusLabel(sessionStates[s.sessionId]);
+                          const badge = sessionRowBadgeLabel(s.sessionId, sessionStates, activeMap);
                           return (
                             <Link
                               key={`${g.workspace.path}:${s.sessionId}`}
@@ -664,7 +728,7 @@ export function ChatPage() {
                             >
                               <div className="flex items-center gap-2">
                                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-700 dark:text-zinc-300">{s.sessionId.slice(0, 12)}…</span>
-                                {runLabel && <span className="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-950/50 dark:text-violet-300">{runLabel}</span>}
+                                {badge && <span className={badge.className}>{badge.text}</span>}
                               </div>
                               <div className="mt-1 flex justify-between gap-2 text-[11px] text-zinc-500">
                                 <span>{s.messageCount} 条</span>
@@ -706,12 +770,12 @@ export function ChatPage() {
                           + 新对话
                         </Link>
                         {g.sessions.map((s) => {
-                          const runLabel = statusLabel(sessionStates[s.sessionId]);
+                          const badge = sessionRowBadgeLabel(s.sessionId, sessionStates, activeMap);
                           return (
                             <Link key={`${g.workspace.path}:${s.sessionId}`} to={chatUrl(g.workspace.path, s.sessionId)} onClick={() => setMobileSidebarOpen(false)} className={`mb-1 block rounded-xl px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-900 ${g.workspace.path === workspacePath && s.sessionId === historySessionId ? "bg-zinc-100 dark:bg-zinc-900" : ""}`}>
                               <div className="flex items-center gap-2">
                                 <span className="min-w-0 flex-1 truncate font-mono text-xs">{s.sessionId.slice(0, 12)}…</span>
-                                {runLabel && <span className="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-950/50 dark:text-violet-300">{runLabel}</span>}
+                                {badge && <span className={badge.className}>{badge.text}</span>}
                               </div>
                               <div className="mt-1 text-[11px] text-zinc-500">{formatTime(s.lastTimestamp)} · {s.messageCount} 条</div>
                             </Link>

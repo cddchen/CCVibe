@@ -33,6 +33,8 @@ export class SessionRunner {
   private idleTimer?: ReturnType<typeof setTimeout>;
   private idleMs = 300_000;
   private onReclaim?: () => void;
+  private turnBuffer: unknown[] = [];
+  private readonly maxTurnBuffer = 4000;
 
   constructor(
     runtimeId: string,
@@ -63,12 +65,33 @@ export class SessionRunner {
     this.idleTimer.unref?.();
   }
 
+  private clearTurnBuffer(): void {
+    this.turnBuffer = [];
+  }
+
+  private sendEventTo(conn: ClientConnection, message: unknown): void {
+    const sid = this.sessionId ?? this.runtimeId;
+    const payload = {
+      jsonrpc: "2.0" as const,
+      method: "session/event",
+      params: { sessionId: sid, runtimeId: this.runtimeId, message },
+    };
+    try {
+      conn.send(payload);
+    } catch {
+      // drop slow/broken client
+    }
+  }
+
   subscribe(conn: ClientConnection): void {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
     this.subscribers.set(conn.id, conn);
+    for (const m of this.turnBuffer) {
+      this.sendEventTo(conn, m);
+    }
   }
 
   unsubscribe(connId: string): void {
@@ -96,8 +119,12 @@ export class SessionRunner {
   }
 
   pushEvent(message: unknown): void {
+    this.turnBuffer.push(message);
+    if (this.turnBuffer.length > this.maxTurnBuffer) this.turnBuffer.shift();
     const sid = this.sessionId ?? this.runtimeId;
     this.notify("session/event", { sessionId: sid, runtimeId: this.runtimeId, message });
+    const m = message as { type?: string };
+    if (m.type === "result") this.clearTurnBuffer();
   }
 
   setStatus(status: SessionStatus, error?: string): void {
@@ -207,10 +234,12 @@ export class SessionRunner {
   }
 
   send(content: string): Promise<void> {
+    this.clearTurnBuffer();
     return this.engine.send(this.runtimeId, content);
   }
 
   interrupt(): Promise<void> {
+    this.clearTurnBuffer();
     this.setStatus("interrupted");
     return this.engine.interrupt(this.runtimeId);
   }

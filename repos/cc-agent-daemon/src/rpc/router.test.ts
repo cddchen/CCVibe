@@ -194,7 +194,7 @@ describe("dispatch", () => {
       expect(res).toMatchObject({
         jsonrpc: "2.0",
         id: 22,
-        result: { attached: true, sessionId },
+        result: { attached: true, sessionId, status: expect.any(String) },
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });

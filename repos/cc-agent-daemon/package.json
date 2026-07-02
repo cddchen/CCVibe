@@ -6,6 +6,10 @@
   "description": "Local daemon wrapping Claude Agent SDK for multi-client session management",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:lan": "tsx watch src/index.ts --listen 0.0.0.0:4733 --token cddchen",
+    "dev:web": "npm run dev --prefix web",
+    "dev:all": "concurrently -k -n daemon,web -c blue,magenta \"npm run dev:lan\" \"npm run dev:web\"",
+    "install:all": "npm install --legacy-peer-deps && npm install --prefix web",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
@@ -22,7 +26,9 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "concurrently": "^9.1.2",
     "@types/node": "^22.13.10",
+    "happy-dom": "^20.10.6",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vitest": "^3.0.9"

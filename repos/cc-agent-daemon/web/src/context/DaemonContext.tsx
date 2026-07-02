@@ -10,6 +10,7 @@ type Ctx = {
   error: string | null;
   token: string;
   wsUrl: string;
+  reconnectNonce: number;
   connect: (wsUrl: string, token: string) => void;
   disconnect: () => void;
 };
@@ -25,6 +26,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(() => (localStorage.getItem("cc_daemon_token") ? 1 : 0));
+  const [reconnectNonce, setReconnectNonce] = useState(0);
 
   const connect = (nextWsUrl: string, nextToken: string) => {
     localStorage.setItem("cc_daemon_ws_url", nextWsUrl);
@@ -44,6 +46,12 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (attempt === 0) return;
     const c = new DaemonClient(token);
+    c.onStatus = (phase) => {
+      if (phase === "connecting") setStatus("connecting");
+      else if (phase === "connected") setStatus("connected");
+      else if (phase === "disconnected") setStatus("disconnected");
+    };
+    c.onReconnect = () => setReconnectNonce((n) => n + 1);
     setClient(c);
     setStatus("connecting");
     setError(null);
@@ -60,9 +68,19 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   }, [attempt]);
 
   const value = useMemo(
-    () => ({ client, status, connected: status === "connected", error, token, wsUrl, connect, disconnect }),
+    () => ({
+      client,
+      status,
+      connected: status === "connected",
+      error,
+      token,
+      wsUrl,
+      reconnectNonce,
+      connect,
+      disconnect,
+    }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [client, status, error, token, wsUrl],
+    [client, status, error, token, wsUrl, reconnectNonce],
   );
 
   return <DaemonCtx.Provider value={value}>{children}</DaemonCtx.Provider>;

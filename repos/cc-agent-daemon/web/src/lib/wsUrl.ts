@@ -1,5 +1,12 @@
-export function defaultWsBase(loc: { protocol: string; hostname: string } = location): string {
+export function defaultWsBase(
+  loc: { protocol: string; hostname: string; port?: string } = location,
+  opts?: { viteDevPort?: string },
+): string {
   const proto = loc.protocol === "https:" ? "wss:" : "ws:";
+  const viteDevPort = opts?.viteDevPort ?? "5174";
+  if (loc.port === viteDevPort) {
+    return `${proto}//${loc.hostname}:${loc.port}`;
+  }
   return `${proto}//${loc.hostname}:4733`;
 }
 

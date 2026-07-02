@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { useDaemon } from "../context/DaemonContext";
+import { useActiveSessions } from "../hooks/useActiveSessions";
+import { activeBadgeClassName, activeBadgeLabel } from "../lib/activeSessionBadge";
 import {
   getCachedSessionList,
   loadSessionList,
@@ -24,7 +26,8 @@ function formatTime(iso?: string) {
 }
 
 export function HomePage() {
-  const { client, connected, error, disconnect } = useDaemon();
+  const { client, connected, error, disconnect, reconnectNonce } = useDaemon();
+  const activeMap = useActiveSessions(client, connected, reconnectNonce);
   const [sessionList, setSessionList] = useState<SessionListData>(() => getCachedSessionList() ?? { workspaces: [], sessionsByPath: {} });
   const [loading, setLoading] = useState(false);
   const [newPath, setNewPath] = useState("");
@@ -155,7 +158,14 @@ export function HomePage() {
                               className="block px-4 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-800/40"
                             >
                               <div className="flex justify-between gap-2 text-sm">
-                                <span className="truncate font-mono text-zinc-700 dark:text-zinc-300">{s.sessionId.slice(0, 8)}…</span>
+                                <span className="flex min-w-0 items-center gap-2 truncate font-mono text-zinc-700 dark:text-zinc-300">
+                                  {s.sessionId.slice(0, 8)}…
+                                  {activeMap[s.sessionId] && (
+                                    <span className={activeBadgeClassName(activeMap[s.sessionId])}>
+                                      {activeBadgeLabel(activeMap[s.sessionId])}
+                                    </span>
+                                  )}
+                                </span>
                                 <span className="shrink-0 text-zinc-500">{formatTime(s.lastTimestamp)}</span>
                               </div>
                               <div className="mt-0.5 text-xs text-zinc-500">{s.messageCount} 条消息</div>

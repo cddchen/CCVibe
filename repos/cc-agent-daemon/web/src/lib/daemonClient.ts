@@ -33,12 +33,24 @@ export type { ChatMessage } from "./messageBlocks";
 
 type NotificationHandler = (method: string, params: unknown) => void;
 
+export type ConnectionPhase = "connecting" | "connected" | "disconnected";
+
+export function reconnectDelayMs(attempt: number): number {
+  return Math.min(1000 * 2 ** attempt, 30_000);
+}
+
 export class DaemonClient {
   private ws: WebSocket | null = null;
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private onNotify: NotificationHandler | null = null;
   private token: string;
+  private intentionalClose = false;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onStatus: ((phase: ConnectionPhase) => void) | null = null;
+  onReconnect: (() => void) | null = null;
 
   constructor(token = "") {
     this.token = token || localStorage.getItem("cc_daemon_token") || "";
@@ -54,6 +66,37 @@ export class DaemonClient {
   }
 
   connect(): Promise<void> {
+    this.intentionalClose = false;
+    this.reconnectAttempts = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    return this.openSocket();
+  }
+
+  private rejectAllPending(reason: Error): void {
+    for (const p of this.pending.values()) p.reject(reason);
+    this.pending.clear();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.intentionalClose) return;
+    const delay = reconnectDelayMs(this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.openSocket()
+        .then(() => {
+          this.reconnectAttempts = 0;
+          this.onStatus?.("connected");
+          this.onReconnect?.();
+        })
+        .catch(() => this.scheduleReconnect());
+    }, delay);
+  }
+
+  private openSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const base = localStorage.getItem("cc_daemon_ws_url")?.trim() || defaultWsBase();
       this.ws = new WebSocket(buildWsUrl(base, this.token));
@@ -66,6 +109,13 @@ export class DaemonClient {
         }
       };
       this.ws.onerror = () => reject(new Error("WebSocket error"));
+      this.ws.onclose = () => {
+        this.rejectAllPending(new Error("connection closed"));
+        this.ws = null;
+        if (this.intentionalClose) return;
+        this.onStatus?.("connecting");
+        this.scheduleReconnect();
+      };
       this.ws.onmessage = (ev) => {
         const data = JSON.parse(ev.data as string) as { id?: number; method?: string; params?: unknown; result?: unknown; error?: { message: string } };
         if (data.id !== undefined && data.method === undefined) {
@@ -93,7 +143,13 @@ export class DaemonClient {
   }
 
   close() {
+    this.intentionalClose = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.ws?.close();
+    this.ws = null;
   }
 }
 

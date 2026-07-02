@@ -175,7 +175,11 @@ const handlers: Record<string, Handler> = {
     if (!runner) return { attached: false };
     conn.permissionClientId = conn.id;
     runner.subscribe(conn);
-    return { attached: true, sessionId: runner.sessionId ?? p.sessionId };
+    return {
+      attached: true,
+      sessionId: runner.sessionId ?? p.sessionId,
+      status: runner.getStatus(),
+    };
   }),
 
   "session.attach": withSchema(sessionIdParams, async (ctx, conn, p) => {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { chatNotifyBindOptions, shouldReplaceChatUrlFromInit } from "./chatSessionRouting";
+import {
+  chatNotifyBindOptions,
+  liveTurnIsBusy,
+  runStateFromDaemonStatus,
+  shouldReplaceChatUrlFromInit,
+} from "./chatSessionRouting";
 
 describe("chatSessionRouting", () => {
   it("keeps existing history-session URLs stable when resumed SDK init arrives", () => {
@@ -16,5 +21,20 @@ describe("chatSessionRouting", () => {
 
   it("accepts any notification before a live session exists", () => {
     expect(chatNotifyBindOptions(null)).toEqual({ acceptAny: true });
+  });
+
+  it("liveTurnIsBusy is true only for running or starting", () => {
+    expect(liveTurnIsBusy("running")).toBe(true);
+    expect(liveTurnIsBusy("starting")).toBe(true);
+    expect(liveTurnIsBusy("completed")).toBe(false);
+    expect(liveTurnIsBusy(undefined)).toBe(false);
+  });
+
+  it("runStateFromDaemonStatus maps daemon lifecycle to UI state", () => {
+    expect(runStateFromDaemonStatus("running")).toBe("running");
+    expect(runStateFromDaemonStatus("starting")).toBe("running");
+    expect(runStateFromDaemonStatus("completed")).toBe("completed");
+    expect(runStateFromDaemonStatus("error")).toBe("error");
+    expect(runStateFromDaemonStatus(undefined)).toBe("completed");
   });
 });

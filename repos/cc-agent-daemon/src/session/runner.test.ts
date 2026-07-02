@@ -115,4 +115,45 @@ describe("SessionRunner", () => {
       expect(reclaim).not.toHaveBeenCalled();
     });
   });
+
+  describe("turn buffer replay", () => {
+    it("replays buffered events to a new subscriber", () => {
+      const runner = new SessionRunner("r1", "/tmp", mockEngine());
+      runner.bindSessionId("sess-1");
+      runner.pushEvent({ type: "stream_event", n: 1 });
+      runner.pushEvent({ type: "stream_event", n: 2 });
+      const late = mockConn();
+      runner.subscribe(late);
+      expect(late._sent).toHaveLength(2);
+      expect(late._sent[0]).toMatchObject({
+        method: "session/event",
+        params: { sessionId: "sess-1", runtimeId: "r1", message: { type: "stream_event", n: 1 } },
+      });
+      expect(late._sent[1]).toMatchObject({
+        method: "session/event",
+        params: { message: { type: "stream_event", n: 2 } },
+      });
+    });
+
+    it("does not replay after terminal result clears buffer", () => {
+      const runner = new SessionRunner("r1", "/tmp", mockEngine());
+      runner.bindSessionId("sess-1");
+      runner.pushEvent({ type: "assistant" });
+      runner.pushEvent({ type: "result", subtype: "success" });
+      const late = mockConn();
+      runner.subscribe(late);
+      expect(late._sent).toHaveLength(0);
+    });
+
+    it("clears buffer on send so new subscriber does not see prior turn", async () => {
+      const engine = mockEngine();
+      const runner = new SessionRunner("r1", "/tmp", engine);
+      runner.bindSessionId("sess-1");
+      runner.pushEvent({ type: "stream_event", old: true });
+      await runner.send("next question");
+      const late = mockConn();
+      runner.subscribe(late);
+      expect(late._sent).toHaveLength(0);
+    });
+  });
 });

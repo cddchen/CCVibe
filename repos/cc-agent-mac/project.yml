@@ -1,0 +1,53 @@
+name: CCAgent
+options:
+  bundleIdPrefix: com.ccagent
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: 2.4.0
+targets:
+  CCAgent:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: MarkdownUI
+        product: MarkdownUI
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.ccagent.mac
+      MARKETING_VERSION: "0.1.0"
+      CURRENT_PROJECT_VERSION: "1"
+      SWIFT_VERSION: "5.9"
+      ENABLE_HARDENED_RUNTIME: YES
+      CODE_SIGN_ENTITLEMENTS: CCAgent.entitlements
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleName: CCAgent
+        CFBundleDisplayName: CC Agent
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSPrincipalClass: NSApplication
+  CCAgentTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/CCAgentTests
+    dependencies:
+      - target: CCAgent
+    settings:
+      GENERATE_INFOPLIST_FILE: YES
+schemes:
+  CCAgent:
+    build:
+      targets:
+        CCAgent: all
+        CCAgentTests: [test]
+    test:
+      targets:
+        - CCAgentTests
