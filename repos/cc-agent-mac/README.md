@@ -33,3 +33,18 @@ xcodebuild -scheme CCAgent -destination 'platform=macOS' build
 ```bash
 xcodebuild -scheme CCAgent -destination 'platform=macOS' test
 ```
+
+## Milestone Baseline
+
+M0 需要的工程基线已经保留：`project.yml`、`Sources/`、`Tests/CCAgentTests/`、entitlements、Info.plist 和 MarkdownUI 依赖都在 `repos/cc-agent-mac` 下维护。
+
+当前和 Web 端仍需继续对齐的核心模块清单：
+
+- `daemonClient`
+- `messageBlocks`
+- `permissionResponses`
+- `askUserQuestion`
+- `chatSessionRouting`
+- `sessionListCache`
+- `useActiveSessions`
+- `uiPreferences`

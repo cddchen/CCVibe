@@ -26,6 +26,6 @@ enum DirectoryExpansionStore {
     }
 
     static func isExpanded(path: String, prefs: [String: Bool]) -> Bool {
-        prefs[path] ?? true
+        prefs[path] ?? false
     }
 }

@@ -54,6 +54,16 @@ enum JSONValue: Codable, Equatable, Sendable {
         return nil
     }
 
+    var boolValue: Bool? {
+        if case .bool(let b) = self { return b }
+        return nil
+    }
+
+    var numberValue: Double? {
+        if case .number(let n) = self { return n }
+        return nil
+    }
+
     subscript(key: String) -> JSONValue? {
         objectValue?[key]
     }
@@ -76,6 +86,23 @@ enum JSONValue: Codable, Equatable, Sendable {
         case let a as [Any]: return .array(a.map { encodeAny($0) })
         case let d as [String: Any]: return encodeObject(d)
         default: return .string(String(describing: value))
+        }
+    }
+
+    func toFoundationValue() -> Any {
+        switch self {
+        case .string(let s):
+            return s
+        case .number(let n):
+            return n
+        case .bool(let b):
+            return b
+        case .null:
+            return NSNull()
+        case .array(let a):
+            return a.map { $0.toFoundationValue() }
+        case .object(let o):
+            return Dictionary(uniqueKeysWithValues: o.map { ($0.key, $0.value.toFoundationValue()) })
         }
     }
 }

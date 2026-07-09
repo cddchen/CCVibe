@@ -9,6 +9,7 @@ struct CCAgentApp: App {
             RootView()
                 .environmentObject(app)
                 .frame(minWidth: 900, minHeight: 600)
+                .preferredColorScheme(Theme.colorScheme(app.theme))
         }
     }
 }
@@ -18,13 +19,9 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if app.isSessionUnlocked && app.isConnected {
-                switch app.route {
-                case .sessionList:
-                    SessionListView()
-                case .chat(let path, let sid):
-                    ChatView(workspacePath: path, historySessionId: sid)
-                }
+            if app.isSessionUnlocked && app.client.phase != .disconnected {
+                // One stable shell after login: sidebar never remounts when opening/switching sessions.
+                ChatView()
             } else {
                 LoginView()
             }

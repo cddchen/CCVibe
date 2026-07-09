@@ -19,7 +19,12 @@ struct TrustPromptView: View {
             }
         }
         .padding(24)
-        .glassCard()
+        .background(Theme.controlBackground, in: RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+                .stroke(Theme.separator.opacity(0.45), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
         .frame(maxWidth: 360)
     }
 }

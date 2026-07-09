@@ -11,14 +11,13 @@ struct LoginView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [.blue.opacity(0.15), .purple.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                .ignoresSafeArea()
-            VStack(spacing: 20) {
+            Theme.background.ignoresSafeArea()
+            VStack(spacing: Theme.Spacing.xlarge) {
                 Text("CC Agent")
                     .font(.largeTitle.bold())
-                VStack(alignment: .leading, spacing: 12) {
-                    labeled("域名 / 主机") {
-                        TextField("127.0.0.1", text: $host)
+                VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+                    labeled("域名 / 主机或 WS 地址") {
+                        TextField("me.ts.example.com 或 ws://host:4733", text: $host)
                             .textFieldStyle(.roundedBorder)
                     }
                     HStack {
@@ -29,13 +28,16 @@ struct LoginView: View {
                         }
                         Toggle("TLS (wss)", isOn: $useTLS)
                     }
+                    Text("Web 开发页是 5174；daemon 默认 4733。远程若 Vite 已代理 /ws，两者都可。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     labeled("Token") {
                         HStack {
                             if showToken {
-                                TextField("token", text: $token)
+                                TextField("daemon --token", text: $token)
                                     .textFieldStyle(.roundedBorder)
                             } else {
-                                SecureField("token", text: $token)
+                                SecureField("daemon --token", text: $token)
                                     .textFieldStyle(.roundedBorder)
                             }
                             Button(showToken ? "隐藏" : "显示") { showToken.toggle() }
@@ -45,7 +47,14 @@ struct LoginView: View {
                         Text("连接失败：\(err)")
                             .foregroundStyle(.red)
                             .font(.caption)
+                            .textSelection(.enabled)
                     }
+                    Picker("主题", selection: Binding(get: { app.theme }, set: { app.setTheme($0) })) {
+                        Text("系统").tag(AppTheme.system)
+                        Text("浅色").tag(AppTheme.light)
+                        Text("深色").tag(AppTheme.dark)
+                    }
+                    .pickerStyle(.segmented)
                     Button(action: submit) {
                         HStack(spacing: 8) {
                             if connecting || app.client.phase == .connecting {
@@ -61,8 +70,14 @@ struct LoginView: View {
                 }
                 .padding(24)
                 .frame(maxWidth: 420)
-                .glassCard()
+                .background(Theme.controlBackground, in: RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+                        .stroke(Theme.separator.opacity(0.45), lineWidth: 0.5)
+                }
+                .shadow(color: .black.opacity(0.08), radius: 16, y: 8)
             }
+            .padding(24)
         }
         .onAppear {
             loadSaved()
@@ -90,14 +105,20 @@ struct LoginView: View {
     }
 
     private func submit() {
-        guard let portNum = Int(port) else { return }
+        guard let config = WSUrl.resolveLoginInput(hostOrUrl: host, portField: port, useTLS: useTLS) else {
+            app.connectionError = "无法解析连接地址"
+            return
+        }
+        port = String(config.port)
+        useTLS = config.useTLS
+        host = config.host
         connecting = true
         app.connectionError = nil
         Task {
             await app.connect(
-                host: host.trimmingCharacters(in: .whitespaces),
-                port: portNum,
-                useTLS: useTLS,
+                host: config.host,
+                port: config.port,
+                useTLS: config.useTLS,
                 token: token
             )
             connecting = false

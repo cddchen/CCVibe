@@ -63,6 +63,13 @@ struct ModelOption: Identifiable, Hashable, Sendable {
     let label: String
 }
 
+enum SessionRunState: String, Sendable {
+    case running
+    case completed
+    case interrupted
+    case error
+}
+
 enum DaemonConstants {
     static let modelOptions: [ModelOption] = [
         .init(id: "claude-sonnet-4-6", label: "Sonnet 4.6"),
@@ -116,7 +123,8 @@ struct TrustInfo: Sendable {
 
 enum ActiveKind: Sendable {
     case running
-    case alive
+    case starting
+    case attachable
 }
 
 struct ActiveSessionRow: Decodable, Sendable {
@@ -148,7 +156,51 @@ func sessionGroups(from data: SessionListData) -> [SessionGroup] {
 func mapActiveSessions(_ rows: [ActiveSessionRow]) -> [String: ActiveKind] {
     var out: [String: ActiveKind] = [:]
     for row in rows {
-        out[row.sessionId] = row.status == "running" ? .running : .alive
+        switch row.status {
+        case "running":
+            out[row.sessionId] = .running
+        case "starting":
+            out[row.sessionId] = .starting
+        default:
+            out[row.sessionId] = .attachable
+        }
     }
     return out
+}
+
+func runStateFromDaemonStatus(_ status: String?) -> SessionRunState {
+    switch status {
+    case "running", "starting":
+        return .running
+    case "error":
+        return .error
+    case "interrupted":
+        return .interrupted
+    default:
+        return .completed
+    }
+}
+
+func displayNameForWorkspacePath(_ path: String) -> String {
+    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "工作区" }
+    let name = (trimmed as NSString).lastPathComponent
+    return name.isEmpty || name == "/" ? trimmed : name
+}
+
+func displayTitleForSession(_ session: HistorySession, workspacePath: String) -> String {
+    let workspaceName = displayNameForWorkspacePath(workspacePath)
+    guard !workspaceName.isEmpty else {
+        return "会话 \(String(session.sessionId.prefix(8)))…"
+    }
+    return workspaceName
+}
+
+func displaySubtitleForSession(_ session: HistorySession, activeKind: ActiveKind?) -> String {
+    var parts = ["\(session.messageCount) 条消息"]
+    if activeKind != nil {
+        parts.append("活跃")
+    }
+    parts.append(String(session.sessionId.prefix(8)) + "…")
+    return parts.joined(separator: " · ")
 }

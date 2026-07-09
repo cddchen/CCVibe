@@ -38,6 +38,55 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
     }
 }
 
+struct HistoryJsonlEntry: Codable, Sendable {
+    let type: String?
+    let subtype: String?
+    let uuid: String?
+    let parentUuid: String?
+    let timestamp: String?
+    let duration_ms: Double?
+    let durationMs: Double?
+    let elapsed_ms: Double?
+    let elapsedMs: Double?
+    let isCompactSummary: Bool?
+    let isVisibleInTranscriptOnly: Bool?
+    let message: HistoryMessage?
+
+    struct HistoryMessage: Codable, Sendable {
+        let content: JSONValue?
+        let model: String?
+        let usage: JSONValue?
+    }
+
+    init(
+        type: String?,
+        subtype: String?,
+        uuid: String?,
+        parentUuid: String?,
+        timestamp: String?,
+        duration_ms: Double?,
+        durationMs: Double?,
+        elapsed_ms: Double?,
+        elapsedMs: Double?,
+        isCompactSummary: Bool?,
+        isVisibleInTranscriptOnly: Bool?,
+        message: HistoryMessage?
+    ) {
+        self.type = type
+        self.subtype = subtype
+        self.uuid = uuid
+        self.parentUuid = parentUuid
+        self.timestamp = timestamp
+        self.duration_ms = duration_ms
+        self.durationMs = durationMs
+        self.elapsed_ms = elapsed_ms
+        self.elapsedMs = elapsedMs
+        self.isCompactSummary = isCompactSummary
+        self.isVisibleInTranscriptOnly = isVisibleInTranscriptOnly
+        self.message = message
+    }
+}
+
 enum MessageBlocksEngine {
     static func isTurnDone(_ msg: JSONValue) -> Bool {
         guard msg["type"]?.stringValue == "result" else { return false }
@@ -156,6 +205,126 @@ enum MessageBlocksEngine {
         }
     }
 
+    static func isNonDialogHistoryEntry(_ entry: HistoryJsonlEntry) -> Bool {
+        entry.isCompactSummary == true ||
+        entry.isVisibleInTranscriptOnly == true ||
+        entry.subtype == "compact_boundary"
+    }
+
+    static func historyEntriesToChatMessages(_ entries: [HistoryJsonlEntry]) -> [ChatMessage] {
+        var out: [ChatMessage] = []
+        var group: [HistoryJsonlEntry] = []
+
+        func flushAssistantGroup() {
+            guard !group.isEmpty else { return }
+            var blocks: [MessageBlock] = []
+            var model: String?
+            var metrics: MessageMetrics?
+            for entry in group {
+                blocks = mergeBlockLists(blocks, asBlocks(entry.message?.content))
+                model = model ?? entry.message?.model
+                metrics = mergeMetrics(metrics, metricsFromHistoryEntry(entry))
+            }
+            guard !blocks.isEmpty else {
+                group.removeAll()
+                return
+            }
+            let leaf = group[group.count - 1]
+            out.append(ChatMessage(
+                id: leaf.uuid ?? UUID().uuidString,
+                role: "assistant",
+                content: .blocks(blocks),
+                streaming: false,
+                model: model,
+                metrics: metrics
+            ))
+            group.removeAll()
+        }
+
+        for entry in entries {
+            if isNonDialogHistoryEntry(entry) {
+                flushAssistantGroup()
+                continue
+            }
+            if isToolResultOnlyUser(entry) { continue }
+            if entry.type == "assistant" {
+                group.append(entry)
+                continue
+            }
+            flushAssistantGroup()
+            if let message = historyEntryToChatMessage(entry) {
+                out.append(message)
+            }
+        }
+        flushAssistantGroup()
+        return out
+    }
+
+    static func historyEntryToChatMessage(_ entry: HistoryJsonlEntry) -> ChatMessage? {
+        if isNonDialogHistoryEntry(entry) { return nil }
+        guard entry.type == "user" || entry.type == "assistant" else { return nil }
+
+        if entry.type == "user" {
+            guard let content = entry.message?.content else { return nil }
+            if let arr = content.arrayValue {
+                let onlyToolResult = arr.allSatisfy { item in
+                    item.objectValue?["type"]?.stringValue == "tool_result"
+                }
+                if onlyToolResult { return nil }
+                let text = arr.compactMap { item -> String? in
+                    let obj = item.objectValue
+                    return obj?["type"]?.stringValue == "text" ? obj?["text"]?.stringValue : nil
+                }.joined(separator: "\n")
+                guard !text.isEmpty else { return nil }
+                return ChatMessage(id: entry.uuid ?? UUID().uuidString, role: "user", content: .plain(text), streaming: false)
+            }
+            if let text = content.stringValue, !text.isEmpty {
+                return ChatMessage(id: entry.uuid ?? UUID().uuidString, role: "user", content: .plain(text), streaming: false)
+            }
+            return nil
+        }
+
+        let blocks = asBlocks(entry.message?.content)
+        guard !blocks.isEmpty else { return nil }
+        return ChatMessage(
+            id: entry.uuid ?? UUID().uuidString,
+            role: "assistant",
+            content: .blocks(blocks),
+            streaming: false,
+            model: entry.message?.model,
+            metrics: metricsFromHistoryEntry(entry)
+        )
+    }
+
+    static func buildToolResultsFromHistory(_ entries: [HistoryJsonlEntry]) -> [String: ToolResultState] {
+        var out: [String: ToolResultState] = [:]
+        for entry in entries {
+            if isNonDialogHistoryEntry(entry) { continue }
+            guard entry.type == "user", let arr = entry.message?.content?.arrayValue else { continue }
+            for item in arr {
+                guard let obj = item.objectValue,
+                      obj["type"]?.stringValue == "tool_result",
+                      let id = obj["tool_use_id"]?.stringValue else { continue }
+                out[id] = ToolResultState(
+                    status: obj["is_error"]?.boolValue == true ? .error : .completed,
+                    content: toolResultContent(obj["content"]),
+                    isError: obj["is_error"]?.boolValue == true
+                )
+            }
+        }
+        return out
+    }
+
+    static func pendingToolsFromBlocks(_ blocks: [MessageBlock]) -> [String: ToolResultState] {
+        var out: [String: ToolResultState] = [:]
+        for block in blocks {
+            if case .toolUse(let id, _, _) = block {
+                out[id] = ToolResultState(status: .pending, content: nil, isError: false)
+            }
+        }
+        return out
+    }
+
     private static func asBlocks(_ raw: JSONValue?) -> [MessageBlock] {
         guard let arr = raw?.arrayValue else { return [] }
         var out: [MessageBlock] = []
@@ -264,6 +433,27 @@ enum MessageBlocksEngine {
         return TokenUsage(input: input, output: output, total: total)
     }
 
+    private static func metricsFromHistoryEntry(_ entry: HistoryJsonlEntry) -> MessageMetrics? {
+        let usage = usageFromObject(entry.message?.usage)
+        let elapsed = elapsedFromHistoryEntry(entry)
+        if usage == nil && elapsed == nil { return nil }
+        return MessageMetrics(usage: usage, elapsedSeconds: elapsed)
+    }
+
+    private static func elapsedFromHistoryEntry(_ entry: HistoryJsonlEntry) -> Double? {
+        if let seconds = entry.duration_ms ?? entry.durationMs ?? entry.elapsed_ms ?? entry.elapsedMs {
+            return round(seconds / 100.0) / 10.0
+        }
+        return nil
+    }
+
+    private static func isToolResultOnlyUser(_ entry: HistoryJsonlEntry) -> Bool {
+        guard entry.type == "user", let arr = entry.message?.content?.arrayValue, !arr.isEmpty else { return false }
+        return arr.allSatisfy { item in
+            item.objectValue?["type"]?.stringValue == "tool_result"
+        }
+    }
+
     private static func elapsedFromObject(_ raw: JSONValue) -> Double? {
         if let o = raw.objectValue {
             if let s = asDouble(o["elapsed_seconds"] ?? o["elapsedSeconds"] ?? o["duration_seconds"]) {
@@ -290,12 +480,5 @@ enum MessageBlocksEngine {
         case .string(let s): return Double(s)
         default: return nil
         }
-    }
-}
-
-private extension JSONValue {
-    var boolValue: Bool? {
-        if case .bool(let b) = self { return b }
-        return nil
     }
 }

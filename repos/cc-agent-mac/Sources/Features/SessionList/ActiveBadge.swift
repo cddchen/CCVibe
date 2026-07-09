@@ -13,10 +13,24 @@ struct ActiveBadge: View {
     }
 
     private var label: String {
-        kind == .running ? "对话中" : "活跃"
+        switch kind {
+        case .running:
+            return "运行中"
+        case .starting:
+            return "启动中"
+        case .attachable:
+            return "可挂接"
+        }
     }
 
     private var color: Color {
-        kind == .running ? Theme.runningBadge : Theme.aliveBadge
+        switch kind {
+        case .running:
+            return Theme.runningBadge
+        case .starting:
+            return .orange
+        case .attachable:
+            return Theme.aliveBadge
+        }
     }
 }

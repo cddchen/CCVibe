@@ -60,7 +60,7 @@ enum SessionListService {
 
         let manual = try await client.callDecodable(WorkspacesResult.self, method: "workspace.list", params: [:])
         for w in manual.workspaces {
-            var shouldShow = sessionsByPath[w.path] != nil
+            var shouldShow = true
             if sessionsByPath[w.path] == nil || sessionsByPath[w.path]?.isEmpty == true {
                 do {
                     let hist = try await client.callDecodable(
@@ -69,9 +69,8 @@ enum SessionListService {
                         params: ["workspacePath": w.path]
                     )
                     sessionsByPath[w.path] = hist.sessions
-                    shouldShow = true
                 } catch {
-                    shouldShow = false
+                    sessionsByPath[w.path] = []
                 }
             }
             if shouldShow, !workspaces.contains(where: { $0.path == w.path }) {

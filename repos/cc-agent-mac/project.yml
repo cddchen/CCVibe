@@ -33,6 +33,10 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSPrincipalClass: NSApplication
+        # daemon 常用明文 ws://（局域网/Tailscale）；登录页可切换 TLS(wss)
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
   CCAgentTests:
     type: bundle.unit-test
     platform: macOS

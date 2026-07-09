@@ -13,18 +13,10 @@ struct GlassBackground: ViewModifier {
     private var glassShape: some View {
         if #available(macOS 26.0, *) {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.clear)
-                .background {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                }
+                .fill(.regularMaterial)
         } else {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                }
+                .fill(Theme.controlBackground)
         }
     }
 }
