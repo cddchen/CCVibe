@@ -243,6 +243,7 @@ enum MessageBlocksEngine {
 
         for entry in entries {
             if isNonDialogHistoryEntry(entry) {
+                // compact_boundary / summary — close current assistant group.
                 flushAssistantGroup()
                 continue
             }
@@ -251,8 +252,11 @@ enum MessageBlocksEngine {
                 group.append(entry)
                 continue
             }
-            flushAssistantGroup()
+            // Only a real dialog message (usually user text) should split bubbles.
+            // Control noise (last-prompt, mode, permission-mode, file-history-snapshot,
+            // system stop_hook/turn_duration, …) must not flush the group.
             if let message = historyEntryToChatMessage(entry) {
+                flushAssistantGroup()
                 out.append(message)
             }
         }

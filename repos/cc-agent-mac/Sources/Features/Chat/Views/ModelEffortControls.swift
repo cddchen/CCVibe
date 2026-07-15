@@ -52,15 +52,9 @@ struct ModelEffortControls: View {
 
     private var compactBody: some View {
         HStack(spacing: Theme.Spacing.small) {
-            compactChip {
-                modelPicker
-            }
-            compactChip {
-                effortPicker
-            }
-            compactChip {
-                permissionPicker
-            }
+            modelPicker
+            effortPicker
+            permissionPicker
         }
         .font(.caption)
     }
@@ -110,17 +104,6 @@ struct ModelEffortControls: View {
         .pickerStyle(.menu)
         .labelsHidden()
         .onChange(of: permissionMode) { _, v in onPermissionChange(v) }
-    }
-
-    private func compactChip<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Theme.secondaryFill, in: Capsule())
-            .overlay {
-                Capsule()
-                    .stroke(Theme.separator.opacity(0.45), lineWidth: 0.5)
-            }
     }
 
     private var isCustomModelSelected: Bool {

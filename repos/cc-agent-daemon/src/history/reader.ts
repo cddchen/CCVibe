@@ -158,8 +158,13 @@ async function readJsonl(filePath: string): Promise<JsonlEntry[]> {
 /** Rebuild linear chain via parentUuid (best-effort). */
 export function buildMessageChain(entries: JsonlEntry[]): JsonlEntry[] {
   const byUuid = new Map<string, JsonlEntry>();
-  for (const e of entries) {
-    if (e.uuid) byUuid.set(e.uuid, e);
+  const indexByUuid = new Map<string, number>();
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.uuid) {
+      byUuid.set(e.uuid, e);
+      indexByUuid.set(e.uuid, i);
+    }
   }
   const leaves = entries.filter((e) => e.uuid && !entries.some((x) => x.parentUuid === e.uuid));
   const leaf = leaves[leaves.length - 1] ?? entries[entries.length - 1];
@@ -174,5 +179,83 @@ export function buildMessageChain(entries: JsonlEntry[]): JsonlEntry[] {
     const parentId: string | null | undefined = cur.parentUuid;
     cur = parentId ? byUuid.get(parentId) : undefined;
   }
-  return chain.length ? chain : entries;
+  if (!chain.length) return entries;
+
+  // Parallel tool calls write multiple tool_result user rows that share a parent
+  // with the spine (or parent the tool_use assistant). parentUuid walk only keeps
+  // one child path, so re-attach those sibling tool_results or tools stay "执行中".
+  return attachMissingToolResults(chain, entries, indexByUuid);
+}
+
+function toolUseIdsIn(entries: JsonlEntry[]): Set<string> {
+  const ids = new Set<string>();
+  for (const e of entries) {
+    const content = (e.message as { content?: unknown } | undefined)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const b = block as { type?: string; id?: string };
+      if (b?.type === "tool_use" && typeof b.id === "string") ids.add(b.id);
+    }
+  }
+  return ids;
+}
+
+function isToolResultOnlyEntry(entry: JsonlEntry): boolean {
+  if (entry.type !== "user") return false;
+  const content = (entry.message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((block) => {
+    const b = block as { type?: string };
+    return typeof block === "object" && block != null && b.type === "tool_result";
+  });
+}
+
+function toolResultIds(entry: JsonlEntry): string[] {
+  const content = (entry.message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return [];
+  const ids: string[] = [];
+  for (const block of content) {
+    const b = block as { type?: string; tool_use_id?: string };
+    if (b?.type === "tool_result" && typeof b.tool_use_id === "string") ids.push(b.tool_use_id);
+  }
+  return ids;
+}
+
+function attachMissingToolResults(
+  chain: JsonlEntry[],
+  all: JsonlEntry[],
+  indexByUuid: Map<string, number>,
+): JsonlEntry[] {
+  const onChain = new Set(chain.map((e) => e.uuid).filter((u): u is string => !!u));
+  const needed = toolUseIdsIn(chain);
+  if (needed.size === 0) return chain;
+
+  const missing = all.filter((e) => {
+    if (!e.uuid || onChain.has(e.uuid) || !isToolResultOnlyEntry(e)) return false;
+    return toolResultIds(e).some((id) => needed.has(id));
+  });
+  if (missing.length === 0) return chain;
+
+  missing.sort((a, b) => (indexByUuid.get(a.uuid!) ?? 0) - (indexByUuid.get(b.uuid!) ?? 0));
+
+  const out = [...chain];
+  for (const result of missing) {
+    const parentId = result.parentUuid ?? undefined;
+    let insertAt = out.length;
+    if (parentId) {
+      const parentIdx = out.findIndex((e) => e.uuid === parentId);
+      if (parentIdx >= 0) insertAt = parentIdx + 1;
+    }
+    // Keep file order among siblings inserted at the same parent.
+    while (
+      insertAt < out.length &&
+      out[insertAt]?.parentUuid === parentId &&
+      (indexByUuid.get(out[insertAt].uuid!) ?? 0) < (indexByUuid.get(result.uuid!) ?? 0)
+    ) {
+      insertAt += 1;
+    }
+    out.splice(insertAt, 0, result);
+    onChain.add(result.uuid!);
+  }
+  return out;
 }

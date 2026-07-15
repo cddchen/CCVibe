@@ -35,11 +35,23 @@ final class TurnStream: ObservableObject {
     }
 
     func onSdkEvent(_ msg: JSONValue) {
-        if turnId == nil, MessageBlocksEngine.isTurnDone(msg) || msg["type"]?.stringValue != nil {
+        let type = msg["type"]?.stringValue
+        let turnDone = MessageBlocksEngine.isTurnDone(msg)
+
+        // Only auto-start a turn on real assistant content.
+        // Control noise (system/init, permission-mode side effects, late result)
+        // must not open an empty "思考中…" bubble.
+        if turnId == nil {
+            guard type == "assistant" || type == "stream_event" else { return }
             _ = beginTurn()
         }
         guard turnId != nil else { return }
-        if msg["type"]?.stringValue == "user" { return }
+
+        if type == "user" {
+            let applied = MessageBlocksEngine.applySdkMessage(blocks: blocks, toolResults: toolResults, msg: msg)
+            toolResults = applied.toolResults
+            return
+        }
 
         let applied = MessageBlocksEngine.applySdkMessage(blocks: blocks, toolResults: toolResults, msg: msg)
         blocks = applied.blocks
@@ -48,9 +60,9 @@ final class TurnStream: ObservableObject {
             metrics = MessageBlocksEngine.mergeMetrics(metrics, m) ?? m
         }
         if let mod = applied.model { model = mod }
-        emitPatch(streaming: !MessageBlocksEngine.isTurnDone(msg))
+        emitPatch(streaming: !turnDone)
 
-        if MessageBlocksEngine.isTurnDone(msg) {
+        if turnDone {
             endTurn()
         }
     }

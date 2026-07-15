@@ -2,7 +2,6 @@ import Foundation
 
 enum ChatPreferences {
     static let chatSidebarOpenKey = "cc_web_chat_sidebar_open"
-    static let chatFollowOutputKey = "cc_web_chat_follow_output"
 
     static func readBool(_ key: String, fallback: Bool) -> Bool {
         let defaults = UserDefaults.standard

@@ -5,11 +5,20 @@ private enum ChatSidebarSelection: Hashable {
     case session(String, String)
 }
 
+private struct ChatBottomAnchorKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct ChatView: View {
     @EnvironmentObject private var app: AppState
 
     @StateObject private var vm = ChatViewModel()
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isAtBottom = true
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -76,21 +85,9 @@ struct ChatView: View {
             systemImage: "bubble.left.and.bubble.right",
             description: Text("从侧栏选择历史会话，或在工作区中新建对话。")
         )
-        .background {
-            ZStack {
-                Theme.background
-                Theme.windowGradient
-            }
-        }
+        .background(Theme.background)
         .navigationTitle("会话")
         .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Button {
-                    toggleSidebarColumn()
-                } label: {
-                    Label("侧栏", systemImage: "sidebar.left")
-                }
-            }
             ToolbarItemGroup(placement: .primaryAction) {
                 homeToolbarActions
             }
@@ -109,12 +106,7 @@ struct ChatView: View {
                     .padding(.top, 4)
             }
         }
-        .background {
-            ZStack {
-                Theme.background
-                Theme.windowGradient
-            }
-        }
+        .background(Theme.background)
         .navigationTitle(title)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
@@ -123,20 +115,8 @@ struct ChatView: View {
                 } label: {
                     Label("返回会话", systemImage: "chevron.left")
                 }
-                Button {
-                    toggleSidebarColumn()
-                } label: {
-                    Label("侧栏", systemImage: "sidebar.left")
-                }
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                Toggle(isOn: Binding(
-                    get: { vm.followOutput },
-                    set: { _ in vm.toggleFollowOutput() }
-                )) {
-                    Label("自动跟随", systemImage: "arrow.down.to.line")
-                }
-                .toggleStyle(.button)
                 homeToolbarActions
             }
         }
@@ -267,28 +247,62 @@ struct ChatView: View {
     }
 
     private var messagesArea: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    if vm.visibleMessages.count < vm.allMessages.count {
-                        Button("加载更早消息") {
-                            vm.loadMoreHistory()
+        GeometryReader { viewport in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        if vm.visibleMessages.count < vm.allMessages.count {
+                            Button("加载更早消息") {
+                                vm.loadMoreHistory()
+                            }
+                            .buttonStyle(.bordered)
+                            .padding(.top, 8)
                         }
-                        .buttonStyle(.bordered)
-                        .padding(.top, 8)
-                    }
 
-                    ForEach(vm.visibleMessages) { message in
-                        MessageRow(message: message, toolResults: vm.toolResults)
-                            .id(message.id)
+                        ForEach(vm.visibleMessages) { message in
+                            MessageRow(message: message, toolResults: vm.toolResults)
+                                .id(message.id)
+                        }
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id("chat-bottom")
+                            .background {
+                                GeometryReader { anchor in
+                                    Color.clear.preference(
+                                        key: ChatBottomAnchorKey.self,
+                                        value: anchor.frame(in: .named("chat-scroll")).maxY
+                                    )
+                                }
+                            }
+                    }
+                    .padding(.vertical, 8)
+                }
+                .coordinateSpace(name: "chat-scroll")
+                .onPreferenceChange(ChatBottomAnchorKey.self) { bottomY in
+                    guard bottomY > 0 else { return }
+                    isAtBottom = bottomY <= viewport.size.height + 40
+                }
+                .onAppear {
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("chat-bottom", anchor: .bottom)
                     }
                 }
-                .padding(.vertical, 8)
-            }
-            .onChange(of: vm.visibleMessages.count) { _, _ in
-                guard vm.followOutput, let last = vm.visibleMessages.last else { return }
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
+                .onChange(of: vm.historySessionId) { _, _ in
+                    isAtBottom = true
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    }
+                }
+                .onChange(of: vm.visibleMessages.count) { _, _ in
+                    guard isAtBottom else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    }
+                }
+                .onChange(of: vm.streamTick) { _, _ in
+                    guard isAtBottom else { return }
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
         }
@@ -374,12 +388,6 @@ struct ChatView: View {
         }
     }
 
-    private func toggleSidebarColumn() {
-        let nextOpen = columnVisibility == .detailOnly
-        columnVisibility = nextOpen ? .all : .detailOnly
-        vm.setSidebarOpen(nextOpen)
-    }
-
     private var title: String {
         if let historySessionId = vm.historySessionId {
             return "会话 \(String(historySessionId.prefix(8)))…"
@@ -391,17 +399,7 @@ struct ChatView: View {
     }
 
     private func sessionTitle(_ session: HistorySession, in group: SessionGroup) -> String {
-        let title = displayTitleForSession(session, workspacePath: group.workspace.path)
-        guard let timestamp = session.lastTimestamp else { return title }
-        return "\(title) · \(relative(timestamp))"
-    }
-
-    private func relative(_ iso: String?) -> String {
-        guard let iso else { return "" }
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: iso) else { return iso }
-        let relative = RelativeDateTimeFormatter()
-        return relative.localizedString(for: date, relativeTo: Date())
+        displayTitleForSession(session, workspacePath: group.workspace.path)
     }
 }
 

@@ -32,19 +32,6 @@ enum Theme {
         )
     }
 
-    /// Soft lavender wash for the chat detail background.
-    static var windowGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.78, green: 0.72, blue: 1.0).opacity(0.22),
-                Color.clear,
-                Color.clear,
-            ],
-            startPoint: .topTrailing,
-            endPoint: .bottomLeading
-        )
-    }
-
     enum Spacing {
         static let xsmall: CGFloat = 4
         static let small: CGFloat = 8

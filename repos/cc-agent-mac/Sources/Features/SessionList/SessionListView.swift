@@ -362,9 +362,7 @@ struct SessionListView: View {
     }
 
     private func sessionTitle(_ session: HistorySession, in group: SessionGroup) -> String {
-        let title = displayTitleForSession(session, workspacePath: group.workspace.path)
-        guard let ts = session.lastTimestamp else { return title }
-        return "\(title) · \(relative(ts))"
+        displayTitleForSession(session, workspacePath: group.workspace.path)
     }
 
     private func relative(_ iso: String) -> String {

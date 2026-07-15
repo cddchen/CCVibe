@@ -382,6 +382,7 @@ export function historyEntriesToChatMessages(entries: HistoryJsonlEntry[]): Chat
 
   for (const entry of entries) {
     if (isNonDialogHistoryEntry(entry)) {
+      // compact_boundary / summary — close current assistant group.
       flushAssistantGroup();
       continue;
     }
@@ -392,9 +393,14 @@ export function historyEntriesToChatMessages(entries: HistoryJsonlEntry[]): Chat
       continue;
     }
 
-    flushAssistantGroup();
+    // Only a real dialog message (usually user text) should split bubbles.
+    // Control noise (last-prompt, mode, permission-mode, file-history-snapshot,
+    // system stop_hook/turn_duration, …) must not flush the group.
     const cm = historyEntryToChatMessage(entry);
-    if (cm) out.push(cm);
+    if (cm) {
+      flushAssistantGroup();
+      out.push(cm);
+    }
   }
   flushAssistantGroup();
   return out;

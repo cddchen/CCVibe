@@ -27,7 +27,7 @@ final class ChatViewModel: ObservableObject {
     @Published var model = DaemonConstants.modelOptions[0].id
     @Published var customModel = ""
     @Published var sidebarOpen = ChatPreferences.readBool(ChatPreferences.chatSidebarOpenKey, fallback: true)
-    @Published var followOutput = ChatPreferences.readBool(ChatPreferences.chatFollowOutputKey, fallback: true)
+    @Published private(set) var streamTick = 0
     @Published var effort = EffortLevel.high
     @Published var permissionMode = PermissionMode.acceptEdits
     @Published var pendingPermission: PendingPermission?
@@ -56,6 +56,9 @@ final class ChatViewModel: ObservableObject {
     private var hydratedSessionId: String?
     private var switchGeneration = 0
     private let pageSize = 80
+    /// Parked permission prompts keyed by sessionId. Survive session switches; shown when that session is frontmost again.
+    private var parkedPermissions: [String: PendingPermission] = [:]
+    private var parkedPermissionUpdatedInput: [String: String] = [:]
 
     init() {
         turnStream.onPatch = { [weak self] id, blocks, metrics, model, streaming in
@@ -101,23 +104,38 @@ final class ChatViewModel: ObservableObject {
             }
         }
 
+        let previousLive = liveSessionId
+        let previousHistory = historySessionId
         prepareConversationSwitch(workspacePath: path, sessionId: sessionId)
         guard let app else { return }
         bindNotifications(app: app)
         let generation = switchGeneration
-        Task { await self.loadAfterSwitch(generation: generation) }
+        Task {
+            await self.detachLiveSessions(client: app.client, ids: [previousLive, previousHistory])
+            guard generation == self.switchGeneration else { return }
+            await self.loadAfterSwitch(generation: generation)
+        }
     }
 
     func clearToHome() {
         guard hasActiveConversation || !workspacePath.isEmpty || historySessionId != nil || liveSessionId != nil || !allMessages.isEmpty else {
             return
         }
+        let previousLive = liveSessionId
+        let previousHistory = historySessionId
         prepareConversationSwitch(workspacePath: "", sessionId: nil)
         hasActiveConversation = false
         trusted = false
         trustPrompt = nil
-        unbind?()
-        unbind = nil
+        if let app {
+            bindNotifications(app: app)
+        } else {
+            unbind?()
+            unbind = nil
+        }
+        if let client = app?.client {
+            Task { await self.detachLiveSessions(client: client, ids: [previousLive, previousHistory]) }
+        }
     }
 
     var busy: Bool {
@@ -142,9 +160,14 @@ final class ChatViewModel: ObservableObject {
     }
 
     func detach() {
+        let previousLive = liveSessionId
+        let previousHistory = historySessionId
         unbind?()
         unbind = nil
         turnStream.reset()
+        if let client = app?.client {
+            Task { await self.detachLiveSessions(client: client, ids: [previousLive, previousHistory]) }
+        }
     }
 
     func refreshAfterReconnect() {
@@ -172,11 +195,6 @@ final class ChatViewModel: ObservableObject {
     func setSidebarOpen(_ open: Bool) {
         sidebarOpen = open
         ChatPreferences.writeBool(ChatPreferences.chatSidebarOpenKey, value: open)
-    }
-
-    func toggleFollowOutput() {
-        followOutput.toggle()
-        ChatPreferences.writeBool(ChatPreferences.chatFollowOutputKey, value: followOutput)
     }
 
     func toggleSidebarGroup(path: String) {
@@ -226,8 +244,9 @@ final class ChatViewModel: ObservableObject {
         inputText = ""
         statusText = "running"
         runState = .running
-        _ = turnStream.beginTurn()
+        // User first, then empty assistant stream bubble — beginTurn appends via onPatch.
         appendMessage(ChatMessage(id: "u-\(Int(Date().timeIntervalSince1970 * 1000))", role: "user", content: .plain(text), streaming: false))
+        _ = turnStream.beginTurn()
 
         do {
             var sid = try await ensureSession(client: client)
@@ -375,6 +394,7 @@ final class ChatViewModel: ObservableObject {
 
     private func prepareConversationSwitch(workspacePath: String, sessionId: String?) {
         switchGeneration += 1
+        parkCurrentPermissionIfNeeded()
         unbind?()
         unbind = nil
         turnStream.reset()
@@ -404,6 +424,7 @@ final class ChatViewModel: ObservableObject {
         trustPrompt = nil
         // Intentional session changes clear the composer for a clean context.
         inputText = ""
+        presentParkedPermissionIfNeeded()
     }
 
     private func loadAfterSwitch(generation: Int) async {
@@ -431,12 +452,22 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func bindNotifications(app: AppState) {
+        unbind?()
+        // Home still parks permission prompts for background live sessions.
         guard hasActiveConversation else {
-            unbind?()
-            unbind = nil
+            unbind = app.router.bind(
+                acceptAny: true,
+                sessionIds: [],
+                handlers: StreamHandlers(
+                    onSdkEvent: { _, _ in },
+                    onStatus: { _, _, _ in },
+                    onPermission: { [weak self] permission in self?.handlePermission(permission) },
+                    onInit: nil
+                )
+            )
             return
         }
-        let opts = ChatSessionRouting.chatNotifyBindOptions(liveSessionId: liveSessionId)
+        let opts = ChatSessionRouting.chatNotifyBindOptions(sessionIds: Array(aliasIds))
         unbind = app.router.bind(
             acceptAny: opts.acceptAny,
             sessionIds: opts.sessionIds,
@@ -447,6 +478,20 @@ final class ChatViewModel: ObservableObject {
                 onInit: { [weak self] info, meta in self?.handleInit(info, meta: meta) }
             )
         )
+    }
+
+    private func rebindNotificationsIfNeeded() {
+        guard let app else { return }
+        bindNotifications(app: app)
+    }
+
+    private func detachLiveSessions(client: DaemonClient?, ids: [String?]) async {
+        guard let client else { return }
+        var seen = Set<String>()
+        for id in ids {
+            guard let id, !id.isEmpty, seen.insert(id).inserted else { continue }
+            _ = try? await client.call(method: "session.detach", params: ["sessionId": id])
+        }
     }
 
     private func loadSettings(client: DaemonClient) async {
@@ -485,6 +530,7 @@ final class ChatViewModel: ObservableObject {
             toolResults = historyToolResults
             allMessages = MessageBlocksEngine.historyEntriesToChatMessages(wrap.messages)
             visibleMessages = Array(allMessages.suffix(pageSize))
+            streamTick &+= 1
             hydratedSessionId = historySessionId
             statusText = ""
 
@@ -506,7 +552,9 @@ final class ChatViewModel: ObservableObject {
             if result.attached, let sessionId = result.sessionId {
                 liveSessionId = sessionId
                 registerAliases([diskSessionId, sessionId])
+                rebindNotificationsIfNeeded()
                 runState = runStateFromDaemonStatus(result.status)
+                presentParkedPermissionIfNeeded()
             } else {
                 runState = .completed
             }
@@ -561,9 +609,13 @@ final class ChatViewModel: ObservableObject {
                 "settingSources": ["user", "project"],
             ]
         )
+        // create returns runtimeId; real disk session_id arrives on system/init.
         liveSessionId = created.sessionId
+        historySessionId = created.sessionId
         hydratedSessionId = created.sessionId
         registerAliases([created.sessionId])
+        upsertSidebarSession(sessionId: created.sessionId)
+        activeMap[created.sessionId] = .running
         app?.openChat(workspacePath: workspacePath, sessionId: created.sessionId)
         _ = try await client.call(method: "session.attach", params: ["sessionId": created.sessionId])
         return created.sessionId
@@ -587,7 +639,6 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func handlePermission(_ permission: PermissionRequest) {
-        guard matches(meta: StreamEventMeta(sessionId: permission.sessionId, runtimeId: "", sdkSessionId: "")) else { return }
         let pending = PendingPermission(
             id: permission.requestId,
             sessionId: permission.sessionId,
@@ -595,14 +646,69 @@ final class ChatViewModel: ObservableObject {
             toolName: permission.toolName,
             input: permission.input
         )
-        pendingPermission = pending
-        permissionUpdatedInput = PermissionResponses.permissionInputText(permission.input)
+        let updatedInput = PermissionResponses.permissionInputText(permission.input)
+
+        // Park for any known session id / alias so switching back can resume the prompt.
+        if !isForegroundSession(permission.sessionId) {
+            parkPermission(pending, updatedInput: updatedInput)
+            return
+        }
+
+        presentPermission(pending, updatedInput: updatedInput)
+    }
+
+    private func isForegroundSession(_ sessionId: String) -> Bool {
+        if sessionId.isEmpty { return true }
+        if aliasIds.contains(sessionId) { return true }
+        if liveSessionId == sessionId || historySessionId == sessionId { return true }
+        return false
+    }
+
+    private func parkPermission(_ permission: PendingPermission, updatedInput: String) {
+        parkedPermissions[permission.sessionId] = permission
+        parkedPermissionUpdatedInput[permission.sessionId] = updatedInput
+    }
+
+    private func parkCurrentPermissionIfNeeded() {
+        guard let pending = pendingPermission else { return }
+        parkedPermissions[pending.sessionId] = pending
+        parkedPermissionUpdatedInput[pending.sessionId] = permissionUpdatedInput
+        pendingPermission = nil
+        permissionUpdatedInput = "{}"
         permissionDenyMessage = ""
         permissionError = nil
         askSelections = []
     }
 
+    private func presentParkedPermissionIfNeeded() {
+        // Prefer exact live/history ids, then any alias-keyed parked request.
+        let candidates = [liveSessionId, historySessionId].compactMap { $0 } + Array(aliasIds)
+        for sid in candidates {
+            if let parked = parkedPermissions.removeValue(forKey: sid) {
+                let input = parkedPermissionUpdatedInput.removeValue(forKey: sid)
+                    ?? PermissionResponses.permissionInputText(parked.input)
+                presentPermission(parked, updatedInput: input)
+                return
+            }
+        }
+    }
+
+    private func presentPermission(_ permission: PendingPermission, updatedInput: String) {
+        pendingPermission = permission
+        permissionUpdatedInput = updatedInput
+        permissionDenyMessage = ""
+        permissionError = nil
+        askSelections = []
+        // Keep a parked copy so a mid-prompt session switch can restore it.
+        parkedPermissions[permission.sessionId] = permission
+        parkedPermissionUpdatedInput[permission.sessionId] = updatedInput
+    }
+
     private func clearPermissionState() {
+        if let sid = pendingPermission?.sessionId {
+            parkedPermissions.removeValue(forKey: sid)
+            parkedPermissionUpdatedInput.removeValue(forKey: sid)
+        }
         pendingPermission = nil
         permissionUpdatedInput = "{}"
         permissionDenyMessage = ""
@@ -624,6 +730,7 @@ final class ChatViewModel: ObservableObject {
             turnStream.endTurn()
             Task { [weak self] in
                 guard let self, let client = self.app?.client else { return }
+                // Re-scan history so new-session jsonl (written during the turn) shows up.
                 await self.refreshSessionList(client: client)
                 await self.refreshActiveSessions(client: client)
             }
@@ -632,12 +739,79 @@ final class ChatViewModel: ObservableObject {
 
     private func handleInit(_ info: InitInfo, meta: StreamEventMeta) {
         if let sessionId = info.sessionId {
+            let previous = liveSessionId
             liveSessionId = sessionId
             registerAliases([sessionId, meta.sessionId, meta.runtimeId, meta.sdkSessionId])
+            rebindNotificationsIfNeeded()
+            // Promote runtime placeholder → real disk session id so the sidebar row matches history.
+            if historySessionId == nil
+                || historySessionId == previous
+                || historySessionId == meta.runtimeId
+            {
+                if historySessionId != sessionId {
+                    historySessionId = sessionId
+                    app?.openChat(workspacePath: workspacePath, sessionId: sessionId)
+                }
+            }
+            upsertSidebarSession(sessionId: sessionId, replacing: previous == sessionId ? nil : previous)
+            activeMap[sessionId] = .running
+            if let previous, previous != sessionId {
+                activeMap.removeValue(forKey: previous)
+            }
+            presentParkedPermissionIfNeeded()
         }
         if let model = info.model {
             self.model = model
         }
+    }
+
+    /// Keep the current workspace's sidebar in sync before history.list* can see the jsonl.
+    private func upsertSidebarSession(sessionId: String, replacing oldId: String? = nil) {
+        guard !workspacePath.isEmpty, !sessionId.isEmpty else { return }
+        let now = ISO8601DateFormatter().string(from: Date())
+        var groups = sessionGroups
+
+        if let gi = groups.firstIndex(where: { $0.workspace.path == workspacePath }) {
+            var sessions = groups[gi].sessions
+            if let oldId, oldId != sessionId {
+                sessions.removeAll { $0.sessionId == oldId }
+            }
+            if let idx = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
+                let cur = sessions[idx]
+                sessions[idx] = HistorySession(
+                    sessionId: cur.sessionId,
+                    messageCount: max(cur.messageCount, 1),
+                    lastTimestamp: now,
+                    filePath: cur.filePath,
+                    firstTimestamp: cur.firstTimestamp
+                )
+            } else {
+                sessions.insert(
+                    HistorySession(sessionId: sessionId, messageCount: 1, lastTimestamp: now),
+                    at: 0
+                )
+            }
+            sessions.sort { ($0.lastTimestamp ?? "").compare($1.lastTimestamp ?? "") == .orderedDescending }
+            let workspace = groups[gi].workspace
+            groups[gi] = SessionGroup(
+                workspace: workspace,
+                sessions: sessions,
+                latestAt: sessions.first?.lastTimestamp ?? now
+            )
+        } else {
+            let workspace = Workspace(id: workspacePath, path: workspacePath, createdAt: now)
+            groups.insert(
+                SessionGroup(
+                    workspace: workspace,
+                    sessions: [HistorySession(sessionId: sessionId, messageCount: 1, lastTimestamp: now)],
+                    latestAt: now
+                ),
+                at: 0
+            )
+        }
+
+        groups.sort { $0.latestAt.compare($1.latestAt) == .orderedDescending }
+        sessionGroups = groups
     }
 
     private func matches(meta: StreamEventMeta) -> Bool {
@@ -648,8 +822,12 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func registerAliases(_ ids: [String]) {
+        var changed = false
         for id in ids where !id.isEmpty {
-            aliasIds.insert(id)
+            if aliasIds.insert(id).inserted { changed = true }
+        }
+        if changed {
+            rebindNotificationsIfNeeded()
         }
     }
 
@@ -672,10 +850,12 @@ final class ChatViewModel: ObservableObject {
         }
         visibleMessages = Array(allMessages.suffix(max(pageSize, visibleMessages.count)))
         toolResults = mergedToolResults
+        streamTick &+= 1
     }
 
     private func appendMessage(_ message: ChatMessage) {
         allMessages.append(message)
         visibleMessages = Array(allMessages.suffix(max(pageSize, visibleMessages.count)))
+        streamTick &+= 1
     }
 }

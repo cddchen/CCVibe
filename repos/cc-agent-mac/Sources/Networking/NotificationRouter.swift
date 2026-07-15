@@ -39,10 +39,13 @@ enum ChatSessionRouting {
     }
 
     static func chatNotifyBindOptions(liveSessionId: String?) -> (acceptAny: Bool, sessionIds: [String]) {
-        if let liveSessionId, !liveSessionId.isEmpty {
-            return (false, [liveSessionId])
-        }
-        return (true, [])
+        chatNotifyBindOptions(sessionIds: liveSessionId.map { [$0] } ?? [])
+    }
+
+    static func chatNotifyBindOptions(sessionIds: [String]) -> (acceptAny: Bool, sessionIds: [String]) {
+        let ids = Array(Set(sessionIds.filter { !$0.isEmpty }))
+        if ids.isEmpty { return (true, []) }
+        return (false, ids)
     }
 
     static func liveTurnIsBusy(status: String?) -> Bool {
@@ -96,16 +99,24 @@ final class NotificationRouter {
         let meta = StreamEventMeta(sessionId: evSid, runtimeId: runtimeId, sdkSessionId: sdkSessionId)
         let ids = [evSid, runtimeId, sdkSessionId].filter { !$0.isEmpty }
 
+        // Permission is sent on the create-time connection even after session.detach.
+        // Deliver to every bind so ChatViewModel can park requests for background sessions.
+        if method == "permission/request" {
+            let reqId = p["requestId"]?.stringValue ?? String(describing: p["requestId"])
+            let request = PermissionRequest(
+                sessionId: evSid,
+                requestId: reqId,
+                toolName: p["toolName"]?.stringValue ?? "",
+                input: p["input"]
+            )
+            for bind in binds {
+                bind.handlers.onPermission(request)
+            }
+            return
+        }
+
         for bind in binds where matches(bind, ids: ids) {
             switch method {
-            case "permission/request":
-                let reqId = p["requestId"]?.stringValue ?? String(describing: p["requestId"])
-                bind.handlers.onPermission(PermissionRequest(
-                    sessionId: evSid,
-                    requestId: reqId,
-                    toolName: p["toolName"]?.stringValue ?? "",
-                    input: p["input"]
-                ))
             case "session/event":
                 if let msg {
                     bind.handlers.onSdkEvent(msg, meta)

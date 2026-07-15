@@ -20,6 +20,60 @@ describe("buildMessageChain", () => {
     const entries: JsonlEntry[] = [{ type: "user" }];
     expect(buildMessageChain(entries)).toEqual(entries);
   });
+
+  it("reattaches sibling tool_result rows dropped by parentUuid spine walk", () => {
+    const entries: JsonlEntry[] = [
+      { uuid: "u1", parentUuid: null, type: "user", message: { content: [{ type: "text", text: "go" }] } },
+      {
+        uuid: "a1",
+        parentUuid: "u1",
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
+      },
+      {
+        uuid: "a2",
+        parentUuid: "u1",
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "t2", name: "Read", input: {} }] },
+      },
+      // Parallel results both parent the tool_use assistants; spine only keeps one path.
+      {
+        uuid: "tr1",
+        parentUuid: "a1",
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "one" }] },
+      },
+      {
+        uuid: "tr2",
+        parentUuid: "a2",
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "two" }] },
+      },
+      // Continue from a2 (skips tr1 branch entirely in a pure parent walk from this leaf).
+      {
+        uuid: "a3",
+        parentUuid: "tr2",
+        type: "assistant",
+        message: { content: [{ type: "text", text: "done" }] },
+      },
+    ];
+    // Make a1 also reachable: typically a2.parent = a1 for sequential tool_use lines.
+    entries[2] = { ...entries[2], parentUuid: "a1" };
+
+    const chain = buildMessageChain(entries);
+    const ids = chain.map((e) => e.uuid);
+    expect(ids).toContain("tr1");
+    expect(ids).toContain("tr2");
+    expect(ids).toContain("a3");
+
+    // tool_result for t1 must be present so history UI can mark Read complete.
+    const resultIds = chain.flatMap((e) => {
+      const c = (e.message as { content?: Array<{ type?: string; tool_use_id?: string }> } | undefined)?.content;
+      if (!Array.isArray(c)) return [];
+      return c.filter((b) => b.type === "tool_result").map((b) => b.tool_use_id);
+    });
+    expect(resultIds).toEqual(expect.arrayContaining(["t1", "t2"]));
+  });
 });
 
 describe("history paths", () => {

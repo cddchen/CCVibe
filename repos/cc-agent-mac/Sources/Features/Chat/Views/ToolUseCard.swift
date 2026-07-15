@@ -90,16 +90,16 @@ struct ToolUseCard: View {
     }
 
     private var statusLabel: String {
-        guard let r = result else { return streaming ? "执行中" : "执行中" }
+        guard let r = result else { return streaming ? "执行中" : "无结果" }
         switch r.status {
-        case .pending: return "执行中"
+        case .pending: return streaming ? "执行中" : "无结果"
         case .completed: return "完成"
         case .error: return "失败"
         }
     }
 
     private var statusColor: Color {
-        guard let r = result else { return .orange }
+        guard let r = result else { return streaming ? .orange : .gray }
         switch r.status {
         case .pending: return streaming ? .orange : .gray
         case .completed: return .green

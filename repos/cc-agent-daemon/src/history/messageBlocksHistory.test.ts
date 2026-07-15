@@ -65,6 +65,63 @@ describe("historyEntriesToChatMessages", () => {
     expect(msgs.filter((m) => m.role === "assistant")).toHaveLength(2);
   });
 
+  it("does not split assistant turn on control noise rows mid-turn", () => {
+    const entries: HistoryJsonlEntry[] = [
+      { type: "user", uuid: "u1", message: { content: [{ type: "text", text: "go" }] } },
+      {
+        type: "assistant",
+        uuid: "a1",
+        message: { content: [{ type: "thinking", thinking: "plan" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a2",
+        message: { content: [{ type: "text", text: "step1" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a3",
+        message: {
+          content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }],
+        },
+      },
+      {
+        type: "user",
+        uuid: "tr1",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+        },
+      },
+      { type: "last-prompt", uuid: "lp" },
+      { type: "mode", uuid: "md" },
+      { type: "permission-mode", uuid: "pm" },
+      { type: "file-history-snapshot", uuid: "fh" },
+      {
+        type: "assistant",
+        uuid: "a4",
+        message: { content: [{ type: "thinking", thinking: "more" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a5",
+        message: { content: [{ type: "text", text: "done" }] },
+      },
+      { type: "system", subtype: "turn_duration", uuid: "sys" },
+    ];
+    const msgs = historyEntriesToChatMessages(entries);
+    const assistant = msgs.filter((m) => m.role === "assistant");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].id).toBe("a5");
+    const blocks = assistant[0].content as { type: string }[];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "thinking",
+      "text",
+      "tool_use",
+      "thinking",
+      "text",
+    ]);
+  });
+
   it("does not split assistant turn on tool_result-only user rows", () => {
     const entries: HistoryJsonlEntry[] = [
       { type: "user", uuid: "u1", message: { content: [{ type: "text", text: "go" }] } },
