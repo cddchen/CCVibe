@@ -1,124 +1,100 @@
 # CCLink
 
-自托管会话中枢：用 **Claude Agent SDK** 在本机封装会话能力，通过 **WebSocket + JSON-RPC 2.0** 把本机的 Claude 智能体连接到你的 Web / App 客户端（Phase 1：仅 loopback + token）。
+自托管的 Claude 会话中枢。CCLink 在**你自己的机器**上跑 Claude（基于 Claude Agent SDK），把会话能力通过一个端口同时暴露成 **Web UI** 和 **WebSocket**，让你从任何设备连上来管理和续聊。
 
-## 分发给他人（npx，单端口）
+## 功能
 
-打包后 CCLink 会**同时托管 Web UI**，使用者只需一条命令、无需分别起两个进程：
+- **单端口、一条命令**：daemon 同时托管 Web 界面与 WebSocket，`npx` 一把启动，无需分别起前后端。
+- **多端接入**：电脑 / 手机浏览器 / Mac App 都能连同一个服务。
+- **本机执行**：用你自己的 Claude 授权、访问你自己的文件，数据不经第三方。
+- **会话管理**：添加工作目录、按目录浏览会话、新对话 / 续聊，支持切换模型与思考强度（effort）、工具权限确认。
 
-```bash
-npx cclink --listen 0.0.0.0:4733 --token <你的token>
-```
+## 前置要求
 
-然后浏览器打开 `http://<本机IP>:4733`，登录页填 token 即可（Web 与 WS 同源，自动连 `ws://<host>:4733/ws`）。
+- **Node.js ≥ 22.4**（`node -v` 检查；macOS 可 `brew install node`）
+- **Claude 授权**，二选一：
+  - 环境变量 `ANTHROPIC_API_KEY=sk-ant-...`，或
+  - 事先执行 `claude login`（Claude 订阅登录）
 
-> **前提：每个使用者都要在自己机器上有 Claude 授权。**
-> CCLink 用 Claude Agent SDK 在**本机**跑 Claude、访问**本机文件**，所以它跑在使用者自己的电脑上，用他们自己的账号：
-> - 环境变量 `ANTHROPIC_API_KEY=sk-ant-...`，或
-> - 事先 `claude login`（Claude 订阅登录）。
-> 没有授权时，连上后第一次对话就会失败。
+  > 没有授权时能连上、但第一次对话会失败。
 
-### 发布到 npm（维护者操作）
+## 安装与启动
 
-```bash
-cd repos/cc-agent-daemon
-npm run install:all       # 装好根目录 + web 依赖
-npm run build             # 编译 daemon(tsc) + 打包 web(vite) → dist/ 与 web/dist/
-
-# 验证产物（关键：证明 tarball 里同时含 dist/ 与 web/dist/）
-npm pack --dry-run        # 检查文件清单包含 dist/ 和 web/dist/
-npm pack                  # 生成 cclink-0.1.0.tgz
-npx ./cclink-0.1.0.tgz --token test   # 打开 http://127.0.0.1:4733 确认 Web 能加载且 WS 能连
-
-npm publish               # 名字被占用时改用 scope：package.json name 改 @you/cclink，发布加 --access public
-```
-
-`prepublishOnly` 会在 `npm publish` 前自动 `install:all && build`，确保发布的包已含最新 `dist/` 与 `web/dist/`。
-
-## 快速开始
+一条命令启动（`<token>` 自定义，用于客户端登录鉴权）：
 
 ```bash
-cd repos/cc-agent-daemon
-npm run install:all
+npx @cddchen/cclink --listen 0.0.0.0:4733 --token <token>
 ```
 
-### 默认开发启动（0.0.0.0 + token `cddchen`）
+浏览器打开 `http://<本机IP>:4733`，登录页填入同一个 token 即可（Web 与 WebSocket 同源，自动连 `ws://<host>:4733/ws`）。
 
-本仓库日常联调推荐：**daemon 与 web 均监听所有网卡**，固定 token **`cddchen`**。
+- **仅本机使用**：把 `0.0.0.0` 换成 `127.0.0.1`。
+- **对外 / 局域网暴露**：请用随机 token，勿用固定弱口令：
+  ```bash
+  npx @cddchen/cclink --listen 0.0.0.0:4733 --token "$(openssl rand -hex 16)"
+  ```
 
-**一条命令（推荐）** — 同一终端同时起 daemon + Web：
+## 后台服务（开机自启，macOS）
+
+用 launchd 让 CCLink 常驻：关终端、重启电脑都自动运行，崩溃自动拉起。
+
+**1. 全局安装**（给服务一个稳定路径）
 
 ```bash
-npm run dev:all
+npm i -g @cddchen/cclink
 ```
 
-浏览器打开 http://localhost:5174 ；开发模式下登录页会预填 token `cddchen`，WS 默认走 Vite 代理（`5174` → 本机 `4733`），无需再开第二个终端。
-
-仍要分开起时：
+**2. 生成并加载 LaunchAgent**（自动探测 node / cclink 路径；改 `TOKEN` 即可）
 
 ```bash
-# 终端 1：daemon（0.0.0.0:4733）
-npm run dev:lan
-
-# 终端 2：Web UI（0.0.0.0:5174，/ws 代理到本机 4733）
-npm run dev:web
+TOKEN="cddchen"
+NODE_BIN="$(command -v node)"
+CCLINK_BIN="$(command -v cclink)"
+PLIST="$HOME/Library/LaunchAgents/com.cclink.daemon.plist"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.cclink"
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cclink.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$NODE_BIN</string>
+    <string>$CCLINK_BIN</string>
+    <string>--listen</string><string>0.0.0.0:4733</string>
+    <string>--token</string><string>$TOKEN</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HOME/.cclink/daemon.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.cclink/daemon.err.log</string>
+</dict>
+</plist>
+EOF
+launchctl unload "$PLIST" 2>/dev/null
+launchctl load "$PLIST"
+echo "已加载: $PLIST (TOKEN=$TOKEN)"
 ```
 
-| 项 | 值 |
+**3. 确认运行**
+
+```bash
+sleep 2 && curl -s http://127.0.0.1:4733/health && tail -3 ~/.cclink/daemon.log
+```
+
+看到 `{"ok":true}` 和 `CCLink listening on http://0.0.0.0:4733` 即成功。
+
+### 服务管理
+
+| 操作 | 命令 |
 |---|---|
-| Daemon 监听 | `0.0.0.0:4733` |
-| Web 监听 | `0.0.0.0:5174`（`vite.config.ts` 已 `host: true`） |
-| Token | `cddchen` |
-| 本机 Web | http://localhost:5174 |
-| 局域网 Web | http://\<本机 IP\>:5174 |
-| 直连 WS（登录页） | `ws://<本机 IP>:4733` 或本机 `ws://127.0.0.1:4733` |
+| 查看状态 | `launchctl list \| grep cclink` |
+| 看日志 | `tail -f ~/.cclink/daemon.log` |
+| 停止 | `launchctl unload ~/Library/LaunchAgents/com.cclink.daemon.plist` |
+| 启动 | `launchctl load ~/Library/LaunchAgents/com.cclink.daemon.plist` |
+| 改配置后重启 | 先 `unload` 再 `load` |
+| 升级版本 | `npm i -g @cddchen/cclink@latest`，再 `unload` + `load` |
+| 卸载 | `launchctl unload …/com.cclink.daemon.plist && rm …/com.cclink.daemon.plist` |
 
-等价于手动：
-
-```bash
-npm run dev -- --listen 0.0.0.0:4733 --token cddchen
-```
-
-- HTTP 健康检查：`GET http://127.0.0.1:4733/health`
-- WebSocket：`ws://<host>:4733/ws?token=cddchen`；连接后也可 RPC：`{"id":1,"method":"auth","params":{"token":"cddchen"}}`
-
-### 仅本机、无 token（不推荐用于局域网）
-
-```bash
-npm run dev -- --insecure-no-auth --port 4733
-```
-
-`--insecure-no-auth` 时 WebSocket 可省略 token。
-
-## 脚本
-
-| 命令 | 说明 |
-|---|---|
-| `npm run dev` | 开发（需自行传 `--listen` / `--token` 等） |
-| `npm run dev:lan` | **默认**：`0.0.0.0:4733`，token `cddchen` |
-| `npm run dev:web` | 仅 Web UI（`web/` 下 Vite） |
-| `npm run dev:all` | **一条命令**：`dev:lan` + `dev:web`（需先 `install:all`） |
-| `npm run install:all` | 根目录 + `web/` 依赖一次装好 |
-| `npm run build` / `npm start` | 编译与运行 |
-| `npm test` | Vitest |
-| `npm run typecheck` | 类型检查 |
-
-## Web 测试 UI（React）
-
-与上文 **默认开发启动** 相同：终端 1 `npm run dev:lan`，终端 2 `cd web && npm run dev`。
-
-浏览器打开 http://localhost:5174（或局域网 `http://<IP>:5174`）— 登录页填 WS 与 token `cddchen`；添加工作目录、按目录浏览会话、新对话/续聊，支持模型与思考强度（`effort`）。
-
-### 自定义 token（生产或对外暴露时）
-
-勿将固定 token 用于公网；可改用随机 token：
-
-```bash
-TOKEN=$(openssl rand -hex 16)
-echo "Token: $TOKEN"
-npm run dev -- --listen 0.0.0.0:4733 --token "$TOKEN"
-```
-
-手机/其他电脑：Web `http://<本机局域网 IP>:5174`，WS `ws://<本机局域网 IP>:4733`，token 与启动参数一致。
-
-设计见 `../../docs/daemon/` 与 `.plans/parsed-questing-fern.md`。
+> 提示：plist 里的 token 为明文（文件在你家目录、权限私有）。也可改用环境变量 `CCLINK_TOKEN`：在 `<dict>` 内加 `<key>EnvironmentVariables</key><dict><key>CCLINK_TOKEN</key><string>xxx</string></dict>`，并删掉 `--token` 两行。

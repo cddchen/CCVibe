@@ -1,5 +1,5 @@
 {
-  "name": "cclink",
+  "name": "@cddchen/cclink",
   "version": "0.1.0",
   "type": "module",
   "description": "CCLink — self-hosted hub that links your devices to Claude agents running on your machine",
