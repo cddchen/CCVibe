@@ -1,5 +1,8 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
+import fastifyStatic from "@fastify/static";
 import type { AppContext } from "./app/context.js";
 import type { DaemonConfig } from "./config.js";
 import { dispatch } from "./rpc/router.js";
@@ -57,8 +60,24 @@ export async function startServer(ctx: AppContext, config: DaemonConfig): Promis
     });
   });
 
+  // Serve the built web UI so daemon + UI ship as one process on one port.
+  // In dev the web runs under Vite; when packaged, `web/dist` sits next to the
+  // compiled daemon (dist/server.js -> ../web/dist). Same-origin means the
+  // browser's WS defaults to ws://<host>:<port>/ws (see web/src/lib/wsUrl.ts).
+  const webDist = fileURLToPath(new URL("../web/dist", import.meta.url));
+  if (existsSync(webDist)) {
+    await app.register(fastifyStatic, { root: webDist });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.method === "GET" && !req.url.startsWith("/ws") && !req.url.startsWith("/health")) {
+        return reply.sendFile("index.html");
+      }
+      return reply.code(404).send({ error: "not found" });
+    });
+    app.log.info(`serving web UI from ${webDist}`);
+  }
+
   const address = await app.listen({ host: config.host, port: config.port });
-  app.log.info(`cc-agent-daemon listening on ${address}`);
+  app.log.info(`CCLink listening on ${address}`);
 
   return {
     app,

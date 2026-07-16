@@ -22,8 +22,8 @@ function parsePort(value: string): number {
 export function parseArgs(argv: string[]): DaemonConfig {
   let host = "127.0.0.1";
   let port = DEFAULT_PORT;
-  let dataDir = join(homedir(), ".cc-agent-daemon");
-  let token: string | null = process.env.CC_AGENT_DAEMON_TOKEN ?? null;
+  let dataDir = join(homedir(), ".cclink");
+  let token: string | null = process.env.CCLINK_TOKEN ?? null;
   let insecureNoAuth = false;
 
   const args = [...argv];
@@ -73,7 +73,7 @@ export function parseArgs(argv: string[]): DaemonConfig {
 
   if (!token && !insecureNoAuth) {
     throw new Error(
-      "Missing --token (or CC_AGENT_DAEMON_TOKEN). Use --insecure-no-auth for local dev only.",
+      "Missing --token (or CCLINK_TOKEN). Use --insecure-no-auth for local dev only.",
     );
   }
 
@@ -91,5 +91,5 @@ export function parseArgs(argv: string[]): DaemonConfig {
 }
 
 export function usage(): string {
-  return `cc-agent-daemon [--listen 127.0.0.1:4733] [--data-dir path] [--token token | --insecure-no-auth]`;
+  return `cclink [--listen 127.0.0.1:4733] [--data-dir path] [--token token | --insecure-no-auth]`;
 }

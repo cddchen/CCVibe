@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { parseArgs } from "./config.js";
 import { createAppContext } from "./app/context.js";
 import { startServer } from "./server.js";

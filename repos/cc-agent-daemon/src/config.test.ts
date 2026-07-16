@@ -2,15 +2,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseArgs } from "./config.js";
 
 describe("parseArgs", () => {
-  const originalToken = process.env.CC_AGENT_DAEMON_TOKEN;
+  const originalToken = process.env.CCLINK_TOKEN;
 
   beforeEach(() => {
-    delete process.env.CC_AGENT_DAEMON_TOKEN;
+    delete process.env.CCLINK_TOKEN;
   });
 
   afterEach(() => {
-    if (originalToken === undefined) delete process.env.CC_AGENT_DAEMON_TOKEN;
-    else process.env.CC_AGENT_DAEMON_TOKEN = originalToken;
+    if (originalToken === undefined) delete process.env.CCLINK_TOKEN;
+    else process.env.CCLINK_TOKEN = originalToken;
   });
 
   it("allows 0.0.0.0 binding with an explicit token", () => {
@@ -40,7 +40,7 @@ describe("parseArgs", () => {
   });
 
   it("uses token from environment", () => {
-    process.env.CC_AGENT_DAEMON_TOKEN = "env-token";
+    process.env.CCLINK_TOKEN = "env-token";
     expect(parseArgs([])).toMatchObject({ token: "env-token", insecureNoAuth: false });
   });
 
