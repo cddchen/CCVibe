@@ -1,4 +1,5 @@
 /** Content blocks aligned with Claude Code / CUI message rendering */
+import type { ConversationEntry } from "./daemonClient";
 
 export type TextBlock = { type: "text"; text: string };
 export type ThinkingBlock = { type: "thinking"; thinking: string };
@@ -467,6 +468,69 @@ export function pendingToolsFromBlocks(blocks: MessageBlock[]): Record<string, T
   const out: Record<string, ToolResultState> = {};
   for (const b of blocks) {
     if (b.type === "tool_use") out[b.id] = { status: "pending" };
+  }
+  return out;
+}
+
+function conversationContentToBlocks(
+  content: Extract<ConversationEntry, { type: "agent_message" }>["content"],
+): MessageBlock[] {
+  return content.map((block): MessageBlock => {
+    if (block.type === "tool_call") {
+      return { type: "tool_use", id: block.toolCallId, name: block.toolName, input: block.input };
+    }
+    return block;
+  });
+}
+
+/** Convert the daemon's stable conversation domain messages into UI messages. */
+export function conversationEntriesToChatMessages(entries: ConversationEntry[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const entry of entries) {
+    if (entry.type === "tool_result") continue;
+    if (entry.type === "user_message") {
+      const content = typeof entry.content === "string"
+        ? entry.content
+        : entry.content.map((block) => block.text).join("\n");
+      if (content) out.push({ id: entry.id, role: "user", content });
+      continue;
+    }
+    if (entry.type === "agent_message") {
+      const blocks = conversationContentToBlocks(entry.content);
+      if (blocks.length === 0) continue;
+      const previous = out[out.length - 1];
+      if (previous?.role === "assistant" && Array.isArray(previous.content)) {
+        previous.content = mergeBlockLists(previous.content, blocks);
+        previous.model = previous.model ?? entry.model;
+      } else {
+        out.push({ id: entry.id, role: "assistant", content: blocks, model: entry.model });
+      }
+      continue;
+    }
+    if (entry.type === "model_changed") {
+      out.push({ id: entry.id, role: "system", content: `模型已切换为 ${entry.modelId}` });
+    } else if (entry.type === "effort_changed") {
+      out.push({ id: entry.id, role: "system", content: `思考强度已切换为 ${entry.effort}` });
+    } else if (entry.type === "permission_mode_changed") {
+      out.push({ id: entry.id, role: "system", content: `权限模式已切换为 ${entry.mode}` });
+    } else if (entry.content) {
+      out.push({ id: entry.id, role: "system", content: entry.content });
+    }
+  }
+  return out;
+}
+
+export function buildToolResultsFromConversationEntries(
+  entries: ConversationEntry[],
+): Record<string, ToolResultState> {
+  const out: Record<string, ToolResultState> = {};
+  for (const entry of entries) {
+    if (entry.type !== "tool_result") continue;
+    out[entry.toolCallId] = {
+      status: entry.isError ? "error" : "completed",
+      content: entry.content,
+      isError: entry.isError,
+    };
   }
   return out;
 }

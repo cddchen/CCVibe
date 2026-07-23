@@ -26,13 +26,22 @@ function makeEngine(
       return { runtimeId };
     },
     send: async (runtimeId, content) => {
-      sent.push({ runtimeId, content });
+      sent.push({ runtimeId, content: content.content });
     },
-    interrupt: async () => {},
+    interrupt: async () => ({ still_queued: [] }),
+    reinitialize: async () => {},
     setPermissionMode: async (runtimeId, mode) => {
       permissionModeChanges.push({ runtimeId, mode });
     },
     stop: async () => {},
+  };
+}
+
+function permissionContext(requestId: string) {
+  return {
+    signal: new AbortController().signal,
+    requestId,
+    toolUseId: `tool-${requestId}`,
   };
 }
 
@@ -45,7 +54,15 @@ function makeContext(
 ): AppContext {
   const permissions = new PermissionRegistry(200);
   return {
-    config: { host: "127.0.0.1", port: 0, dataDir, token, insecureNoAuth: token === null },
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      token,
+      insecureNoAuth: token === null,
+      autoReclaimMs: 600_000,
+      maxThreads: 10,
+    },
     token,
     store: new MetaStore(dataDir),
     permissions,
@@ -192,6 +209,26 @@ describe("startServer", () => {
     expect(res.json()).toEqual({ ok: true });
   });
 
+  it("serves the built Web app and SPA routes from the daemon port", async () => {
+    const webRoot = tempDir("ccd-web-");
+    mkdirSync(join(webRoot, "assets"), { recursive: true });
+    writeFileSync(join(webRoot, "index.html"), "<!doctype html><div id=app>CCVibe</div>");
+    writeFileSync(join(webRoot, "assets", "app.js"), "console.log('ccvibe')");
+    const ctx = makeContext(tempDir("ccd-server-"), null);
+    const server = await startServer(ctx, { ...ctx.config, port: 0 }, { webRoot });
+    servers.push(server);
+
+    const page = await server.app.inject({ method: "GET", url: "/chat/project/conversation" });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers["content-type"]).toContain("text/html");
+    expect(page.body).toContain("CCVibe");
+
+    const asset = await server.app.inject({ method: "GET", url: "/assets/app.js" });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers["content-type"]).toContain("javascript");
+    expect(asset.headers["cache-control"]).toContain("immutable");
+  });
+
   it("closes websocket connections with invalid token", async () => {
     const ctx = makeContext(tempDir("ccd-server-"), "secret");
     const server = await startServer(ctx, { ...ctx.config, port: 0 });
@@ -257,6 +294,7 @@ describe("startServer", () => {
           permissions: { allow: string[]; deny: string[]; defaultMode?: string; additionalDirectories: string[] };
           effortLevel?: string;
         };
+        runtime: { autoReclaimMs: number; maxThreads: number };
       };
     }>(ws, 1, "settings.get");
 
@@ -276,6 +314,7 @@ describe("startServer", () => {
       },
       effortLevel: "max",
     });
+    expect(res.result.runtime).toEqual({ autoReclaimMs: 600_000, maxThreads: 10 });
     expect(JSON.stringify(res)).not.toContain("secret-token");
     ws.close();
   });
@@ -372,7 +411,11 @@ describe("startServer", () => {
         sessionId: "sdk-session",
         content: "/project-skill refactor this file",
       }),
-    ).toEqual({ jsonrpc: "2.0", id: 3, result: { accepted: true } });
+    ).toEqual({
+      jsonrpc: "2.0",
+      id: 3,
+      result: { accepted: true, turnId: expect.stringMatching(/[0-9a-f-]{36}/) },
+    });
     expect(sent).toContainEqual({ runtimeId: createRes.result.sessionId, content: "/project-skill refactor this file" });
     ws.close();
   });
@@ -392,11 +435,16 @@ describe("startServer", () => {
       params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
     }>(ws, "permission/request");
 
-    const decision = starts[0].hooks.canUseTool("Bash", { command: "pwd" });
+    const decision = starts[0].hooks.canUseTool(
+      "Bash",
+      { command: "pwd" },
+      permissionContext("sdk-server-allow"),
+    );
     const request = await permissionRequest;
 
     expect(request.params).toMatchObject({
       sessionId: createRes.result.sessionId,
+      requestId: "sdk-server-allow",
       toolName: "Bash",
       input: { command: "pwd" },
     });
@@ -437,7 +485,11 @@ describe("startServer", () => {
       params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
     }>(ws, "permission/request");
 
-    const decision = starts[0].hooks.canUseTool("Bash", { command: "rm -rf /tmp/example" });
+    const decision = starts[0].hooks.canUseTool(
+      "Bash",
+      { command: "rm -rf /tmp/example" },
+      permissionContext("sdk-server-deny"),
+    );
     const request = await permissionRequest;
 
     expect(request.params).toMatchObject({
@@ -455,6 +507,50 @@ describe("startServer", () => {
     ).resolves.toEqual({ jsonrpc: "2.0", id: 3, result: { ok: true } });
     await expect(decision).resolves.toEqual({ behavior: "deny", message: "Use a safer read-only command" });
     ws.close();
+  });
+
+  it("preserves and replays a permission request across owner reconnect", async () => {
+    const starts: EngineStartRecord[] = [];
+    const ctx = makeContext(tempDir("ccd-server-"), null, [], starts);
+    const server = await startServer(ctx, { ...ctx.config, port: 0 });
+    servers.push(server);
+    const workspace = tempDir("ccd-workspace-");
+    const firstOwner = await openWs(wsUrl(server));
+
+    await rpc(firstOwner, 1, "workspace.add", { path: workspace });
+    const createRes = await rpc<{ result: { sessionId: string } }>(firstOwner, 2, "session.create", { cwd: workspace });
+    const firstNotification = waitForNotification<{
+      method: "permission/request";
+      params: { sessionId: string; requestId: string };
+    }>(firstOwner, "permission/request");
+    const firstDecision = starts[0].hooks.canUseTool(
+      "Bash",
+      { command: "pwd" },
+      permissionContext("sdk-reconnect-request"),
+    );
+    expect((await firstNotification).params.requestId).toBe("sdk-reconnect-request");
+
+    const closed = waitForClose(firstOwner);
+    firstOwner.close();
+    await closed;
+    expect(ctx.permissions.size()).toBe(1);
+
+    const secondOwner = await openWs(wsUrl(server));
+    const redeliveredNotification = waitForNotification<{
+      method: "permission/request";
+      params: { sessionId: string; requestId: string };
+    }>(secondOwner, "permission/request");
+    await rpc(secondOwner, 3, "session.attach", { sessionId: createRes.result.sessionId });
+    expect((await redeliveredNotification).params.requestId).toBe("sdk-reconnect-request");
+
+    await expect(rpc(secondOwner, 4, "permission.respond", {
+      sessionId: createRes.result.sessionId,
+      requestId: "sdk-reconnect-request",
+      behavior: "allow",
+    })).resolves.toEqual({ jsonrpc: "2.0", id: 4, result: { ok: true } });
+    await expect(firstDecision).resolves.toEqual({ behavior: "allow" });
+    expect(ctx.permissions.size()).toBe(0);
+    secondOwner.close();
   });
 
   it("passes model and effort through websocket session create and resume", async () => {

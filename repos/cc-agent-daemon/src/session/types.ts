@@ -18,8 +18,12 @@ export type SessionCreateOptions = {
 };
 
 export type ActiveSessionInfo = {
+  conversationId: string;
   sessionId: string;
+  runtimeId: string;
   cwd: string;
   status: string;
+  runtimeStatus: string;
+  turn?: { id: string; status: string };
   subscriberCount: number;
 };

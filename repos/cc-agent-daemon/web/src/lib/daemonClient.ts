@@ -11,6 +11,38 @@ export type HistorySession = {
 export type Workspace = { id: string; path: string; createdAt: string };
 
 export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto";
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+export type ConversationEntry =
+  | { type: "user_message"; id: string; timestamp?: string; content: string | Array<{ type: "text"; text: string }> }
+  | {
+      type: "agent_message";
+      id: string;
+      timestamp?: string;
+      model?: string;
+      content: Array<
+        | { type: "text"; text: string }
+        | { type: "thinking"; thinking: string }
+        | { type: "tool_call"; toolCallId: string; toolName: string; input: Record<string, unknown> }
+      >;
+    }
+  | { type: "tool_result"; id: string; timestamp?: string; toolCallId: string; toolName?: string; content: string; isError: boolean }
+  | { type: "model_changed"; id: string; timestamp: string; family: "sonnet" | "opus" | "haiku"; modelId: string }
+  | { type: "effort_changed"; id: string; timestamp: string; effort: EffortLevel }
+  | { type: "permission_mode_changed"; id: string; timestamp: string; mode: PermissionMode }
+  | { type: "system_message"; id: string; timestamp?: string; subtype?: string; content: string };
+
+export type ConversationSnapshot = {
+  conversation: { id: string; sdkSessionId?: string; workspacePath: string };
+  runtime: { state: "cold" | "spawning" | "idle" | "running" | "waiting_permission" | "closing" | "closed" | "crashed" | "error"; runtimeId?: string };
+  config: {
+    model: { family: "sonnet" | "opus" | "haiku"; requestedId: string; effectiveId?: string; source: string };
+    effort: { requested: EffortLevel; effective?: EffortLevel; source: string };
+    permissionMode: PermissionMode;
+  };
+  currentTurn?: { turnId: string; status: string };
+  messages: ConversationEntry[];
+};
 
 export type DaemonSettings = {
   models: {
@@ -26,7 +58,7 @@ export type DaemonSettings = {
     defaultMode?: PermissionMode;
     additionalDirectories: string[];
   };
-  effortLevel?: "low" | "medium" | "high" | "xhigh" | "max";
+  effortLevel?: EffortLevel;
 };
 
 export type { ChatMessage } from "./messageBlocks";

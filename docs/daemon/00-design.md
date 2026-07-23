@@ -8,7 +8,7 @@
 |---|---|---|
 | server | `src/server.ts` | Fastify、`/health`、`/ws`、token 闸 |
 | rpc | `src/rpc/` | 路由、Zod 校验、JSON-RPC |
-| session | `src/session/` | SessionRunner、Registry、Claude 引擎 |
+| session | `src/session/` | SessionRunner、Registry、EngineAdapter、Claude 引擎 |
 | permission | `src/permission/` | canUseTool ↔ `permission.respond` |
 | history | `src/history/` | 读 `~/.claude/projects/**/*.jsonl` |
 | store | `src/store/db.ts` | `node:sqlite` 元数据 |
@@ -29,6 +29,11 @@ npm run dev -- --insecure-no-auth --port 4733
 
 `ping`、`auth`、`session.*`、`history.*`、`workspace.*`、`permission.respond`、`mcp.listServerStatus`
 
-通知：`session/event`、`session/status`、`permission/request`
+通知：`session/event`、`session/status`、`runtime/status`、`turn/status`、`permission/request`
 
-详见 `.plans/parsed-questing-fern.md`。
+设计与接入资料：
+
+- [Claude Agent SDK 全面接入指南](./01-claude-agent-sdk-integration-guide.md)
+- [P0 修复与运行时架构](./02-p0-runtime-architecture.md)
+- [JSON-RPC 接口与参数定义](./03-json-rpc-api-reference.md)
+- `.plans/parsed-questing-fern.md`

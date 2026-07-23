@@ -48,7 +48,6 @@ function asPermissionMode(value: unknown): PermissionMode | undefined {
   const s = asString(value);
   return s && permissionModes.has(s as PermissionMode) ? (s as PermissionMode) : undefined;
 }
-
 export async function readClaudePersonalSettings(claudeHome = defaultClaudeHome()): Promise<ClaudePersonalSettings> {
   let raw: string;
   try {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createClaudeEngine } from "./claudeEngine.js";
+import type { EngineHooks } from "./engine.js";
 import type { PermissionMode } from "./types.js";
 
 const { queryMock } = vi.hoisted(() => ({
@@ -13,6 +14,15 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 function emptyQuery(): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {},
+  };
+}
+
+function hooks(overrides: Partial<EngineHooks> = {}): EngineHooks {
+  return {
+    onMessage: () => {},
+    onRuntimeClosed: () => {},
+    canUseTool: async () => ({ behavior: "deny", message: "no" }),
+    ...overrides,
   };
 }
 
@@ -35,10 +45,7 @@ describe("createClaudeEngine", () => {
         disallowedTools: ["WebFetch"],
         settingSources: ["user", "project"],
       },
-      {
-        onMessage: () => {},
-        canUseTool: async () => ({ behavior: "deny", message: "no" }),
-      },
+      hooks(),
       "runtime-1",
     );
 
@@ -69,7 +76,7 @@ describe("createClaudeEngine", () => {
     const engine = createClaudeEngine();
     await engine.start(
       { cwd: "/tmp/project" },
-      { onMessage: () => {}, canUseTool: async () => ({ behavior: "deny", message: "no" }) },
+      hooks(),
       "runtime-stop",
     );
     const options = queryMock.mock.calls.at(-1)?.[0]?.options as {
@@ -93,10 +100,7 @@ describe("createClaudeEngine", () => {
           cwd: "/tmp/project",
           permissionMode: mode,
         },
-        {
-          onMessage: () => {},
-          canUseTool: async () => ({ behavior: "deny", message: "no" }),
-        },
+        hooks(),
         `runtime-${mode}`,
       );
 
@@ -104,5 +108,44 @@ describe("createClaudeEngine", () => {
       expect(options.permissionMode).toBe(mode);
       expect(options.allowDangerouslySkipPermissions).toBe(mode === "bypassPermissions" ? true : undefined);
     }
+  });
+
+  it("maps the full SDK permission context and returns persistent permission updates", async () => {
+    queryMock.mockReturnValue(emptyQuery());
+    const canUseTool = vi.fn(async () => ({
+      behavior: "allow" as const,
+      updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash" }] }],
+    }));
+    const engine = createClaudeEngine();
+    await engine.start({ cwd: "/tmp/project" }, hooks({ canUseTool }), "runtime-permission");
+
+    const callback = queryMock.mock.calls.at(-1)?.[0]?.options?.canUseTool as (
+      toolName: string,
+      input: Record<string, unknown>,
+      context: Record<string, unknown>,
+    ) => Promise<unknown>;
+    const signal = new AbortController().signal;
+    await expect(callback("Bash", { command: "pwd" }, {
+      signal,
+      requestId: "request-1",
+      toolUseID: "tool-1",
+      agentID: "agent-1",
+      suggestions: [{ type: "addRules" }],
+      title: "Run command",
+    })).resolves.toEqual({
+      behavior: "allow",
+      updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash" }] }],
+    });
+    expect(canUseTool).toHaveBeenCalledWith(
+      "Bash",
+      { command: "pwd" },
+      expect.objectContaining({
+        signal,
+        requestId: "request-1",
+        toolUseId: "tool-1",
+        agentId: "agent-1",
+        title: "Run command",
+      }),
+    );
   });
 });

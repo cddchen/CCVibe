@@ -40,6 +40,8 @@ function mockCtx(token: string | null): AppContext {
       dataDir: "/tmp",
       token,
       insecureNoAuth: token === null,
+      autoReclaimMs: 600_000,
+      maxThreads: 10,
     },
     token,
     store: store as AppContext["store"],
@@ -48,7 +50,8 @@ function mockCtx(token: string | null): AppContext {
       () => ({
         start: async () => ({ runtimeId: "r1" }),
         send: async () => {},
-        interrupt: async () => {},
+        interrupt: async () => ({ still_queued: [] }),
+        reinitialize: async () => {},
         setPermissionMode: async () => {},
         stop: async () => {},
       }),
@@ -229,7 +232,8 @@ describe("dispatch", () => {
               return { runtimeId };
             },
             send: async () => {},
-            interrupt: async () => {},
+            interrupt: async () => ({ still_queued: [] }),
+            reinitialize: async () => {},
             setPermissionMode: async () => {},
             stop: async (runtimeId) => {
               stopped.push(runtimeId);

@@ -26,6 +26,18 @@
 npx @cddchen/cclink --listen 0.0.0.0:4733 --token <token>
 ```
 
+线程资源策略由 daemon 统一控制：默认每轮对话结束后空闲 10 分钟自动回收，最多保留 10 个 Claude Runtime。可通过以下参数覆盖：
+
+```bash
+npx @cddchen/cclink \
+  --listen 0.0.0.0:4733 \
+  --token <token> \
+  --auto-reclaim-minutes 10 \
+  --max-threads 10
+```
+
+对应环境变量为 `CCLINK_AUTO_RECLAIM_MS` 和 `CCLINK_MAX_THREADS`。
+
 浏览器打开 `http://<本机IP>:4733`，登录页填入同一个 token 即可（Web 与 WebSocket 同源，自动连 `ws://<host>:4733/ws`）。
 
 - **仅本机使用**：把 `0.0.0.0` 换成 `127.0.0.1`。
@@ -33,6 +45,23 @@ npx @cddchen/cclink --listen 0.0.0.0:4733 --token <token>
   ```bash
   npx @cddchen/cclink --listen 0.0.0.0:4733 --token "$(openssl rand -hex 16)"
   ```
+
+### 从源码单端口运行
+
+daemon 会直接托管构建后的 `web/dist`，Web 页面、`/health` 和 `/ws` 共用 `4733` 端口：
+
+```bash
+npm run install:all
+npm run start:single
+```
+
+浏览器打开 http://localhost:4733，token 为 `cddchen`。其中：
+
+- `npm run build`：构建 daemon 与 Web。
+- `npm run start:lan`：运行已构建的单端口服务。
+- `npm run dev:all`：仅用于需要 Vite 热更新的双端口开发模式。
+
+打开历史或新 Conversation 不会启动 Claude Code；只有第一次发送消息才由服务端创建或恢复 Runtime，后续消息复用同一个活跃 Runtime。
 
 ## 后台服务（开机自启，macOS）
 
@@ -98,3 +127,10 @@ sleep 2 && curl -s http://127.0.0.1:4733/health && tail -3 ~/.cclink/daemon.log
 | 卸载 | `launchctl unload …/com.cclink.daemon.plist && rm …/com.cclink.daemon.plist` |
 
 > 提示：plist 里的 token 为明文（文件在你家目录、权限私有）。也可改用环境变量 `CCLINK_TOKEN`：在 `<dict>` 内加 `<key>EnvironmentVariables</key><dict><key>CCLINK_TOKEN</key><string>xxx</string></dict>`，并删掉 `--token` 两行。
+
+## 设计文档
+
+- [Daemon 技术方案](../../docs/daemon/00-design.md)
+- [Claude Agent SDK 接入指南](../../docs/daemon/01-claude-agent-sdk-integration-guide.md)
+- [P0 修复与运行时架构](../../docs/daemon/02-p0-runtime-architecture.md)
+- [JSON-RPC 接口与参数定义](../../docs/daemon/03-json-rpc-api-reference.md)

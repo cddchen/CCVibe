@@ -34,6 +34,42 @@ describe("PermissionRegistry", () => {
     expect(reg.size()).toBe(0);
   });
 
+  it("keeps a pending request across disconnect and transfers ownership on claim", async () => {
+    const reg = new PermissionRegistry(5000);
+    const first = reg.waitForResponse("sess1", "sdk-request", "conn1");
+    reg.releaseConnection("conn1");
+    expect(reg.respond("sess1", "sdk-request", "conn2", { behavior: "allow" })).toBe(false);
+
+    reg.claimSession("sess1", "conn2");
+    expect(reg.size()).toBe(1);
+    expect(reg.respond("sess1", "sdk-request", "conn2", {
+      behavior: "allow",
+      updatedPermissions: [{ type: "addRules" }],
+    })).toBe(true);
+    await expect(first).resolves.toEqual({
+      behavior: "allow",
+      updatedPermissions: [{ type: "addRules" }],
+    });
+  });
+
+  it("returns the same promise when the SDK redelivers a request ID", async () => {
+    const reg = new PermissionRegistry(5000);
+    const first = reg.waitForResponse("sess1", "sdk-request", "conn1");
+    const redelivered = reg.waitForResponse("sess1", "sdk-request", "conn2");
+    expect(redelivered).toBe(first);
+    expect(reg.respond("sess1", "sdk-request", "conn2", { behavior: "allow" })).toBe(true);
+    await expect(first).resolves.toEqual({ behavior: "allow" });
+  });
+
+  it("cancels a pending request when the SDK abort signal fires", async () => {
+    const reg = new PermissionRegistry(5000);
+    const abort = new AbortController();
+    const decision = reg.waitForResponse("sess1", "req1", "conn1", { signal: abort.signal });
+    abort.abort();
+    await expect(decision).resolves.toMatchObject({ behavior: "deny", message: /cancelled/ });
+    expect(reg.size()).toBe(0);
+  });
+
   it("denyAllForSession clears pending", async () => {
     const reg = new PermissionRegistry(60_000);
     const p = reg.waitForResponse("sess1", "r1", "conn1");

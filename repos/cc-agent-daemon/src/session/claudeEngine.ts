@@ -1,46 +1,57 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  PermissionMode,
+  PermissionResult,
+  PermissionUpdate,
+  Query,
+  SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { log } from "../logger.js";
-import type { PermissionMode, PermissionResult, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { EngineAdapter } from "./runner.js";
+import type { EngineAdapter, EngineUserInput } from "./engine.js";
 
 type ActiveQuery = {
-  q: AsyncIterable<unknown> & {
-    streamInput?: (msg: unknown) => Promise<void>;
-    interrupt?: () => Promise<void>;
-    setPermissionMode?: (m: PermissionMode) => Promise<void>;
-    close?: () => void;
-  };
-  inputPush: (content: string) => void;
-  inputDone: boolean;
+  query: Query;
+  pushInput: (input: EngineUserInput) => void;
   abort: AbortController;
+  stopping: boolean;
 };
+
+function requireActive(active: Map<string, ActiveQuery>, runtimeId: string): ActiveQuery {
+  const value = active.get(runtimeId);
+  if (!value) {
+    throw new Error(`unknown runtime ${runtimeId}`);
+  }
+  return value;
+}
 
 export function createClaudeEngine(): EngineAdapter {
   const active = new Map<string, ActiveQuery>();
 
   return {
-    async start(opts, hooks, runtimeId: string) {
+    async start(opts, hooks, runtimeId) {
       log.info("claude engine.start", { runtimeId, cwd: opts.cwd, model: opts.model });
-      const queue: string[] = [];
-      let resolveWait: (() => void) | null = null;
-      const push = (content: string) => {
-        queue.push(content);
+      const queue: EngineUserInput[] = [];
+      let resolveWait: (() => void) | undefined;
+      const pushInput = (input: EngineUserInput) => {
+        queue.push(input);
         resolveWait?.();
-        resolveWait = null;
+        resolveWait = undefined;
       };
 
       async function* inputStream(): AsyncGenerator<SDKUserMessage> {
         while (true) {
           while (queue.length === 0) {
-            await new Promise<void>((r) => {
-              resolveWait = r;
+            await new Promise<void>((resolve) => {
+              resolveWait = resolve;
             });
           }
-          const content = queue.shift()!;
+          const input = queue.shift();
+          if (!input) continue;
           yield {
             type: "user",
+            uuid: input.id,
             parent_tool_use_id: null,
-            message: { role: "user", content },
+            message: { role: "user", content: input.content },
           };
         }
       }
@@ -58,7 +69,7 @@ export function createClaudeEngine(): EngineAdapter {
             : undefined;
 
       const abort = new AbortController();
-      const q = query({
+      const sdkQuery = query({
         prompt: inputStream(),
         options: {
           abortController: abort,
@@ -76,74 +87,94 @@ export function createClaudeEngine(): EngineAdapter {
             : opts.forkSessionId
               ? { resume: opts.forkSessionId, forkSession: true }
               : {}),
-          canUseTool: async (toolName, input): Promise<PermissionResult> => {
-            const result = await hooks.canUseTool(toolName, input as Record<string, unknown>);
-            if (result.behavior === "allow") {
-              return { behavior: "allow", updatedInput: result.updatedInput };
+          canUseTool: async (toolName, input, context): Promise<PermissionResult> => {
+            const decision = await hooks.canUseTool(toolName, input, {
+              signal: context.signal,
+              requestId: context.requestId,
+              toolUseId: context.toolUseID,
+              agentId: context.agentID,
+              suggestions: context.suggestions as Record<string, unknown>[] | undefined,
+              blockedPath: context.blockedPath,
+              decisionReason: context.decisionReason,
+              title: context.title,
+              displayName: context.displayName,
+              description: context.description,
+              matchedAskRule: context.matchedAskRule,
+            });
+            if (decision.behavior === "allow") {
+              const result: PermissionResult = { behavior: "allow" };
+              if (decision.updatedInput !== undefined) result.updatedInput = decision.updatedInput;
+              if (decision.updatedPermissions !== undefined) {
+                result.updatedPermissions = decision.updatedPermissions as PermissionUpdate[];
+              }
+              return result;
             }
-            return { behavior: "deny", message: result.message ?? "denied" };
+            return { behavior: "deny", message: decision.message ?? "denied" };
           },
           systemPrompt,
         },
-      }) as ActiveQuery["q"];
+      });
 
-      active.set(runtimeId, { q, inputPush: push, inputDone: false, abort });
+      const state: ActiveQuery = {
+        query: sdkQuery,
+        pushInput,
+        abort,
+        stopping: false,
+      };
+      active.set(runtimeId, state);
 
       void (async () => {
+        let runtimeError: Error | undefined;
         try {
-          for await (const msg of q) {
-            hooks.onMessage(msg);
+          for await (const message of sdkQuery) {
+            hooks.onMessage(message);
           }
-        } catch (err) {
-          log.error("claude engine query error", { runtimeId, err: String(err) });
-          hooks.onMessage({
-            type: "result",
-            subtype: "error_during_execution",
-            errors: [String(err)],
-          });
+        } catch (error) {
+          if (!state.stopping) {
+            runtimeError = error instanceof Error ? error : new Error(String(error));
+            log.error("claude engine query error", { runtimeId, err: runtimeError.message });
+          }
         } finally {
-          active.delete(runtimeId);
+          if (active.get(runtimeId) === state) active.delete(runtimeId);
+          hooks.onRuntimeClosed(runtimeError);
         }
       })();
 
       return { runtimeId };
     },
 
-    async send(runtimeId, content) {
-      const a = active.get(runtimeId);
-      if (!a) {
-        log.error("claude engine.send unknown runtime", { runtimeId, active: [...active.keys()] });
-        throw new Error(`unknown runtime ${runtimeId}`);
-      }
-      log.info("claude engine.send", { runtimeId, len: content.length });
-      a.inputPush(content);
+    async send(runtimeId, input) {
+      const state = requireActive(active, runtimeId);
+      log.info("claude engine.send", { runtimeId, turnId: input.id, len: input.content.length });
+      state.pushInput(input);
     },
 
     async interrupt(runtimeId) {
-      const a = active.get(runtimeId);
-      if (a?.q?.interrupt) await a.q.interrupt();
+      return requireActive(active, runtimeId).query.interrupt();
+    },
+
+    async reinitialize(runtimeId) {
+      await requireActive(active, runtimeId).query.reinitialize();
+    },
+
+    async setModel(runtimeId, model) {
+      await requireActive(active, runtimeId).query.setModel(model);
+    },
+
+    async setEffort(runtimeId, effort) {
+      await requireActive(active, runtimeId).query.applyFlagSettings({ effortLevel: effort });
     },
 
     async setPermissionMode(runtimeId, mode) {
-      const a = active.get(runtimeId);
-      if (a?.q?.setPermissionMode) await a.q.setPermissionMode(mode as PermissionMode);
+      await requireActive(active, runtimeId).query.setPermissionMode(mode);
     },
 
     async stop(runtimeId) {
-      const a = active.get(runtimeId);
-      if (a) {
-        try {
-          a.abort.abort();
-        } catch {
-          /* ignore */
-        }
-        try {
-          a.q.close?.();
-        } catch {
-          /* ignore */
-        }
-      }
-      active.delete(runtimeId);
+      const state = active.get(runtimeId);
+      if (!state) return;
+      state.stopping = true;
+      state.abort.abort();
+      state.query.close();
     },
   };
 }

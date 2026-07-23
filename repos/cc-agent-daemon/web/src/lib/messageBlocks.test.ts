@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   applySdkMessage,
+  buildToolResultsFromConversationEntries,
   buildToolResultsFromHistory,
+  conversationEntriesToChatMessages,
   historyEntriesToChatMessages,
   historyEntryToChatMessage,
   isNonDialogHistoryEntry,
@@ -12,6 +14,42 @@ const COMPACT_SUMMARY_TEXT =
   "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request...";
 
 describe("messageBlocks", () => {
+  it("renders normalized conversation message types without exposing SDK JSONL", () => {
+    const entries = [
+      { type: "user_message" as const, id: "u1", content: "hello" },
+      {
+        type: "agent_message" as const,
+        id: "a1",
+        model: "claude-sonnet-4-6",
+        content: [
+          { type: "thinking" as const, thinking: "consider" },
+          { type: "tool_call" as const, toolCallId: "tool-1", toolName: "Read", input: { file_path: "/tmp/a" } },
+          { type: "text" as const, text: "done" },
+        ],
+      },
+      { type: "tool_result" as const, id: "r1", toolCallId: "tool-1", content: "contents", isError: false },
+      { type: "model_changed" as const, id: "m1", timestamp: "2026-01-01", family: "opus" as const, modelId: "custom-opus" },
+    ];
+
+    expect(conversationEntriesToChatMessages(entries)).toEqual([
+      { id: "u1", role: "user", content: "hello" },
+      {
+        id: "a1",
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [
+          { type: "thinking", thinking: "consider" },
+          { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/tmp/a" } },
+          { type: "text", text: "done" },
+        ],
+      },
+      { id: "m1", role: "system", content: "模型已切换为 custom-opus" },
+    ]);
+    expect(buildToolResultsFromConversationEntries(entries)).toEqual({
+      "tool-1": { status: "completed", content: "contents", isError: false },
+    });
+  });
+
   it("filters non-dialog history entries and tool-result-only user entries", () => {
     const messages = historyEntriesToChatMessages([
       { type: "system", uuid: "sys", message: { content: "init should not render" } },

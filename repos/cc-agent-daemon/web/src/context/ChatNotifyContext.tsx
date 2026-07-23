@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, type ReactNode } from "re
 import { useDaemon } from "./DaemonContext";
 
 export type StreamEventMeta = {
+  conversationId: string;
   sessionId: string;
   runtimeId: string;
   sdkSessionId: string;
@@ -40,14 +41,15 @@ export function ChatNotifyProvider({ children }: { children: ReactNode }) {
     client.onNotification((method, params) => {
       const p = params as Record<string, unknown>;
       const evSid = String(p.sessionId ?? "");
+      const conversationId = String(p.conversationId ?? "");
       const runtimeId = String(p.runtimeId ?? "");
       const msg = p.message;
       const m = msg as { type?: string; subtype?: string; session_id?: string; model?: string; cwd?: string; slash_commands?: unknown[] };
       const sdkSessionId = String(m?.session_id ?? "");
-      const meta = { sessionId: evSid, runtimeId, sdkSessionId };
+      const meta = { conversationId, sessionId: evSid, runtimeId, sdkSessionId };
 
       for (const bind of bindsRef.current) {
-        if (!matches(bind, [evSid, runtimeId, sdkSessionId])) continue;
+        if (!matches(bind, [conversationId, evSid, runtimeId, sdkSessionId])) continue;
 
         if (method === "permission/request") {
           bind.handlers.onPermission({

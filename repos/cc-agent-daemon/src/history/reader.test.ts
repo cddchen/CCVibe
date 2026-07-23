@@ -128,6 +128,29 @@ describe("history reader", () => {
     });
   });
 
+  it("uses the first real user message as the session title", async () => {
+    const claudeHome = tempDir("ccd-claude-home-");
+    const workspace = tempDir("ccd-workspace-");
+    process.env.CLAUDE_HOME = claudeHome;
+
+    writeSession(claudeHome, workspace, "s1", [
+      {
+        uuid: "summary",
+        type: "user",
+        isCompactSummary: true,
+        message: { content: "internal compact summary" },
+      },
+      {
+        uuid: "u1",
+        type: "user",
+        message: { content: [{ type: "text", text: "  帮我分析 Android 构建失败\n的原因  " }] },
+      },
+    ]);
+
+    const sessions = await listSessions(workspace);
+    expect(sessions[0].title).toBe("帮我分析 Android 构建失败 的原因");
+  });
+
   it("uses JSONL cwd to recover workspace paths with hyphenated components", async () => {
     const claudeHome = tempDir("ccd-claude-home-");
     const root = tempDir("ccd-root-");

@@ -19,6 +19,30 @@ export type SessionMetaRow = {
   updatedAt: string;
 };
 
+export type ConversationRow = {
+  conversationId: string;
+  sdkSessionId: string | null;
+  workspacePath: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ConversationConfigEntryRow = {
+  id: string;
+  conversationId: string;
+  type: "model_changed" | "effort_changed" | "permission_mode_changed";
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type ConversationSendReceiptRow = {
+  conversationId: string;
+  clientMessageId: string;
+  content: string;
+  turnId: string;
+  createdAt: string;
+};
+
 export class MetaStore {
   private db: DatabaseSync;
 
@@ -53,7 +77,123 @@ export class MetaStore {
         folder_id TEXT NOT NULL,
         PRIMARY KEY (session_id, folder_id)
       );
+      CREATE TABLE IF NOT EXISTS conversations (
+        conversation_id TEXT PRIMARY KEY,
+        sdk_session_id TEXT UNIQUE,
+        workspace_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS conversation_config_entries (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversation_config_entries
+        ON conversation_config_entries(conversation_id, created_at);
+      CREATE TABLE IF NOT EXISTS conversation_send_receipts (
+        conversation_id TEXT NOT NULL,
+        client_message_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, client_message_id)
+      );
     `);
+  }
+
+  createConversation(workspacePath: string, conversationId = randomUUID()): ConversationRow {
+    return this.ensureConversation(conversationId, workspacePath);
+  }
+
+  ensureConversation(conversationId: string, workspacePath: string, sdkSessionId?: string): ConversationRow {
+    const existing = this.getConversation(conversationId);
+    if (existing) return existing;
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO conversations (conversation_id, sdk_session_id, workspace_path, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(conversationId, sdkSessionId ?? null, workspacePath, now, now);
+    return {
+      conversationId,
+      sdkSessionId: sdkSessionId ?? null,
+      workspacePath,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  getConversation(id: string): ConversationRow | undefined {
+    return this.db.prepare(
+      `SELECT conversation_id as conversationId, sdk_session_id as sdkSessionId,
+              workspace_path as workspacePath, created_at as createdAt, updated_at as updatedAt
+       FROM conversations WHERE conversation_id = ? OR sdk_session_id = ?`,
+    ).get(id, id) as ConversationRow | undefined;
+  }
+
+  bindConversationSdkSession(conversationId: string, sdkSessionId: string): void {
+    this.db.prepare(
+      `UPDATE conversations SET sdk_session_id = ?, updated_at = ? WHERE conversation_id = ?`,
+    ).run(sdkSessionId, new Date().toISOString(), conversationId);
+  }
+
+  appendConversationConfigEntry(
+    conversationId: string,
+    type: ConversationConfigEntryRow["type"],
+    payload: Record<string, unknown>,
+  ): ConversationConfigEntryRow {
+    const entry: ConversationConfigEntryRow = {
+      id: randomUUID(),
+      conversationId,
+      type,
+      payload,
+      createdAt: new Date().toISOString(),
+    };
+    this.db.prepare(
+      `INSERT INTO conversation_config_entries (id, conversation_id, type, payload_json, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(entry.id, conversationId, type, JSON.stringify(payload), entry.createdAt);
+    return entry;
+  }
+
+  listConversationConfigEntries(conversationId: string): ConversationConfigEntryRow[] {
+    const rows = this.db.prepare(
+      `SELECT id, conversation_id as conversationId, type, payload_json as payloadJson,
+              created_at as createdAt
+       FROM conversation_config_entries WHERE conversation_id = ? ORDER BY created_at, rowid`,
+    ).all(conversationId) as Array<Omit<ConversationConfigEntryRow, "payload"> & { payloadJson: string }>;
+    return rows.map(({ payloadJson, ...row }) => ({
+      ...row,
+      payload: JSON.parse(payloadJson) as Record<string, unknown>,
+    }));
+  }
+
+  getConversationSendReceipt(
+    conversationId: string,
+    clientMessageId: string,
+  ): ConversationSendReceiptRow | undefined {
+    return this.db.prepare(
+      `SELECT conversation_id as conversationId, client_message_id as clientMessageId,
+              content, turn_id as turnId, created_at as createdAt
+       FROM conversation_send_receipts WHERE conversation_id = ? AND client_message_id = ?`,
+    ).get(conversationId, clientMessageId) as ConversationSendReceiptRow | undefined;
+  }
+
+  saveConversationSendReceipt(
+    conversationId: string,
+    clientMessageId: string,
+    content: string,
+    turnId: string,
+  ): ConversationSendReceiptRow {
+    const createdAt = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO conversation_send_receipts
+         (conversation_id, client_message_id, content, turn_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(conversationId, clientMessageId, content, turnId, createdAt);
+    return { conversationId, clientMessageId, content, turnId, createdAt };
   }
 
   listWorkspaces(): WorkspaceRow[] {

@@ -3,14 +3,22 @@ import { parseArgs } from "./config.js";
 
 describe("parseArgs", () => {
   const originalToken = process.env.CCLINK_TOKEN;
+  const originalAutoReclaimMs = process.env.CCLINK_AUTO_RECLAIM_MS;
+  const originalMaxThreads = process.env.CCLINK_MAX_THREADS;
 
   beforeEach(() => {
     delete process.env.CCLINK_TOKEN;
+    delete process.env.CCLINK_AUTO_RECLAIM_MS;
+    delete process.env.CCLINK_MAX_THREADS;
   });
 
   afterEach(() => {
     if (originalToken === undefined) delete process.env.CCLINK_TOKEN;
     else process.env.CCLINK_TOKEN = originalToken;
+    if (originalAutoReclaimMs === undefined) delete process.env.CCLINK_AUTO_RECLAIM_MS;
+    else process.env.CCLINK_AUTO_RECLAIM_MS = originalAutoReclaimMs;
+    if (originalMaxThreads === undefined) delete process.env.CCLINK_MAX_THREADS;
+    else process.env.CCLINK_MAX_THREADS = originalMaxThreads;
   });
 
   it("allows 0.0.0.0 binding with an explicit token", () => {
@@ -42,6 +50,26 @@ describe("parseArgs", () => {
   it("uses token from environment", () => {
     process.env.CCLINK_TOKEN = "env-token";
     expect(parseArgs([])).toMatchObject({ token: "env-token", insecureNoAuth: false });
+  });
+
+  it("uses default runtime lifecycle settings", () => {
+    expect(parseArgs(["--token", "secret"])).toMatchObject({
+      autoReclaimMs: 600_000,
+      maxThreads: 10,
+    });
+  });
+
+  it("accepts runtime lifecycle settings from flags", () => {
+    expect(parseArgs([
+      "--token", "secret",
+      "--auto-reclaim-minutes", "2.5",
+      "--max-threads", "3",
+    ])).toMatchObject({ autoReclaimMs: 150_000, maxThreads: 3 });
+  });
+
+  it("rejects invalid runtime lifecycle settings", () => {
+    expect(() => parseArgs(["--token", "secret", "--auto-reclaim-minutes", "0"])).toThrow(/invalid auto reclaim/);
+    expect(() => parseArgs(["--token", "secret", "--max-threads", "1.5"])).toThrow(/invalid max threads/);
   });
 
   it("rejects invalid ports", () => {

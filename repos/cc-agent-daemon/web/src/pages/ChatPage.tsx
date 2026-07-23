@@ -14,6 +14,7 @@ import {
   MODEL_OPTIONS,
   PERMISSION_MODE_OPTIONS,
   modelOptionsFromSettings,
+  type ConversationSnapshot,
   type DaemonSettings,
   type ModelOption,
   type PermissionMode,
@@ -25,14 +26,12 @@ import {
   customModelFromObservedModel,
   modelDisplayState,
   modelValueFromObservedModel,
-  resumableSessionForModelChange,
   selectedModelValue,
   type ModelKind,
 } from "../lib/chatModelControls";
 import {
   chatNotifyBindOptions,
   runStateFromDaemonStatus,
-  shouldReplaceChatUrlFromInit,
 } from "../lib/chatSessionRouting";
 import {
   clearCachedSessionList,
@@ -57,8 +56,8 @@ import {
   type PermissionRequest,
 } from "../lib/permissionResponses";
 import {
-  buildToolResultsFromHistory,
-  historyEntriesToChatMessages,
+  buildToolResultsFromConversationEntries,
+  conversationEntriesToChatMessages,
   type ChatMessage,
   type ToolResultState,
 } from "../lib/messageBlocks";
@@ -67,13 +66,14 @@ type Effort = (typeof EFFORT_OPTIONS)[number]["id"];
 type SessionRunState = "running" | "completed" | "error" | "interrupted";
 
 type SessionEventMeta = {
+  conversationId: string;
   sessionId: string;
   runtimeId: string;
   sdkSessionId: string;
 };
 
 function sessionMetaIds(meta: SessionEventMeta): string[] {
-  return [meta.sessionId, meta.runtimeId, meta.sdkSessionId].filter(Boolean);
+  return [meta.conversationId, meta.sessionId, meta.runtimeId, meta.sdkSessionId].filter(Boolean);
 }
 
 function isMetaForSession(meta: SessionEventMeta, sessionId: string | null): boolean {
@@ -280,10 +280,10 @@ export function ChatPage() {
         },
         onStatus: (st, err, meta) => {
           const active = isMetaForSession(meta, liveSessionIdRef.current ?? historySessionId);
-          if (st === "running") {
+          if (st === "running" || st === "waiting_permission" || st === "closing") {
             setRunStateForIds(sessionMetaIds(meta), "running");
-            if (active) setStatus(null);
-          } else if (st === "completed") {
+            if (active) setStatus(st === "waiting_permission" ? "等待授权…" : null);
+          } else if (st === "idle" || st === "closed") {
             setRunStateForIds(sessionMetaIds(meta), "completed");
             if (active) setStatus(null);
           } else if (st === "error") {
@@ -292,10 +292,10 @@ export function ChatPage() {
           } else {
             if (active) setStatus(err ? `${st}: ${err}` : st);
           }
-          if ((st === "completed" || st === "error") && active) {
+          if ((st === "idle" || st === "closed" || st === "error") && active) {
             streamRef.current.endTurn();
           }
-          if (st === "completed" || st === "error") {
+          if (st === "idle" || st === "closed" || st === "error") {
             if (refreshSessionsAfterTurnRef.current) {
               refreshSessionsAfterTurnRef.current = false;
               void loadSessions(true);
@@ -312,9 +312,7 @@ export function ChatPage() {
           if (!active) return;
           if (info.sessionId) {
             registerSessionAliases([...sessionMetaIds(meta), info.sessionId, historySessionId ?? "", liveSessionIdRef.current ?? ""]);
-            setLiveSessionId(info.sessionId);
             setRunStateForIds([...sessionMetaIds(meta), info.sessionId], "running");
-            if (shouldReplaceChatUrlFromInit(historySessionId)) replaceChatUrl(workspacePath, info.sessionId);
           }
           if (info.model) {
             const observedModel = modelValueFromObservedModel(info.model, modelOptions, modelRef.current);
@@ -361,64 +359,51 @@ export function ChatPage() {
   }, [client, connected, workspacePath]);
 
   useEffect(() => {
-    if (!historySessionId) {
-      hydratedRef.current = null;
-      setMessages([]);
-      setHistoryToolResults({});
-      setLiveSessionId(null);
-      setStatus(null);
-      return;
-    }
-    if (!client || !connected || !workspacePath) return;
-    if (!trusted) return;
-    if (hydratedRef.current === historySessionId) return;
+    if (!client || !connected || !workspacePath || !trusted) return;
+    const hydrationKey = historySessionId ?? `new:${workspacePath}`;
+    if (hydratedRef.current === hydrationKey) return;
 
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
-        setStatus("加载会话…");
-        const { messages: hist } = await client.call<{ messages: unknown[] }>("history.loadSession", {
-          sessionId: historySessionId,
+        setStatus(historySessionId ? "加载会话…" : "准备会话…");
+        const snapshot = await client.call<ConversationSnapshot>("conversation.open", {
+          conversationId: historySessionId ?? undefined,
           workspacePath,
+          subscribe: true,
         });
         if (cancelled) return;
-        setHistoryToolResults(buildToolResultsFromHistory(hist));
-        const loaded = historyEntriesToChatMessages(
-          hist as Parameters<typeof historyEntriesToChatMessages>[0],
+
+        const conversationId = snapshot.conversation.id;
+        hydratedRef.current = historySessionId ?? `new:${workspacePath}`;
+        setLiveSessionId(conversationId);
+        registerSessionAliases([
+          conversationId,
+          snapshot.conversation.sdkSessionId ?? "",
+          snapshot.runtime.runtimeId ?? "",
+          historySessionId ?? "",
+        ]);
+        setMessages(conversationEntriesToChatMessages(snapshot.messages));
+        setHistoryToolResults(buildToolResultsFromConversationEntries(snapshot.messages));
+        setRunStateForIds(
+          [conversationId, snapshot.conversation.sdkSessionId ?? "", snapshot.runtime.runtimeId ?? ""],
+          runStateFromDaemonStatus(snapshot.runtime.state),
         );
-        setMessages(loaded);
-        hydratedRef.current = historySessionId;
-        setLiveSessionId(historySessionId);
 
-        const lastAssistant = [...loaded].reverse().find((m) => m.role === "assistant" && m.model);
-        if (lastAssistant?.model) {
-          const observedModel = modelValueFromObservedModel(lastAssistant.model, modelOptions, modelRef.current);
-          setModel(observedModel);
-          setDraftModel(observedModel);
-          setCustomModel((current) => customModelFromObservedModel(lastAssistant.model ?? "", modelOptions, current));
-        }
-
-        const live = await client.call<{
-          attached: boolean;
-          sessionId?: string;
-          status?: string;
-        }>("session.attachIfLive", {
-          sessionId: historySessionId,
-        });
-        if (cancelled) return;
-        if (live.attached && live.sessionId) {
-          setLiveSessionId(live.sessionId);
-          registerSessionAliases([live.sessionId, historySessionId]);
-          setRunStateForIds(
-            [live.sessionId, historySessionId],
-            runStateFromDaemonStatus(live.status),
-          );
-        } else {
-          setRunStateForIds([historySessionId], "completed");
-        }
+        const observedModel = modelValueFromObservedModel(
+          snapshot.config.model.requestedId,
+          modelOptions,
+          modelRef.current,
+        );
+        setModel(observedModel);
+        setDraftModel(observedModel);
+        setCustomModel((current) => customModelFromObservedModel(snapshot.config.model.requestedId, modelOptions, current));
+        setEffort(snapshot.config.effort.requested);
+        setPermissionMode(snapshot.config.permissionMode);
+        if (historySessionId !== conversationId) replaceChatUrl(workspacePath, conversationId);
         setStatus(null);
       } catch (e) {
-        setStatus(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
       }
     })();
 
@@ -427,70 +412,37 @@ export function ChatPage() {
     };
   }, [client, connected, workspacePath, historySessionId, modelOptions, trusted, reconnectNonce]);
 
-  /** Re-attach when switching back to a session (hydration may be skipped via hydratedRef). */
-  useEffect(() => {
-    if (!client || !connected || !workspacePath || !historySessionId || !trusted) return;
-
-    let cancelled = false;
-    const diskId = historySessionId;
-
-    void (async () => {
-      try {
-        const live = await client.call<{
-          attached: boolean;
-          sessionId?: string;
-          status?: string;
-        }>("session.attachIfLive", { sessionId: diskId });
-        if (cancelled) return;
-        if (live.attached && live.sessionId) {
-          setLiveSessionId(live.sessionId);
-          registerSessionAliases([live.sessionId, diskId]);
-          setRunStateForIds([live.sessionId, diskId], runStateFromDaemonStatus(live.status));
-        } else {
-          setRunStateForIds([diskId], "completed");
-        }
-      } catch (e) {
-        console.warn("[ChatPage] syncLiveAttach failed", e);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      void client.call("session.detach", { sessionId: diskId }).catch(() => {});
-    };
-  }, [client, connected, workspacePath, historySessionId, trusted, reconnectNonce]);
-
   useEffect(() => {
     return () => {
       const sid = liveSessionIdRef.current;
-      if (client && sid) void client.call("session.detach", { sessionId: sid }).catch(() => {});
+      if (client && sid) void client.call("conversation.detach", { conversationId: sid }).catch(() => {});
     };
   }, [client]);
 
-  const resumeLive = async (diskSessionId: string, opts?: { model?: string; effort?: Effort }) => {
+  const ensureConversation = async (): Promise<string> => {
     if (!client) throw new Error("no client");
-    const { sessionId } = await client.call<{ sessionId: string }>("session.resume", {
-      sessionId: diskSessionId,
-      cwd: workspacePath,
-      permissionMode: permissionModeRef.current,
-      model: opts?.model ?? modelRef.current,
-      effort: opts?.effort ?? effortRef.current,
+    if (liveSessionIdRef.current) return liveSessionIdRef.current;
+    const snapshot = await client.call<ConversationSnapshot>("conversation.open", {
+      conversationId: historySessionId ?? undefined,
+      workspacePath,
+      subscribe: true,
     });
-    registerSessionAliases([diskSessionId, sessionId]);
-    setLiveSessionId(sessionId);
-    await client.call("session.attach", { sessionId });
-    return sessionId;
+    const conversationId = snapshot.conversation.id;
+    setLiveSessionId(conversationId);
+    registerSessionAliases([conversationId, snapshot.conversation.sdkSessionId ?? "", historySessionId ?? ""]);
+    if (historySessionId !== conversationId) replaceChatUrl(workspacePath, conversationId);
+    return conversationId;
   };
 
   const applyModel = async (next: string) => {
     setModel(next);
     setDraftModel(next);
     setCustomModelEditing(false);
-    const disk = resumableSessionForModelChange(historySessionId);
-    if (!disk || !client || busy) return;
+    if (!client || busy) return;
     try {
       setStatus("切换模型…");
-      await resumeLive(disk, { model: next });
+      const conversationId = await ensureConversation();
+      await client.call("conversation.setModel", { conversationId, model: next });
       setStatus(null);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e));
@@ -526,10 +478,10 @@ export function ChatPage() {
 
   const onEffortChange = async (next: Effort) => {
     setEffort(next);
-    const disk = historySessionId;
-    if (!disk || !client || busy) return;
+    if (!client || busy) return;
     try {
-      await resumeLive(disk, { effort: next });
+      const conversationId = await ensureConversation();
+      await client.call("conversation.setEffort", { conversationId, effort: next });
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e));
     }
@@ -538,66 +490,30 @@ export function ChatPage() {
   const onPermissionModeChange = async (next: PermissionMode) => {
     setPermissionMode(next);
     permissionModeRef.current = next;
-    if (!liveSessionId || !client || busy) return;
+    if (!client || busy) return;
     try {
-      await client.call("session.setPermissionMode", { sessionId: liveSessionId, mode: next });
+      const conversationId = await ensureConversation();
+      await client.call("conversation.setPermissionMode", { conversationId, mode: next });
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e));
     }
-  };
-
-  const ensureSession = async (): Promise<string> => {
-    if (!client) throw new Error("no client");
-
-    const diskId = liveSessionId ?? historySessionId;
-    if (diskId) {
-      try {
-        await client.call("session.attach", { sessionId: diskId });
-        return diskId;
-      } catch {
-        if (historySessionId) return resumeLive(historySessionId);
-        throw new Error("active session is no longer available");
-      }
-    }
-
-    const { sessionId } = await client.call<{ sessionId: string }>("session.create", {
-      cwd: workspacePath,
-      model,
-      effort,
-      permissionMode: permissionModeRef.current,
-      settingSources: ["user", "project"],
-    });
-    registerSessionAliases([sessionId, historySessionId ?? ""]);
-    setLiveSessionId(sessionId);
-    refreshSessionsAfterTurnRef.current = true;
-    hydratedRef.current = sessionId;
-    replaceChatUrl(workspacePath, sessionId);
-    await client.call("session.attach", { sessionId });
-    return sessionId;
   };
 
   const send = async () => {
     if (!trusted) return;
     const text = input.trim();
     if (!text || !client || busy) return;
+    const clientMessageId = crypto.randomUUID();
     setInput("");
     setStatus("running");
     streamRef.current.beginTurn();
-    setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", content: text }]);
+    setMessages((prev) => [...prev, { id: clientMessageId, role: "user", content: text }]);
 
     try {
-      let sid = await ensureSession();
+      const sid = await ensureConversation();
       setRunStateForIds([sid, historySessionId ?? "", liveSessionIdRef.current ?? ""], "running");
-      try {
-        await client.call("session.sendMessage", { sessionId: sid, content: text });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (!msg.includes("unknown session")) throw e;
-        if (!historySessionId) throw e;
-        sid = await resumeLive(historySessionId);
-        setRunStateForIds([sid, historySessionId], "running");
-        await client.call("session.sendMessage", { sessionId: sid, content: text });
-      }
+      refreshSessionsAfterTurnRef.current = true;
+      await client.call("conversation.send", { conversationId: sid, content: text, clientMessageId });
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e));
       streamRef.current.endTurn();
@@ -608,7 +524,7 @@ export function ChatPage() {
   const stop = async () => {
     if (!client || !liveSessionId) return;
     try {
-      await client.call("session.interrupt", { sessionId: liveSessionId });
+      await client.call("conversation.interrupt", { conversationId: liveSessionId });
       streamRef.current.endTurn();
       setRunStateForIds([liveSessionId, historySessionId ?? ""], "interrupted");
       setStatus("已停止");

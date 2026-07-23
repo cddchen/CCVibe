@@ -10,6 +10,7 @@ export type HistorySessionSummary = {
   messageCount: number;
   firstTimestamp?: string;
   lastTimestamp?: string;
+  title?: string;
 };
 
 export type JsonlEntry = {
@@ -21,6 +22,8 @@ export type JsonlEntry = {
   cwd?: string;
   message?: unknown;
   summary?: string;
+  isCompactSummary?: boolean;
+  isVisibleInTranscriptOnly?: boolean;
 };
 
 export async function listSessions(workspacePath: string): Promise<HistorySessionSummary[]> {
@@ -112,6 +115,7 @@ async function summarizeJsonl(filePath: string, sessionId: string): Promise<Hist
   let messageCount = 0;
   let firstTimestamp: string | undefined;
   let lastTimestamp: string | undefined;
+  let title: string | undefined;
   try {
     await stat(filePath);
     const lines = createInterface({ input: createReadStream(filePath, { encoding: "utf8" }), crlfDelay: Infinity });
@@ -121,6 +125,9 @@ async function summarizeJsonl(filePath: string, sessionId: string): Promise<Hist
       try {
         const entry = JSON.parse(t) as JsonlEntry;
         if (entry.type === "user" || entry.type === "assistant") messageCount += 1;
+        if (!title && entry.type === "user" && !entry.isCompactSummary && !entry.isVisibleInTranscriptOnly) {
+          title = firstUserText(entry.message);
+        }
         if (entry.timestamp) {
           firstTimestamp ??= entry.timestamp;
           lastTimestamp = entry.timestamp;
@@ -132,7 +139,25 @@ async function summarizeJsonl(filePath: string, sessionId: string): Promise<Hist
   } catch {
     // leave empty summary
   }
-  return { sessionId, filePath, messageCount, firstTimestamp, lastTimestamp };
+  return { sessionId, filePath, messageCount, firstTimestamp, lastTimestamp, title };
+}
+
+function firstUserText(message: unknown): string | undefined {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content
+      .map((block) => {
+        const value = block as { type?: string; text?: unknown };
+        return value?.type === "text" && typeof value.text === "string" ? value.text : "";
+      })
+      .join(" ");
+  }
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length > 80 ? `${normalized.slice(0, 80)}…` : normalized;
 }
 
 async function readJsonl(filePath: string): Promise<JsonlEntry[]> {

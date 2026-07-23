@@ -7,9 +7,13 @@ export type DaemonConfig = {
   dataDir: string;
   token: string | null;
   insecureNoAuth: boolean;
+  autoReclaimMs: number;
+  maxThreads: number;
 };
 
 const DEFAULT_PORT = 4733;
+export const DEFAULT_AUTO_RECLAIM_MS = 10 * 60 * 1000;
+export const DEFAULT_MAX_THREADS = 10;
 
 function parsePort(value: string): number {
   const port = Number(value);
@@ -19,12 +23,32 @@ function parsePort(value: string): number {
   return port;
 }
 
+function parsePositiveInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`invalid ${name}: ${value}`);
+  return parsed;
+}
+
+function parsePositiveMinutes(value: string): number {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    throw new Error(`invalid auto reclaim minutes: ${value}`);
+  }
+  return Math.round(minutes * 60_000);
+}
+
 export function parseArgs(argv: string[]): DaemonConfig {
   let host = "127.0.0.1";
   let port = DEFAULT_PORT;
   let dataDir = join(homedir(), ".cclink");
   let token: string | null = process.env.CCLINK_TOKEN ?? null;
   let insecureNoAuth = false;
+  let autoReclaimMs = process.env.CCLINK_AUTO_RECLAIM_MS
+    ? parsePositiveInteger(process.env.CCLINK_AUTO_RECLAIM_MS, "auto reclaim milliseconds")
+    : DEFAULT_AUTO_RECLAIM_MS;
+  let maxThreads = process.env.CCLINK_MAX_THREADS
+    ? parsePositiveInteger(process.env.CCLINK_MAX_THREADS, "max threads")
+    : DEFAULT_MAX_THREADS;
 
   const args = [...argv];
   while (args.length > 0) {
@@ -49,6 +73,18 @@ export function parseArgs(argv: string[]): DaemonConfig {
         const value = args.shift();
         if (!value) throw new Error("--data-dir requires a path");
         dataDir = value;
+        break;
+      }
+      case "--auto-reclaim-minutes": {
+        const value = args.shift();
+        if (!value) throw new Error("--auto-reclaim-minutes requires a positive number");
+        autoReclaimMs = parsePositiveMinutes(value);
+        break;
+      }
+      case "--max-threads": {
+        const value = args.shift();
+        if (!value) throw new Error("--max-threads requires a positive integer");
+        maxThreads = parsePositiveInteger(value, "max threads");
         break;
       }
       case "--token": {
@@ -87,9 +123,9 @@ export function parseArgs(argv: string[]): DaemonConfig {
     throw new Error("LAN bind (0.0.0.0) requires --token; do not use --insecure-no-auth on the network.");
   }
 
-  return { host, port, dataDir, token, insecureNoAuth };
+  return { host, port, dataDir, token, insecureNoAuth, autoReclaimMs, maxThreads };
 }
 
 export function usage(): string {
-  return `cclink [--listen 127.0.0.1:4733] [--data-dir path] [--token token | --insecure-no-auth]`;
+  return `cclink [--listen 127.0.0.1:4733] [--data-dir path] [--auto-reclaim-minutes 10] [--max-threads 10] [--token token | --insecure-no-auth]`;
 }

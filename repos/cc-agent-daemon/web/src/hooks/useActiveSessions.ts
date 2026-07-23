@@ -4,7 +4,9 @@ import type { DaemonClient } from "../lib/daemonClient";
 export type ActiveKind = "running" | "alive";
 
 type ActiveSessionRow = {
+  conversationId?: string;
   sessionId: string;
+  runtimeId?: string;
   cwd: string;
   status: string;
   subscriberCount: number;
@@ -13,7 +15,10 @@ type ActiveSessionRow = {
 export function mapActiveSessions(rows: ActiveSessionRow[]): Record<string, ActiveKind> {
   const out: Record<string, ActiveKind> = {};
   for (const row of rows) {
-    out[row.sessionId] = row.status === "running" ? "running" : "alive";
+    const kind = row.status === "running" ? "running" : "alive";
+    for (const id of [row.conversationId, row.sessionId, row.runtimeId]) {
+      if (id) out[id] = kind;
+    }
   }
   return out;
 }

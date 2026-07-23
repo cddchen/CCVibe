@@ -7,15 +7,17 @@ export function chatNotifyBindOptions(liveSessionId: string | null): { acceptAny
 }
 
 export function liveTurnIsBusy(status?: string): boolean {
-  return status === "running" || status === "starting";
+  return status === "running"
+    || status === "starting"
+    || status === "waiting_permission"
+    || status === "closing";
 }
 
 export type SessionRunState = "running" | "completed" | "error" | "interrupted";
 
 /** Map daemon runner status to UI run state when re-attaching after a tab/session switch. */
 export function runStateFromDaemonStatus(status?: string): SessionRunState {
-  if (status === "running" || status === "starting") return "running";
+  if (liveTurnIsBusy(status)) return "running";
   if (status === "error") return "error";
-  if (status === "interrupted") return "interrupted";
   return "completed";
 }

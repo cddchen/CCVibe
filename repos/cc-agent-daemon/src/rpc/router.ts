@@ -22,6 +22,13 @@ import {
   workspaceRemoveParams,
   workspaceCheckTrustParams,
   permissionRespondParams,
+  conversationOpenParams,
+  conversationIdParams,
+  conversationGetParams,
+  conversationSendParams,
+  conversationSetModelParams,
+  conversationSetEffortParams,
+  conversationSetPermissionModeParams,
 } from "./schemas.js";
 import { dirname, resolve } from "node:path";
 import { assertCwdAllowed, canonicalPath } from "../security/workspaceGuard.js";
@@ -54,7 +61,13 @@ const handlers: Record<string, Handler> = {
 
   "settings.get": async (ctx, conn) => {
     requireAuth(conn, ctx);
-    return { settings: await readClaudePersonalSettings() };
+    return {
+      settings: await readClaudePersonalSettings(),
+      runtime: {
+        autoReclaimMs: ctx.config.autoReclaimMs,
+        maxThreads: ctx.config.maxThreads,
+      },
+    };
   },
 
   auth: withSchema(authParams, async (ctx, conn, { token }) => {
@@ -62,6 +75,62 @@ const handlers: Record<string, Handler> = {
       throw rpcError(RPC_ERROR.UNAUTHORIZED, "invalid token");
     }
     conn.authenticated = true;
+    return { ok: true };
+  }),
+
+  "conversation.open": withSchema(conversationOpenParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    assertCwdAllowed(p.workspacePath, ctx.store.getWorkspacePaths());
+    conn.permissionClientId = conn.id;
+    return ctx.conversations.open({
+      conversationId: p.conversationId,
+      workspacePath: canonicalPath(p.workspacePath),
+      subscribe: p.subscribe,
+    }, conn);
+  }),
+
+  "conversation.get": withSchema(conversationGetParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    const conversation = ctx.store.getConversation(p.conversationId);
+    if (!conversation) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown conversation");
+    assertCwdAllowed(conversation.workspacePath, ctx.store.getWorkspacePaths());
+    return ctx.conversations.get(p.conversationId);
+  }),
+
+  "conversation.send": withSchema(conversationSendParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    const conversation = ctx.store.getConversation(p.conversationId);
+    if (!conversation) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown conversation");
+    assertCwdAllowed(conversation.workspacePath, ctx.store.getWorkspacePaths());
+    conn.permissionClientId = conn.id;
+    return ctx.conversations.send(p.conversationId, p.content, conn, p.clientMessageId);
+  }),
+
+  "conversation.setModel": withSchema(conversationSetModelParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    return { model: await ctx.conversations.setModel(p.conversationId, p.model) };
+  }),
+
+  "conversation.setEffort": withSchema(conversationSetEffortParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    return { effort: await ctx.conversations.setEffort(p.conversationId, p.effort) };
+  }),
+
+  "conversation.setPermissionMode": withSchema(conversationSetPermissionModeParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    await ctx.conversations.setPermissionMode(p.conversationId, p.mode);
+    return { ok: true };
+  }),
+
+  "conversation.interrupt": withSchema(conversationIdParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    const receipt = await ctx.conversations.interrupt(p.conversationId);
+    return { ok: true, stillQueued: receipt?.still_queued ?? [] };
+  }),
+
+  "conversation.detach": withSchema(conversationIdParams, async (ctx, conn, p) => {
+    requireAuth(conn, ctx);
+    ctx.conversations.detach(p.conversationId, conn.id);
     return { ok: true };
   }),
 
@@ -105,8 +174,8 @@ const handlers: Record<string, Handler> = {
       );
     }
     log.info("rpc session.sendMessage", { sessionId: p.sessionId, len: p.content.length });
-    await runner.send(p.content);
-    return { accepted: true };
+    const { turnId } = await runner.send(p.content);
+    return { accepted: true, turnId };
   }),
 
   "session.resume": withSchema(sessionResumeParams, async (ctx, conn, p) => {
@@ -157,8 +226,8 @@ const handlers: Record<string, Handler> = {
     requireAuth(conn, ctx);
     const runner = ctx.sessions.get(p.sessionId);
     if (!runner) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown session");
-    await runner.interrupt();
-    return { ok: true };
+    const receipt = await runner.interrupt();
+    return { ok: true, stillQueued: receipt?.still_queued ?? [] };
   }),
 
   "session.setPermissionMode": withSchema(sessionSetPermissionParams, async (ctx, conn, p) => {
@@ -174,7 +243,7 @@ const handlers: Record<string, Handler> = {
     const runner = ctx.sessions.get(p.sessionId);
     if (!runner) return { attached: false };
     conn.permissionClientId = conn.id;
-    runner.subscribe(conn);
+    runner.subscribe(conn, true);
     return {
       attached: true,
       sessionId: runner.sessionId ?? p.sessionId,
@@ -186,7 +255,7 @@ const handlers: Record<string, Handler> = {
     requireAuth(conn, ctx);
     const runner = ctx.sessions.get(p.sessionId);
     if (!runner) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown session");
-    runner.subscribe(conn);
+    runner.subscribe(conn, true);
     return { ok: true };
   }),
 
@@ -304,9 +373,11 @@ const handlers: Record<string, Handler> = {
 
   "permission.respond": withSchema(permissionRespondParams, async (ctx, conn, p) => {
     requireAuth(conn, ctx);
-    const ok = ctx.permissions.respond(p.sessionId, p.requestId, conn.id, {
+    const permissionScope = ctx.sessions.get(p.sessionId)?.runtimeId ?? p.sessionId;
+    const ok = ctx.permissions.respond(permissionScope, p.requestId, conn.id, {
       behavior: p.behavior,
       updatedInput: p.updatedInput,
+      updatedPermissions: p.updatedPermissions,
       message: p.message,
     });
     if (!ok) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown permission request");

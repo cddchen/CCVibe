@@ -15,7 +15,16 @@ export type RunningServer = {
   close: () => Promise<void>;
 };
 
-export async function startServer(ctx: AppContext, config: DaemonConfig): Promise<RunningServer> {
+export type ServerOptions = {
+  /** Override the built Web root for tests/custom packaging, or disable with false. */
+  webRoot?: string | false;
+};
+
+export async function startServer(
+  ctx: AppContext,
+  config: DaemonConfig,
+  options: ServerOptions = {},
+): Promise<RunningServer> {
   const app = Fastify({ logger: true });
   await app.register(websocket);
 
@@ -56,7 +65,7 @@ export async function startServer(ctx: AppContext, config: DaemonConfig): Promis
 
     socket.on("close", () => {
       ctx.sessions.onClientDisconnect(conn.id);
-      ctx.permissions.denyAllForConnection(conn.id);
+      ctx.permissions.releaseConnection(conn.id);
     });
   });
 
@@ -64,9 +73,21 @@ export async function startServer(ctx: AppContext, config: DaemonConfig): Promis
   // In dev the web runs under Vite; when packaged, `web/dist` sits next to the
   // compiled daemon (dist/server.js -> ../web/dist). Same-origin means the
   // browser's WS defaults to ws://<host>:<port>/ws (see web/src/lib/wsUrl.ts).
-  const webDist = fileURLToPath(new URL("../web/dist", import.meta.url));
-  if (existsSync(webDist)) {
-    await app.register(fastifyStatic, { root: webDist });
+  const defaultWebDist = fileURLToPath(new URL("../web/dist", import.meta.url));
+  const webDist = options.webRoot === false ? undefined : options.webRoot ?? defaultWebDist;
+  if (webDist && existsSync(webDist)) {
+    await app.register(fastifyStatic, {
+      root: webDist,
+      cacheControl: false,
+      setHeaders: (response, filePath) => {
+        response.setHeader(
+          "Cache-Control",
+          filePath.includes("/assets/")
+            ? "public, max-age=31536000, immutable"
+            : "no-cache",
+        );
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.method === "GET" && !req.url.startsWith("/ws") && !req.url.startsWith("/health")) {
         return reply.sendFile("index.html");
@@ -83,6 +104,7 @@ export async function startServer(ctx: AppContext, config: DaemonConfig): Promis
     app,
     close: async () => {
       await app.close();
+      await ctx.sessions.shutdown();
       ctx.store.close();
     },
   };

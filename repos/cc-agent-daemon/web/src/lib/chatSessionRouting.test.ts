@@ -23,17 +23,21 @@ describe("chatSessionRouting", () => {
     expect(chatNotifyBindOptions(null)).toEqual({ acceptAny: true });
   });
 
-  it("liveTurnIsBusy is true only for running or starting", () => {
+  it("liveTurnIsBusy covers active runtime states but not idle", () => {
     expect(liveTurnIsBusy("running")).toBe(true);
     expect(liveTurnIsBusy("starting")).toBe(true);
-    expect(liveTurnIsBusy("completed")).toBe(false);
+    expect(liveTurnIsBusy("waiting_permission")).toBe(true);
+    expect(liveTurnIsBusy("closing")).toBe(true);
+    expect(liveTurnIsBusy("idle")).toBe(false);
     expect(liveTurnIsBusy(undefined)).toBe(false);
   });
 
   it("runStateFromDaemonStatus maps daemon lifecycle to UI state", () => {
     expect(runStateFromDaemonStatus("running")).toBe("running");
     expect(runStateFromDaemonStatus("starting")).toBe("running");
-    expect(runStateFromDaemonStatus("completed")).toBe("completed");
+    expect(runStateFromDaemonStatus("waiting_permission")).toBe("running");
+    expect(runStateFromDaemonStatus("idle")).toBe("completed");
+    expect(runStateFromDaemonStatus("closed")).toBe("completed");
     expect(runStateFromDaemonStatus("error")).toBe("error");
     expect(runStateFromDaemonStatus(undefined)).toBe("completed");
   });

@@ -19,8 +19,12 @@
     "install:all": "npm install --legacy-peer-deps && npm install --prefix web",
     "build": "tsc && npm run build --prefix web",
     "build:daemon": "tsc",
+    "build:web": "npm run build --prefix web",
+    "build:all": "npm run build",
     "prepublishOnly": "npm run install:all && npm run build",
     "start": "node dist/index.js",
+    "start:lan": "node dist/index.js --listen 0.0.0.0:4733 --token cddchen",
+    "start:single": "npm run build && npm run start:lan",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -29,7 +33,7 @@
     "node": ">=22.4.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.178",
+    "@anthropic-ai/claude-agent-sdk": "0.3.217",
     "@fastify/static": "^8.0.0",
     "@fastify/websocket": "^11.0.0",
     "fastify": "^5.2.1",

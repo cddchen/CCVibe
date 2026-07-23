@@ -9,13 +9,19 @@ const { queryMock, controllers } = vi.hoisted(() => {
     call: {
       prompt: AsyncIterable<unknown>;
       options: {
-        canUseTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>;
+        canUseTool: (
+          toolName: string,
+          input: Record<string, unknown>,
+          context: Record<string, unknown>,
+        ) => Promise<unknown>;
         [key: string]: unknown;
       };
     };
     q: AsyncIterable<unknown> & {
       interrupt: ReturnType<typeof vi.fn>;
+      reinitialize: ReturnType<typeof vi.fn>;
       setPermissionMode: ReturnType<typeof vi.fn>;
+      close: ReturnType<typeof vi.fn>;
     };
     push: (msg: unknown) => void;
     finish: () => void;
@@ -31,8 +37,10 @@ const { queryMock, controllers } = vi.hoisted(() => {
       wake = undefined;
     };
     const q: Controller["q"] = {
-      interrupt: vi.fn(async () => {}),
+      interrupt: vi.fn(async () => ({ still_queued: [] })),
+      reinitialize: vi.fn(async () => ({})),
       setPermissionMode: vi.fn(async () => {}),
+      close: vi.fn(),
       async *[Symbol.asyncIterator]() {
         while (!done || messages.length > 0) {
           if (messages.length === 0) {
@@ -94,6 +102,14 @@ async function nextInput(iterator: AsyncIterator<unknown>): Promise<unknown> {
 
 function notifications(conn: { sent: unknown[] }, method: string): Array<{ method?: string; params?: unknown }> {
   return conn.sent.filter((msg): msg is { method?: string; params?: unknown } => (msg as { method?: string }).method === method);
+}
+
+function sdkPermissionContext(requestId: string): Record<string, unknown> {
+  return {
+    signal: new AbortController().signal,
+    requestId,
+    toolUseID: `tool-${requestId}`,
+  };
 }
 
 describe("Claude SDK daemon data flow", () => {
@@ -161,18 +177,19 @@ describe("Claude SDK daemon data flow", () => {
 
     await registry.get("sdk-session")!.interrupt();
     expect(controller.q.interrupt).toHaveBeenCalledOnce();
-    expect(notifications(conn, "session/status")).toContainEqual(
+    expect(notifications(conn, "turn/status")).toContainEqual(
       expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", status: "interrupted" }) }),
     );
 
     controller.push({ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } });
     await waitFor(() => notifications(conn, "session/event").length >= 2);
     controller.push({ type: "result", subtype: "success" });
-    await waitFor(() => registry.listActive().every((s) => s.sessionId !== "sdk-session"));
+    await waitFor(() => registry.listActive().some((s) => s.sessionId === "sdk-session" && s.status === "idle"));
     expect(notifications(conn, "session/status")).toContainEqual(
-      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", status: "completed" }) }),
+      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", status: "idle" }) }),
     );
     controller.finish();
+    await waitFor(() => registry.listActive().every((s) => s.sessionId !== "sdk-session"));
   });
 
   it("passes slash command input unchanged and forwards SDK slash command metadata", async () => {
@@ -226,7 +243,11 @@ describe("Claude SDK daemon data flow", () => {
     controller.push({ type: "system", subtype: "init", session_id: "sdk-session" });
     await waitFor(() => registry.get("sdk-session") !== undefined);
 
-    const decision = controller.call.options.canUseTool("Read", { file_path: "/tmp/a" });
+    const decision = controller.call.options.canUseTool(
+      "Read",
+      { file_path: "/tmp/a" },
+      sdkPermissionContext("sdk-read-request"),
+    );
     await waitFor(() => notifications(conn, "permission/request").length === 1);
     const request = notifications(conn, "permission/request")[0] as {
       params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
@@ -234,12 +255,14 @@ describe("Claude SDK daemon data flow", () => {
 
     expect(request.params).toMatchObject({
       sessionId: "sdk-session",
+      requestId: "sdk-read-request",
       toolName: "Read",
       input: { file_path: "/tmp/a" },
     });
-    expect(permissions.respond("sdk-session", request.params.requestId, "other", { behavior: "allow" })).toBe(false);
+    const permissionScope = registry.get("sdk-session")!.runtimeId;
+    expect(permissions.respond(permissionScope, request.params.requestId, "other", { behavior: "allow" })).toBe(false);
     expect(
-      permissions.respond("sdk-session", request.params.requestId, "owner", {
+      permissions.respond(permissionScope, request.params.requestId, "owner", {
         behavior: "allow",
         updatedInput: { file_path: "/tmp/b" },
       }),
@@ -259,7 +282,11 @@ describe("Claude SDK daemon data flow", () => {
     controller.push({ type: "system", subtype: "init", session_id: "sdk-session" });
     await waitFor(() => registry.get("sdk-session") !== undefined);
 
-    const decision = controller.call.options.canUseTool("Bash", { command: "rm -rf /tmp/example" });
+    const decision = controller.call.options.canUseTool(
+      "Bash",
+      { command: "rm -rf /tmp/example" },
+      sdkPermissionContext("sdk-bash-request"),
+    );
     await waitFor(() => notifications(conn, "permission/request").length === 1);
     const request = notifications(conn, "permission/request")[0] as {
       params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
@@ -271,7 +298,7 @@ describe("Claude SDK daemon data flow", () => {
       input: { command: "rm -rf /tmp/example" },
     });
     expect(
-      permissions.respond("sdk-session", request.params.requestId, "owner", {
+      permissions.respond(registry.get("sdk-session")!.runtimeId, request.params.requestId, "owner", {
         behavior: "deny",
         message: "Use a safer read-only command",
       }),
@@ -291,7 +318,11 @@ describe("Claude SDK daemon data flow", () => {
     controller.push({ type: "system", subtype: "init", session_id: "sdk-session" });
     await waitFor(() => registry.get("sdk-session") !== undefined);
 
-    const decision = controller.call.options.canUseTool("ExitPlanMode", { plan: "Implement the approved changes" });
+    const decision = controller.call.options.canUseTool(
+      "ExitPlanMode",
+      { plan: "Implement the approved changes" },
+      sdkPermissionContext("sdk-plan-request"),
+    );
     await waitFor(() => notifications(conn, "permission/request").length === 1);
     const request = notifications(conn, "permission/request")[0] as {
       params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
@@ -302,10 +333,11 @@ describe("Claude SDK daemon data flow", () => {
       toolName: "ExitPlanMode",
       input: { plan: "Implement the approved changes" },
     });
-    expect(permissions.respond("sdk-session", request.params.requestId, "owner", { behavior: "allow" })).toBe(true);
+    const permissionScope = registry.get("sdk-session")!.runtimeId;
+    expect(permissions.respond(permissionScope, request.params.requestId, "owner", { behavior: "allow" })).toBe(true);
     await expect(decision).resolves.toEqual({ behavior: "allow", updatedInput: undefined });
     expect(permissions.size()).toBe(0);
-    expect(permissions.respond("sdk-session", request.params.requestId, "owner", { behavior: "allow" })).toBe(false);
+    expect(permissions.respond(permissionScope, request.params.requestId, "owner", { behavior: "allow" })).toBe(false);
     controller.finish();
   });
 
@@ -332,7 +364,11 @@ describe("Claude SDK daemon data flow", () => {
         },
       ],
     };
-    const decision = controller.call.options.canUseTool("AskUserQuestion", input);
+    const decision = controller.call.options.canUseTool(
+      "AskUserQuestion",
+      input,
+      sdkPermissionContext("sdk-question-request"),
+    );
     await waitFor(() => notifications(conn, "permission/request").length === 1);
     const request = notifications(conn, "permission/request")[0] as {
       params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
@@ -344,7 +380,7 @@ describe("Claude SDK daemon data flow", () => {
       input,
     });
     expect(
-      permissions.respond("sdk-session", request.params.requestId, "owner", {
+      permissions.respond(registry.get("sdk-session")!.runtimeId, request.params.requestId, "owner", {
         behavior: "allow",
         updatedInput: { ...input, answers: { "Which approach should I use?": "Safe" } },
       }),
