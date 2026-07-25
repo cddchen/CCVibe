@@ -65,7 +65,6 @@ export async function startServer(
 
     socket.on("close", () => {
       ctx.sessions.onClientDisconnect(conn.id);
-      ctx.permissions.releaseConnection(conn.id);
     });
   });
 

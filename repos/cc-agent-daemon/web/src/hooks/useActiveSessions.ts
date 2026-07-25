@@ -40,7 +40,7 @@ export function useActiveSessions(
 
     const refresh = async () => {
       try {
-        const { sessions } = await client.call<{ sessions: ActiveSessionRow[] }>("session.listActive");
+        const { sessions } = await client.call<{ sessions: ActiveSessionRow[] }>("conversation.listActive");
         if (!cancelled) setActiveMap(mapActiveSessions(sessions));
       } catch (e) {
         console.warn("[useActiveSessions] listActive failed", e);

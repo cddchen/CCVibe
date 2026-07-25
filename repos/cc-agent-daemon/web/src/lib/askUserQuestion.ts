@@ -13,7 +13,7 @@ export type AskUserQuestion = {
   raw: Record<string, unknown>;
 };
 
-/** Parse a permission/request `input` for the AskUserQuestion tool, or null if the shape is unusable. */
+/** Parse a conversation permission event's `input` for AskUserQuestion, or null if unusable. */
 export function parseAskUserQuestion(input: unknown): AskUserQuestion | null {
   if (!input || typeof input !== "object") return null;
   const raw = input as Record<string, unknown>;

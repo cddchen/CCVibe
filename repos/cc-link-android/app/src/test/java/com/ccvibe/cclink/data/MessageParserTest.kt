@@ -2,8 +2,7 @@ package com.ccvibe.cclink.data
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -13,55 +12,97 @@ class MessageParserTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
-    fun filtersCompactRowsAndAssociatesToolResults() {
-        val entries = json.parseToJsonElement(
-            """
-            [
-              {"type":"user","isCompactSummary":true,"message":{"content":"hidden"}},
-              {"type":"user","uuid":"u1","message":{"content":"hello"}},
-              {"type":"assistant","uuid":"a1","message":{"model":"sonnet","content":[
-                {"type":"thinking","thinking":"checking"},
-                {"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"pwd"}},
+    fun projectsDomainMessagesAndToolResults() {
+        val domain = parse(
+            """[
+              {"type":"user_message","id":"u1","turnId":"t1","timestamp":"1","status":"completed","content":"hello"},
+              {"type":"agent_message","id":"a1","turnId":"t1","timestamp":"2","status":"completed","model":"sonnet","content":[
+                {"type":"thinking","thinking":"plan"},
+                {"type":"tool_call","toolCallId":"tool-1","toolName":"Read","input":{"file_path":"README.md"},"status":"completed"},
                 {"type":"text","text":"done"}
-              ]}},
-              {"type":"user","message":{"content":[
-                {"type":"tool_result","tool_use_id":"tool-1","content":"/tmp","is_error":false}
-              ]}}
-            ]
-            """.trimIndent(),
-        ).jsonArray
+              ]},
+              {"type":"tool_result","id":"r1","turnId":"t1","timestamp":"3","status":"completed","toolCallId":"tool-1","content":"contents","isError":false}
+            ]""",
+        )
 
-        val parsed = MessageParser.parseHistory(entries)
-        assertEquals(2, parsed.messages.size)
-        assertEquals("hello", parsed.messages[0].userText)
-        assertEquals(3, parsed.messages[1].blocks.size)
-        assertEquals(ToolStatus.SUCCESS, parsed.toolResults["tool-1"]?.status)
-        assertEquals("/tmp", parsed.toolResults["tool-1"]?.content)
+        val projected = MessageParser.project(domain)
+
+        assertEquals(2, projected.messages.size)
+        assertEquals(MessageRole.USER, projected.messages[0].role)
+        assertEquals(3, projected.messages[1].blocks.size)
+        assertEquals(ToolStatus.SUCCESS, projected.toolResults.getValue("tool-1").status)
+        assertEquals("contents", projected.toolResults.getValue("tool-1").content)
     }
 
     @Test
-    fun appendsStreamingTextAndThinkingDeltas() {
-        val textEvent = json.parseToJsonElement(
-            """{"event":{"delta":{"type":"text_delta","text":"hello"}}}""",
-        ).jsonObject
-        val thinkingEvent = json.parseToJsonElement(
-            """{"event":{"delta":{"type":"thinking_delta","thinking":"plan"}}}""",
-        ).jsonObject
+    fun groupsAllAgentMessagesInOneTurnIntoOneBubble() {
+        val domain = parse(
+            """[
+              {"type":"agent_message","id":"a1","turnId":"t1","timestamp":"1","status":"completed","metrics":{"usage":{"input":10,"output":2}},"content":[{"type":"thinking","thinking":"plan"}]},
+              {"type":"agent_message","id":"a2","turnId":"t1","timestamp":"2","status":"completed","metrics":{"usage":{"input":3,"output":4}},"content":[{"type":"tool_call","toolCallId":"x","toolName":"Read","input":{},"status":"completed"}]},
+              {"type":"agent_message","id":"a3","turnId":"t1","timestamp":"3","status":"completed","content":[{"type":"text","text":"answer"}]}
+            ]""",
+        )
 
-        val afterText = MessageParser.applyStreamDelta(emptyList(), textEvent)
-        val afterThinking = MessageParser.applyStreamDelta(afterText, thinkingEvent)
-        assertEquals(MessageBlock.Text("hello"), afterThinking[0])
-        assertEquals(MessageBlock.Thinking("plan"), afterThinking[1])
+        val assistants = MessageParser.project(domain).messages.filter { it.role == MessageRole.ASSISTANT }
+
+        assertEquals(1, assistants.size)
+        assertEquals(3, assistants.single().blocks.size)
+        assertEquals(13L, assistants.single().metrics?.inputTokens)
+        assertEquals(6L, assistants.single().metrics?.outputTokens)
     }
 
     @Test
-    fun preservesFailedToolResult() {
-        val entries = json.parseToJsonElement(
-            """[{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"boom","is_error":true}]}}]""",
-        ).jsonArray
-        val result = MessageParser.parseHistory(entries).toolResults.getValue("x")
-        assertTrue(result.isError)
-        assertEquals(ToolStatus.FAILED, result.status)
-        assertFalse(result.content.isBlank())
+    fun replacesMessageSnapshotById() {
+        val streaming = parse("""[{"type":"agent_message","id":"a1","turnId":"t1","timestamp":"1","status":"streaming","content":[]}]""").single()
+        val completed = parse("""[{"type":"agent_message","id":"a1","turnId":"t1","timestamp":"1","status":"completed","content":[{"type":"text","text":"answer"}]}]""").single()
+
+        val result = MessageParser.upsert(listOf(streaming), completed)
+
+        assertEquals(1, result.size)
+        assertEquals("completed", result.single().string("status"))
     }
+
+    @Test
+    fun pendingFeedbackDisappearsWhenTurnMessagesArrive() {
+        val domain = parse("""[{"type":"user_message","id":"u1","turnId":"t1","timestamp":"1","status":"completed","content":"hello"}]""")
+        val projected = MessageParser.project(domain, PendingTurnFeedback("client-1", "hello", "t1"))
+
+        assertEquals(listOf("u1"), projected.messages.filter { it.role == MessageRole.USER }.map { it.id })
+        assertTrue(projected.messages.any { it.id == "pending-agent:client-1" })
+        assertFalse(projected.messages.any { it.id == "pending-user:client-1" })
+    }
+
+    @Test
+    fun pendingFeedbackDeduplicatesBeforeSendReceiptProvidesTurnId() {
+        val domain = parse(
+            """[
+              {"type":"user_message","id":"u1","turnId":"t1","timestamp":"1","status":"completed","content":"hello"},
+              {"type":"agent_message","id":"a1","turnId":"t1","timestamp":"2","status":"streaming","content":[]}
+            ]""",
+        )
+
+        val projected = MessageParser.project(domain, PendingTurnFeedback("client-1", "hello"))
+
+        assertFalse(projected.messages.any { it.id.startsWith("pending-") })
+        assertEquals(1, projected.messages.count { it.role == MessageRole.USER })
+        assertEquals(1, projected.messages.count { it.role == MessageRole.ASSISTANT })
+    }
+
+    @Test
+    fun activeTurnKeepsAssistantStreamingAfterCurrentSnapshotCompletes() {
+        val domain = parse(
+            """[
+              {"type":"user_message","id":"u1","turnId":"t1","timestamp":"1","status":"completed","content":"hello"},
+              {"type":"agent_message","id":"a1","turnId":"t1","timestamp":"2","status":"completed","content":[{"type":"thinking","thinking":"done thinking"}]}
+            ]""",
+        )
+
+        val projected = MessageParser.project(domain, PendingTurnFeedback("client-1", "hello", "t1"))
+
+        assertTrue(projected.messages.single { it.role == MessageRole.ASSISTANT }.streaming)
+    }
+
+    private fun parse(raw: String): List<JsonObject> =
+        (json.parseToJsonElement(raw) as JsonArray).map { it as JsonObject }
 }

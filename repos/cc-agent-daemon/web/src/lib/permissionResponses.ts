@@ -1,12 +1,12 @@
 export type PermissionRequest = {
-  sessionId: string;
+  conversationId: string;
   requestId: string | number;
   toolName: string;
   input?: unknown;
 };
 
 export type PermissionRespondParams = {
-  sessionId: string;
+  conversationId: string;
   requestId: string | number;
   behavior: "allow" | "deny";
   updatedInput?: Record<string, unknown>;
@@ -34,7 +34,7 @@ export function buildPermissionRespondParams(
   opts?: { updatedInputText?: string; denyMessage?: string },
 ): PermissionRespondParams {
   const base = {
-    sessionId: request.sessionId,
+    conversationId: request.conversationId,
     requestId: request.requestId,
     behavior,
   };

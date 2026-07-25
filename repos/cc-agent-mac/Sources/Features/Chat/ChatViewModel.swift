@@ -9,7 +9,7 @@ struct TrustPrompt: Identifiable {
 
 struct PendingPermission: Identifiable {
     let id: String
-    let sessionId: String
+    let conversationId: String
     let requestId: String
     let toolName: String
     let input: JSONValue?
@@ -40,33 +40,24 @@ final class ChatViewModel: ObservableObject {
     @Published var sidebarExpanded: [String: Bool] = DirectoryExpansionStore.read()
     @Published var activeMap: [String: ActiveKind] = [:]
     @Published var liveSessionId: String?
-
-    /// Empty when route is home (no conversation selected).
-    @Published private(set) var workspacePath: String = ""
+    @Published private(set) var workspacePath = ""
     @Published private(set) var historySessionId: String?
-    /// True only after user opens a session or starts a new chat from a workspace.
     @Published private(set) var hasActiveConversation = false
-    let turnStream = TurnStream()
 
     private weak var app: AppState?
     private var unbind: (() -> Void)?
     private var modelOptions = DaemonConstants.modelOptions
-    private var historyToolResults: [String: ToolResultState] = [:]
+    private var conversationMessages: [ConversationMessage] = []
     private var aliasIds: Set<String> = []
-    private var hydratedSessionId: String?
+    private var hydratedKey: String?
     private var switchGeneration = 0
+    private var lastSequence = 0
+    private var sequenceRuntimeId: String?
     private let pageSize = 80
-    /// Parked permission prompts keyed by sessionId. Survive session switches; shown when that session is frontmost again.
     private var parkedPermissions: [String: PendingPermission] = [:]
     private var parkedPermissionUpdatedInput: [String: String] = [:]
+    private var pendingTurn: PendingTurnFeedback?
 
-    init() {
-        turnStream.onPatch = { [weak self] id, blocks, metrics, model, streaming in
-            self?.patchAssistant(id: id, blocks: blocks, metrics: metrics, model: model, streaming: streaming)
-        }
-    }
-
-    /// Apply app route without remounting the chat shell.
     func applyRoute(_ route: AppRoute) {
         switch route {
         case .home:
@@ -76,78 +67,44 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// In-place session/workspace switch without remounting the chat shell (sidebar/input stay mounted).
     func switchTo(workspacePath: String, sessionId: String?) {
         let path = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else {
-            clearToHome()
-            return
-        }
-
-        let sameWorkspace = self.workspacePath == path
-        if sameWorkspace && hasActiveConversation {
-            if sessionId == historySessionId {
-                // Same explicit selection (including both-nil "new chat" for this workspace).
-                if sessionId != nil || liveSessionId == nil {
-                    return
-                }
-            }
-            // Route sync after create/resume: keep the in-flight transcript.
+        guard !path.isEmpty else { clearToHome(); return }
+        if self.workspacePath == path, hasActiveConversation {
+            if sessionId == historySessionId { return }
             if let sessionId, sessionId == liveSessionId || aliasIds.contains(sessionId) {
-                if historySessionId != sessionId {
-                    historySessionId = sessionId
-                }
-                return
-            }
-            if sessionId == nil, historySessionId == nil, liveSessionId == nil {
+                historySessionId = sessionId
                 return
             }
         }
 
-        let previousLive = liveSessionId
-        let previousHistory = historySessionId
+        let previous = liveSessionId
         prepareConversationSwitch(workspacePath: path, sessionId: sessionId)
         guard let app else { return }
         bindNotifications(app: app)
         let generation = switchGeneration
         Task {
-            await self.detachLiveSessions(client: app.client, ids: [previousLive, previousHistory])
+            await detachConversation(client: app.client, conversationId: previous)
             guard generation == self.switchGeneration else { return }
             await self.loadAfterSwitch(generation: generation)
         }
     }
 
     func clearToHome() {
-        guard hasActiveConversation || !workspacePath.isEmpty || historySessionId != nil || liveSessionId != nil || !allMessages.isEmpty else {
-            return
-        }
-        let previousLive = liveSessionId
-        let previousHistory = historySessionId
+        let previous = liveSessionId
         prepareConversationSwitch(workspacePath: "", sessionId: nil)
         hasActiveConversation = false
         trusted = false
         trustPrompt = nil
-        if let app {
-            bindNotifications(app: app)
-        } else {
-            unbind?()
-            unbind = nil
-        }
-        if let client = app?.client {
-            Task { await self.detachLiveSessions(client: client, ids: [previousLive, previousHistory]) }
-        }
+        if let app { bindNotifications(app: app) }
+        if let client = app?.client { Task { await self.detachConversation(client: client, conversationId: previous) } }
     }
 
-    var busy: Bool {
-        runState == .running
-    }
+    var busy: Bool { runState == .running }
 
     var availableModelOptions: [ModelOption] {
-        let base = modelOptions
-        if customModel.isEmpty || base.contains(where: { $0.id == customModel }) {
-            return base
-        }
-        return base + [ModelOption(id: customModel, label: customModel)]
+        if customModel.isEmpty || modelOptions.contains(where: { $0.id == customModel }) { return modelOptions }
+        return modelOptions + [ModelOption(id: customModel, label: customModel)]
     }
 
     var askQuestion: AskUserQuestionPayload? {
@@ -160,31 +117,25 @@ final class ChatViewModel: ObservableObject {
     }
 
     func detach() {
-        let previousLive = liveSessionId
-        let previousHistory = historySessionId
+        let previous = liveSessionId
         unbind?()
         unbind = nil
-        turnStream.reset()
-        if let client = app?.client {
-            Task { await self.detachLiveSessions(client: client, ids: [previousLive, previousHistory]) }
-        }
+        if let client = app?.client { Task { await self.detachConversation(client: client, conversationId: previous) } }
     }
 
     func refreshAfterReconnect() {
         guard let client = app?.client, client.phase == .connected else { return }
+        hydratedKey = nil
         Task {
             await refreshSessionList(client: client)
             await refreshActiveSessions(client: client)
-            if hasActiveConversation, let historySessionId {
-                await syncLiveAttach(client: client, diskSessionId: historySessionId)
-            }
+            if hasActiveConversation, trusted { _ = try? await openConversation(client: client) }
         }
     }
 
     func loadMoreHistory() {
         guard visibleMessages.count < allMessages.count else { return }
-        let nextCount = min(allMessages.count, visibleMessages.count + pageSize)
-        visibleMessages = Array(allMessages.suffix(nextCount))
+        visibleMessages = Array(allMessages.suffix(min(allMessages.count, visibleMessages.count + pageSize)))
     }
 
     func toggleSidebar() {
@@ -204,19 +155,13 @@ final class ChatViewModel: ObservableObject {
     }
 
     func checkTrust(client: DaemonClient) async {
-        guard hasActiveConversation, !workspacePath.isEmpty else {
-            trusted = false
-            trustPrompt = nil
-            return
-        }
+        guard hasActiveConversation, !workspacePath.isEmpty else { trusted = false; trustPrompt = nil; return }
         struct Wrap: Decodable { let trusted: Bool; let path: String; let parent: String }
         do {
             let trust = try await client.callDecodable(Wrap.self, method: "workspace.checkTrust", params: ["path": workspacePath])
             trusted = trust.trusted
             trustPrompt = trust.trusted ? nil : TrustPrompt(path: trust.path, parent: trust.parent)
-        } catch {
-            statusText = error.localizedDescription
-        }
+        } catch { statusText = error.localizedDescription }
     }
 
     func trust(path: String) async {
@@ -227,115 +172,85 @@ final class ChatViewModel: ObservableObject {
             trusted = true
             trustPrompt = nil
             await refreshSessionList(client: client)
-            await loadSettings(client: client)
-            await loadHistory(client: client)
-            if let historySessionId {
-                await syncLiveAttach(client: client, diskSessionId: historySessionId)
-            }
-        } catch {
-            statusText = error.localizedDescription
-        }
+            _ = try await openConversation(client: client)
+        } catch { statusText = error.localizedDescription }
     }
 
     func send() async {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard hasActiveConversation, trusted, !text.isEmpty, let client = app?.client, client.phase == .connected, !busy else { return }
-
+        let clientMessageId = UUID().uuidString
         inputText = ""
         statusText = "running"
         runState = .running
-        // User first, then empty assistant stream bubble — beginTurn appends via onPatch.
-        appendMessage(ChatMessage(id: "u-\(Int(Date().timeIntervalSince1970 * 1000))", role: "user", content: .plain(text), streaming: false))
-        _ = turnStream.beginTurn()
-
+        pendingTurn = PendingTurnFeedback(clientMessageId: clientMessageId, content: text, turnId: nil)
+        rebuildTranscript()
         do {
-            var sid = try await ensureSession(client: client)
-            do {
-                _ = try await client.call(method: "session.sendMessage", params: ["sessionId": sid, "content": text])
-            } catch {
-                let msg = error.localizedDescription
-                if !msg.contains("unknown session") || historySessionId == nil {
-                    throw error
-                }
-                sid = try await resumeLive(sessionId: historySessionId!, model: nil, effort: nil)
-                _ = try await client.call(method: "session.sendMessage", params: ["sessionId": sid, "content": text])
+            let conversationId = try await ensureConversation(client: client)
+            struct SendReceipt: Decodable { let turnId: String }
+            let receipt = try await client.callDecodable(SendReceipt.self, method: "conversation.send", params: [
+                "conversationId": conversationId,
+                "content": text,
+                "clientMessageId": clientMessageId,
+            ])
+            if let current = pendingTurn, current.clientMessageId == clientMessageId {
+                pendingTurn = PendingTurnFeedback(clientMessageId: current.clientMessageId, content: current.content, turnId: receipt.turnId)
+                rebuildTranscript()
             }
         } catch {
+            pendingTurn = nil
             statusText = error.localizedDescription
             runState = .error
-            turnStream.endTurn()
+            rebuildTranscript()
         }
     }
 
     func stop() async {
-        guard let client = app?.client, let sid = liveSessionId else { return }
+        guard let client = app?.client, let conversationId = liveSessionId else { return }
         do {
-            _ = try await client.call(method: "session.interrupt", params: ["sessionId": sid])
-            turnStream.endTurn()
+            _ = try await client.call(method: "conversation.interrupt", params: ["conversationId": conversationId])
             runState = .interrupted
             statusText = "已停止"
-        } catch {
-            statusText = error.localizedDescription
-        }
+        } catch { statusText = error.localizedDescription }
     }
 
-    func respondPermissionAllow() async {
+    func respondPermissionAllow() async { await respondPermission(behavior: "allow") }
+    func respondPermissionDeny() async { await respondPermission(behavior: "deny") }
+
+    private func respondPermission(behavior: String) async {
         guard let client = app?.client, let permission = pendingPermission else { return }
         do {
             let params = try PermissionResponses.buildPermissionRespondParams(
                 request: permission,
-                behavior: "allow",
+                behavior: behavior,
                 updatedInputText: permissionUpdatedInput,
                 denyMessage: permissionDenyMessage
             )
             _ = try await client.call(method: "permission.respond", params: params)
-            clearPermissionState()
+            clearPermissionState(ifMatching: permission)
         } catch {
-            permissionError = error.localizedDescription
-        }
-    }
-
-    func respondPermissionDeny() async {
-        guard let client = app?.client, let permission = pendingPermission else { return }
-        do {
-            let params = try PermissionResponses.buildPermissionRespondParams(
-                request: permission,
-                behavior: "deny",
-                updatedInputText: permissionUpdatedInput,
-                denyMessage: permissionDenyMessage
-            )
-            _ = try await client.call(method: "permission.respond", params: params)
-            clearPermissionState()
-        } catch {
-            permissionError = error.localizedDescription
+            if pendingPermission?.id == permission.id { permissionError = error.localizedDescription }
         }
     }
 
     func toggleAskSelection(questionIndex: Int, label: String, multiSelect: Bool) {
-        askSelections = AskUserQuestionEngine.toggleSelection(
-            selections: askSelections,
-            questionIndex: questionIndex,
-            label: label,
-            multiSelect: multiSelect
-        )
+        askSelections = AskUserQuestionEngine.toggleSelection(selections: askSelections, questionIndex: questionIndex, label: label, multiSelect: multiSelect)
     }
 
     func respondAskAllow() async {
-        guard let client = app?.client,
-              let permission = pendingPermission,
-              let ask = askQuestion,
+        guard let client = app?.client, let permission = pendingPermission, let ask = askQuestion,
               AskUserQuestionEngine.allQuestionsAnswered(ask, selections: askSelections) else { return }
         do {
             let updatedInput = AskUserQuestionEngine.buildUpdatedInput(ask, selections: askSelections)
             _ = try await client.call(method: "permission.respond", params: [
-                "sessionId": permission.sessionId,
+                "conversationId": permission.conversationId,
                 "requestId": permission.requestId,
                 "behavior": "allow",
                 "updatedInput": updatedInput.mapValues { $0.toFoundationValue() },
             ])
-            clearPermissionState()
+            clearPermissionState(ifMatching: permission)
         } catch {
-            permissionError = error.localizedDescription
+            if pendingPermission?.id == permission.id { permissionError = error.localizedDescription }
         }
     }
 
@@ -343,51 +258,45 @@ final class ChatViewModel: ObservableObject {
         guard let client = app?.client, let permission = pendingPermission else { return }
         do {
             _ = try await client.call(method: "permission.respond", params: [
-                "sessionId": permission.sessionId,
+                "conversationId": permission.conversationId,
                 "requestId": permission.requestId,
                 "behavior": "deny",
                 "message": "用户取消了问题",
             ])
-            clearPermissionState()
+            clearPermissionState(ifMatching: permission)
         } catch {
-            permissionError = error.localizedDescription
+            if pendingPermission?.id == permission.id { permissionError = error.localizedDescription }
         }
     }
 
     func setPermissionMode(_ next: PermissionMode) async {
         permissionMode = next
-        guard let client = app?.client, let sid = liveSessionId else { return }
+        guard let client = app?.client, !busy else { return }
         do {
-            _ = try await client.call(method: "session.setPermissionMode", params: ["sessionId": sid, "mode": next.rawValue])
-        } catch {
-            statusText = error.localizedDescription
-        }
+            let id = try await ensureConversation(client: client)
+            _ = try await client.call(method: "conversation.setPermissionMode", params: ["conversationId": id, "mode": next.rawValue])
+        } catch { statusText = error.localizedDescription }
     }
 
     func applyModel(_ next: String) async {
         model = next
-        if let historySessionId, !busy {
-            do {
-                _ = try await resumeLive(sessionId: historySessionId, model: next, effort: nil)
-            } catch {
-                statusText = error.localizedDescription
-            }
-        }
+        guard let client = app?.client, !busy else { return }
+        do {
+            let id = try await ensureConversation(client: client)
+            _ = try await client.call(method: "conversation.setModel", params: ["conversationId": id, "model": next])
+        } catch { statusText = error.localizedDescription }
     }
 
     func applyEffort(_ next: EffortLevel) async {
         effort = next
-        if let historySessionId, !busy {
-            do {
-                _ = try await resumeLive(sessionId: historySessionId, model: nil, effort: next)
-            } catch {
-                statusText = error.localizedDescription
-            }
-        }
+        guard let client = app?.client, !busy else { return }
+        do {
+            let id = try await ensureConversation(client: client)
+            _ = try await client.call(method: "conversation.setEffort", params: ["conversationId": id, "effort": next.rawValue])
+        } catch { statusText = error.localizedDescription }
     }
 
     func openSession(workspacePath: String, sessionId: String?) {
-        // Switch locally first so the transcript updates immediately; then sync app route.
         switchTo(workspacePath: workspacePath, sessionId: sessionId)
         app?.openChat(workspacePath: workspacePath, sessionId: sessionId)
     }
@@ -397,12 +306,11 @@ final class ChatViewModel: ObservableObject {
         parkCurrentPermissionIfNeeded()
         unbind?()
         unbind = nil
-        turnStream.reset()
-
+        conversationMessages = []
         allMessages = []
         visibleMessages = []
         toolResults = [:]
-        historyToolResults = [:]
+        pendingTurn = nil
         pendingPermission = nil
         permissionUpdatedInput = "{}"
         permissionDenyMessage = ""
@@ -411,18 +319,15 @@ final class ChatViewModel: ObservableObject {
         statusText = ""
         runState = .completed
         liveSessionId = sessionId
-        hydratedSessionId = nil
-        aliasIds.removeAll()
-        if let sessionId {
-            aliasIds.insert(sessionId)
-        }
-
+        hydratedKey = nil
+        lastSequence = 0
+        sequenceRuntimeId = nil
+        aliasIds = Set(sessionId.map { [$0] } ?? [])
         self.workspacePath = workspacePath
-        self.historySessionId = sessionId
+        historySessionId = sessionId
         hasActiveConversation = !workspacePath.isEmpty
         trusted = false
         trustPrompt = nil
-        // Intentional session changes clear the composer for a clean context.
         inputText = ""
         presentParkedPermissionIfNeeded()
     }
@@ -433,11 +338,8 @@ final class ChatViewModel: ObservableObject {
         guard generation == switchGeneration else { return }
         await checkTrust(client: client)
         guard generation == switchGeneration, trusted else { return }
-        await loadHistory(client: client)
-        guard generation == switchGeneration else { return }
-        if let historySessionId {
-            await syncLiveAttach(client: client, diskSessionId: historySessionId)
-        }
+        do { _ = try await openConversation(client: client) }
+        catch { statusText = error.localizedDescription }
     }
 
     private func bootstrapShell() async {
@@ -445,39 +347,19 @@ final class ChatViewModel: ObservableObject {
         await refreshSessionList(client: client)
         await refreshActiveSessions(client: client)
         await loadSettings(client: client)
-        // Apply current route after shell data is ready (home = empty detail).
-        if let route = app?.route {
-            applyRoute(route)
-        }
+        if let route = app?.route { applyRoute(route) }
     }
 
     private func bindNotifications(app: AppState) {
         unbind?()
-        // Home still parks permission prompts for background live sessions.
         guard hasActiveConversation else {
-            unbind = app.router.bind(
-                acceptAny: true,
-                sessionIds: [],
-                handlers: StreamHandlers(
-                    onSdkEvent: { _, _ in },
-                    onStatus: { _, _, _ in },
-                    onPermission: { [weak self] permission in self?.handlePermission(permission) },
-                    onInit: nil
-                )
-            )
+            unbind = nil
             return
         }
         let opts = ChatSessionRouting.chatNotifyBindOptions(sessionIds: Array(aliasIds))
-        unbind = app.router.bind(
-            acceptAny: opts.acceptAny,
-            sessionIds: opts.sessionIds,
-            handlers: StreamHandlers(
-                onSdkEvent: { [weak self] msg, meta in self?.handleSdk(msg, meta: meta) },
-                onStatus: { [weak self] status, err, meta in self?.handleStatus(status, err: err, meta: meta) },
-                onPermission: { [weak self] permission in self?.handlePermission(permission) },
-                onInit: { [weak self] info, meta in self?.handleInit(info, meta: meta) }
-            )
-        )
+        unbind = app.router.bind(acceptAny: opts.acceptAny, sessionIds: opts.sessionIds, handlers: StreamHandlers(
+            onEvent: { [weak self] envelope, meta in self?.handleEvent(envelope, meta: meta) }
+        ))
     }
 
     private func rebindNotificationsIfNeeded() {
@@ -485,13 +367,9 @@ final class ChatViewModel: ObservableObject {
         bindNotifications(app: app)
     }
 
-    private func detachLiveSessions(client: DaemonClient?, ids: [String?]) async {
-        guard let client else { return }
-        var seen = Set<String>()
-        for id in ids {
-            guard let id, !id.isEmpty, seen.insert(id).inserted else { continue }
-            _ = try? await client.call(method: "session.detach", params: ["sessionId": id])
-        }
+    private func detachConversation(client: DaemonClient?, conversationId: String?) async {
+        guard let client, let conversationId, !conversationId.isEmpty else { return }
+        _ = try? await client.call(method: "conversation.detach", params: ["conversationId": conversationId])
     }
 
     private func loadSettings(client: DaemonClient) async {
@@ -499,197 +377,179 @@ final class ChatViewModel: ObservableObject {
         do {
             let wrap = try await client.callDecodable(Wrap.self, method: "settings.get", params: [:])
             modelOptions = DaemonConstants.modelOptions(from: wrap.settings)
-            if let model = wrap.settings.models.default {
-                self.model = model
-                if !modelOptions.contains(where: { $0.id == model }) {
-                    customModel = model
-                }
+            if let value = wrap.settings.models.default {
+                model = value
+                if !modelOptions.contains(where: { $0.id == value }) { customModel = value }
             }
-            if let effort = wrap.settings.effortLevel {
-                self.effort = effort
-            }
-            if let mode = wrap.settings.permissions.defaultMode {
-                permissionMode = mode
-            }
-        } catch {
-            statusText = error.localizedDescription
-        }
+            if let value = wrap.settings.effortLevel { effort = value }
+            if let value = wrap.settings.permissions.defaultMode { permissionMode = value }
+        } catch { statusText = error.localizedDescription }
     }
 
-    private func loadHistory(client: DaemonClient) async {
-        guard hasActiveConversation, let historySessionId, hydratedSessionId != historySessionId else { return }
-        struct Wrap: Decodable { let messages: [HistoryJsonlEntry] }
-        do {
-            statusText = "加载会话…"
-            let wrap = try await client.callDecodable(
-                Wrap.self,
-                method: "history.loadSession",
-                params: ["sessionId": historySessionId, "workspacePath": workspacePath]
-            )
-            historyToolResults = MessageBlocksEngine.buildToolResultsFromHistory(wrap.messages)
-            toolResults = historyToolResults
-            allMessages = MessageBlocksEngine.historyEntriesToChatMessages(wrap.messages)
-            visibleMessages = Array(allMessages.suffix(pageSize))
-            streamTick &+= 1
-            hydratedSessionId = historySessionId
-            statusText = ""
-
-            if let lastAssistant = allMessages.last(where: { $0.role == "assistant" }),
-               let lastModel = lastAssistant.model,
-               !modelOptions.contains(where: { $0.id == lastModel }) {
-                customModel = lastModel
-                model = lastModel
+    @discardableResult
+    private func openConversation(client: DaemonClient) async throws -> String {
+        let key = historySessionId ?? "new:\(workspacePath)"
+        if hydratedKey == key, let liveSessionId { return liveSessionId }
+        statusText = historySessionId == nil ? "准备会话…" : "加载会话…"
+        var params: [String: Any] = ["workspacePath": workspacePath, "subscribe": true]
+        if let historySessionId { params["conversationId"] = historySessionId }
+        let snapshot = try await client.callDecodable(ConversationSnapshot.self, method: "conversation.open", params: params)
+        let conversationId = snapshot.conversation.id
+        hydratedKey = key
+        liveSessionId = conversationId
+        sequenceRuntimeId = snapshot.runtime.runtimeId
+        if lastSequence <= snapshot.revision {
+            lastSequence = snapshot.revision
+            conversationMessages = snapshot.messages
+        } else {
+            for message in snapshot.messages where !conversationMessages.contains(where: { $0.id == message.id }) {
+                conversationMessages.append(message)
             }
-        } catch {
-            statusText = error.localizedDescription
         }
+        registerAliases([conversationId, snapshot.conversation.sdkSessionId ?? "", snapshot.runtime.runtimeId ?? "", historySessionId ?? ""])
+        runState = runStateFromDaemonStatus(snapshot.runtime.state)
+        model = snapshot.config.model.requestedId
+        if !modelOptions.contains(where: { $0.id == model }) { customModel = model }
+        effort = snapshot.config.effort.requested
+        permissionMode = snapshot.config.permissionMode
+        rebuildTranscript()
+        if historySessionId != conversationId {
+            historySessionId = conversationId
+            upsertSidebarSession(sessionId: conversationId)
+            app?.openChat(workspacePath: workspacePath, sessionId: conversationId)
+        }
+        statusText = ""
+        presentParkedPermissionIfNeeded()
+        return conversationId
     }
 
-    private func syncLiveAttach(client: DaemonClient, diskSessionId: String) async {
-        struct Attach: Decodable { let attached: Bool; let sessionId: String?; let status: String? }
-        do {
-            let result = try await client.callDecodable(Attach.self, method: "session.attachIfLive", params: ["sessionId": diskSessionId])
-            if result.attached, let sessionId = result.sessionId {
-                liveSessionId = sessionId
-                registerAliases([diskSessionId, sessionId])
-                rebindNotificationsIfNeeded()
-                runState = runStateFromDaemonStatus(result.status)
-                presentParkedPermissionIfNeeded()
-            } else {
-                runState = .completed
-            }
-        } catch {
-            statusText = error.localizedDescription
-        }
+    private func ensureConversation(client: DaemonClient) async throws -> String {
+        if let liveSessionId { return liveSessionId }
+        return try await openConversation(client: client)
     }
 
     private func refreshSessionList(client: DaemonClient) async {
-        do {
-            let data = try await SessionListService.load(client: client, force: true)
-            sessionGroups = CCAgent.sessionGroups(from: data)
-        } catch {
-            statusText = error.localizedDescription
-        }
+        do { sessionGroups = CCAgent.sessionGroups(from: try await SessionListService.load(client: client, force: true)) }
+        catch { statusText = error.localizedDescription }
     }
 
     private func refreshActiveSessions(client: DaemonClient) async {
         struct ActiveListResponse: Decodable { let sessions: [ActiveSessionRow] }
         do {
-            let result = try await client.callDecodable(ActiveListResponse.self, method: "session.listActive", params: [:])
+            let result = try await client.callDecodable(ActiveListResponse.self, method: "conversation.listActive", params: [:])
             activeMap = mapActiveSessions(result.sessions)
-        } catch {
-            statusText = error.localizedDescription
-        }
+        } catch { statusText = error.localizedDescription }
     }
 
-    private func ensureSession(client: DaemonClient) async throws -> String {
-        let diskId = liveSessionId ?? historySessionId
-        if let diskId {
-            do {
-                _ = try await client.call(method: "session.attach", params: ["sessionId": diskId])
-                registerAliases([diskId])
-                return diskId
-            } catch {
-                if let historySessionId {
-                    return try await resumeLive(sessionId: historySessionId, model: nil, effort: nil)
-                }
-                throw error
+    private func handleEvent(_ envelope: ConversationEventEnvelope, meta: ConversationEventMeta) {
+        guard matches(meta: meta) else { return }
+        if sequenceRuntimeId != envelope.runtimeId {
+            sequenceRuntimeId = envelope.runtimeId
+            lastSequence = 0
+        }
+        guard envelope.sequence > lastSequence else { return }
+        lastSequence = envelope.sequence
+        let event = envelope.event
+        switch event.type {
+        case "message_start", "message_update", "message_end":
+            if let message = event.message {
+                conversationMessages = MessageBlocksEngine.upsertConversationMessage(conversationMessages, message)
+                rebuildTranscript()
             }
+        case "conversation_status":
+            handleStatus(event.status, error: event.error)
+        case "runtime_status":
+            if event.status == "crashed" { handleStatus("crashed", error: event.error) }
+        case "turn_status":
+            if let turnId = event.turnId, let current = pendingTurn, current.turnId == nil,
+               event.status == "queued" || event.status == "running" {
+                pendingTurn = PendingTurnFeedback(clientMessageId: current.clientMessageId, content: current.content, turnId: turnId)
+            }
+            if ["completed", "failed", "limited", "interrupted"].contains(event.status ?? "") {
+                pendingTurn = nil
+                rebuildTranscript()
+                runState = runStateFromDaemonStatus(event.status)
+                Task { [weak self] in
+                    guard let self, let client = self.app?.client else { return }
+                    await self.refreshSessionList(client: client)
+                    await self.refreshActiveSessions(client: client)
+                }
+            }
+        case "permission_request":
+            let requestId = event.requestId?.stringValue ?? event.requestId?.numberValue.map { String($0) } ?? ""
+            handlePermission(PermissionRequest(
+                conversationId: envelope.conversationId,
+                requestId: requestId,
+                toolName: event.toolName ?? "",
+                input: event.input
+            ))
+        case "permission_resolved":
+            let requestId = event.requestId?.stringValue ?? event.requestId?.numberValue.map { String($0) } ?? ""
+            clearResolvedPermission(conversationId: envelope.conversationId, requestId: requestId)
+        case "runtime_initialized":
+            registerAliases([meta.conversationId, meta.sessionId, meta.runtimeId, event.sdkSessionId ?? ""])
+            if let value = event.model { model = value }
+        default:
+            break
         }
-
-        struct Create: Decodable { let sessionId: String }
-        let created = try await client.callDecodable(
-            Create.self,
-            method: "session.create",
-            params: [
-                "cwd": workspacePath,
-                "model": model,
-                "effort": effort.rawValue,
-                "permissionMode": permissionMode.rawValue,
-                "settingSources": ["user", "project"],
-            ]
-        )
-        // create returns runtimeId; real disk session_id arrives on system/init.
-        liveSessionId = created.sessionId
-        historySessionId = created.sessionId
-        hydratedSessionId = created.sessionId
-        registerAliases([created.sessionId])
-        upsertSidebarSession(sessionId: created.sessionId)
-        activeMap[created.sessionId] = .running
-        app?.openChat(workspacePath: workspacePath, sessionId: created.sessionId)
-        _ = try await client.call(method: "session.attach", params: ["sessionId": created.sessionId])
-        return created.sessionId
     }
 
-    private func resumeLive(sessionId: String, model: String?, effort: EffortLevel?) async throws -> String {
-        guard let client = app?.client else { throw JSONRPCClientError.notConnected }
-        var params: [String: Any] = [
-            "sessionId": sessionId,
-            "cwd": workspacePath,
-            "permissionMode": permissionMode.rawValue,
-        ]
-        if let model { params["model"] = model }
-        if let effort { params["effort"] = effort.rawValue }
-        struct Resume: Decodable { let sessionId: String }
-        let resumed = try await client.callDecodable(Resume.self, method: "session.resume", params: params)
-        liveSessionId = resumed.sessionId
-        registerAliases([sessionId, resumed.sessionId])
-        _ = try await client.call(method: "session.attach", params: ["sessionId": resumed.sessionId])
-        return resumed.sessionId
+    private func handleStatus(_ status: String?, error: String?) {
+        runState = runStateFromDaemonStatus(status)
+        statusText = error ?? (status == "waiting_permission" ? "等待授权…" : status ?? "")
+        if runState == .completed { statusText = "" }
     }
 
     private func handlePermission(_ permission: PermissionRequest) {
+        let key = permissionKey(conversationId: permission.conversationId, requestId: permission.requestId)
         let pending = PendingPermission(
-            id: permission.requestId,
-            sessionId: permission.sessionId,
+            id: key,
+            conversationId: permission.conversationId,
             requestId: permission.requestId,
             toolName: permission.toolName,
             input: permission.input
         )
         let updatedInput = PermissionResponses.permissionInputText(permission.input)
-
-        // Park for any known session id / alias so switching back can resume the prompt.
-        if !isForegroundSession(permission.sessionId) {
-            parkPermission(pending, updatedInput: updatedInput)
-            return
+        parkedPermissions[key] = pending
+        parkedPermissionUpdatedInput[key] = updatedInput
+        if isForegroundConversation(permission.conversationId) {
+            if pendingPermission?.id == key {
+                presentPermission(pending, updatedInput: updatedInput)
+            } else if pendingPermission == nil {
+                presentPermission(pending, updatedInput: updatedInput)
+            }
         }
-
-        presentPermission(pending, updatedInput: updatedInput)
     }
 
-    private func isForegroundSession(_ sessionId: String) -> Bool {
-        if sessionId.isEmpty { return true }
-        if aliasIds.contains(sessionId) { return true }
-        if liveSessionId == sessionId || historySessionId == sessionId { return true }
-        return false
+    private func clearResolvedPermission(conversationId: String, requestId: String) {
+        let key = permissionKey(conversationId: conversationId, requestId: requestId)
+        parkedPermissions.removeValue(forKey: key)
+        parkedPermissionUpdatedInput.removeValue(forKey: key)
+        if pendingPermission?.conversationId == conversationId,
+           pendingPermission?.requestId == requestId {
+            resetPresentedPermission()
+            presentParkedPermissionIfNeeded()
+        }
     }
 
-    private func parkPermission(_ permission: PendingPermission, updatedInput: String) {
-        parkedPermissions[permission.sessionId] = permission
-        parkedPermissionUpdatedInput[permission.sessionId] = updatedInput
+    private func permissionKey(conversationId: String, requestId: String) -> String {
+        "\(conversationId)\u{0}\(requestId)"
+    }
+
+    private func isForegroundConversation(_ id: String) -> Bool {
+        id.isEmpty || aliasIds.contains(id) || liveSessionId == id || historySessionId == id
     }
 
     private func parkCurrentPermissionIfNeeded() {
         guard let pending = pendingPermission else { return }
-        parkedPermissions[pending.sessionId] = pending
-        parkedPermissionUpdatedInput[pending.sessionId] = permissionUpdatedInput
-        pendingPermission = nil
-        permissionUpdatedInput = "{}"
-        permissionDenyMessage = ""
-        permissionError = nil
-        askSelections = []
+        parkedPermissions[pending.id] = pending
+        parkedPermissionUpdatedInput[pending.id] = permissionUpdatedInput
     }
 
     private func presentParkedPermissionIfNeeded() {
-        // Prefer exact live/history ids, then any alias-keyed parked request.
-        let candidates = [liveSessionId, historySessionId].compactMap { $0 } + Array(aliasIds)
-        for sid in candidates {
-            if let parked = parkedPermissions.removeValue(forKey: sid) {
-                let input = parkedPermissionUpdatedInput.removeValue(forKey: sid)
-                    ?? PermissionResponses.permissionInputText(parked.input)
-                presentPermission(parked, updatedInput: input)
-                return
-            }
+        let ids = Set([liveSessionId, historySessionId].compactMap({ $0 }) + Array(aliasIds))
+        if let pending = parkedPermissions.values.first(where: { ids.contains($0.conversationId) }) {
+            presentPermission(pending, updatedInput: parkedPermissionUpdatedInput[pending.id] ?? "{}")
         }
     }
 
@@ -699,16 +559,19 @@ final class ChatViewModel: ObservableObject {
         permissionDenyMessage = ""
         permissionError = nil
         askSelections = []
-        // Keep a parked copy so a mid-prompt session switch can restore it.
-        parkedPermissions[permission.sessionId] = permission
-        parkedPermissionUpdatedInput[permission.sessionId] = updatedInput
+        parkedPermissions[permission.id] = permission
+        parkedPermissionUpdatedInput[permission.id] = updatedInput
     }
 
-    private func clearPermissionState() {
-        if let sid = pendingPermission?.sessionId {
-            parkedPermissions.removeValue(forKey: sid)
-            parkedPermissionUpdatedInput.removeValue(forKey: sid)
-        }
+    private func clearPermissionState(ifMatching permission: PendingPermission) {
+        parkedPermissions.removeValue(forKey: permission.id)
+        parkedPermissionUpdatedInput.removeValue(forKey: permission.id)
+        guard pendingPermission?.id == permission.id else { return }
+        resetPresentedPermission()
+        presentParkedPermissionIfNeeded()
+    }
+
+    private func resetPresentedPermission() {
         pendingPermission = nil
         permissionUpdatedInput = "{}"
         permissionDenyMessage = ""
@@ -716,146 +579,41 @@ final class ChatViewModel: ObservableObject {
         askSelections = []
     }
 
-    private func handleSdk(_ msg: JSONValue, meta: StreamEventMeta) {
-        guard matches(meta: meta) else { return }
-        turnStream.onSdkEvent(msg)
-        toolResults = historyToolResults.merging(turnStream.toolResults) { _, new in new }
-    }
-
-    private func handleStatus(_ status: String, err: String?, meta: StreamEventMeta) {
-        guard matches(meta: meta) else { return }
-        statusText = err ?? status
-        runState = runStateFromDaemonStatus(status)
-        if runState != .running {
-            turnStream.endTurn()
-            Task { [weak self] in
-                guard let self, let client = self.app?.client else { return }
-                // Re-scan history so new-session jsonl (written during the turn) shows up.
-                await self.refreshSessionList(client: client)
-                await self.refreshActiveSessions(client: client)
-            }
-        }
-    }
-
-    private func handleInit(_ info: InitInfo, meta: StreamEventMeta) {
-        if let sessionId = info.sessionId {
-            let previous = liveSessionId
-            liveSessionId = sessionId
-            registerAliases([sessionId, meta.sessionId, meta.runtimeId, meta.sdkSessionId])
-            rebindNotificationsIfNeeded()
-            // Promote runtime placeholder → real disk session id so the sidebar row matches history.
-            if historySessionId == nil
-                || historySessionId == previous
-                || historySessionId == meta.runtimeId
-            {
-                if historySessionId != sessionId {
-                    historySessionId = sessionId
-                    app?.openChat(workspacePath: workspacePath, sessionId: sessionId)
-                }
-            }
-            upsertSidebarSession(sessionId: sessionId, replacing: previous == sessionId ? nil : previous)
-            activeMap[sessionId] = .running
-            if let previous, previous != sessionId {
-                activeMap.removeValue(forKey: previous)
-            }
-            presentParkedPermissionIfNeeded()
-        }
-        if let model = info.model {
-            self.model = model
-        }
-    }
-
-    /// Keep the current workspace's sidebar in sync before history.list* can see the jsonl.
-    private func upsertSidebarSession(sessionId: String, replacing oldId: String? = nil) {
-        guard !workspacePath.isEmpty, !sessionId.isEmpty else { return }
-        let now = ISO8601DateFormatter().string(from: Date())
-        var groups = sessionGroups
-
-        if let gi = groups.firstIndex(where: { $0.workspace.path == workspacePath }) {
-            var sessions = groups[gi].sessions
-            if let oldId, oldId != sessionId {
-                sessions.removeAll { $0.sessionId == oldId }
-            }
-            if let idx = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
-                let cur = sessions[idx]
-                sessions[idx] = HistorySession(
-                    sessionId: cur.sessionId,
-                    messageCount: max(cur.messageCount, 1),
-                    lastTimestamp: now,
-                    filePath: cur.filePath,
-                    firstTimestamp: cur.firstTimestamp
-                )
-            } else {
-                sessions.insert(
-                    HistorySession(sessionId: sessionId, messageCount: 1, lastTimestamp: now),
-                    at: 0
-                )
-            }
-            sessions.sort { ($0.lastTimestamp ?? "").compare($1.lastTimestamp ?? "") == .orderedDescending }
-            let workspace = groups[gi].workspace
-            groups[gi] = SessionGroup(
-                workspace: workspace,
-                sessions: sessions,
-                latestAt: sessions.first?.lastTimestamp ?? now
-            )
-        } else {
-            let workspace = Workspace(id: workspacePath, path: workspacePath, createdAt: now)
-            groups.insert(
-                SessionGroup(
-                    workspace: workspace,
-                    sessions: [HistorySession(sessionId: sessionId, messageCount: 1, lastTimestamp: now)],
-                    latestAt: now
-                ),
-                at: 0
-            )
-        }
-
-        groups.sort { $0.latestAt.compare($1.latestAt) == .orderedDescending }
-        sessionGroups = groups
-    }
-
-    private func matches(meta: StreamEventMeta) -> Bool {
-        let ids = [meta.sessionId, meta.runtimeId, meta.sdkSessionId].filter { !$0.isEmpty }
-        if ids.isEmpty { return liveSessionId == nil }
-        if aliasIds.isEmpty { return true }
-        return ids.contains(where: { aliasIds.contains($0) })
+    private func rebuildTranscript() {
+        let messages = MessageBlocksEngine.conversationMessagesToChatMessages(
+            conversationMessages,
+            pendingTurn: pendingTurn
+        )
+        allMessages = messages
+        visibleMessages = Array(messages.suffix(max(pageSize, visibleMessages.count)))
+        toolResults = MessageBlocksEngine.buildToolResultsFromConversationMessages(conversationMessages)
+        streamTick &+= 1
     }
 
     private func registerAliases(_ ids: [String]) {
         var changed = false
-        for id in ids where !id.isEmpty {
-            if aliasIds.insert(id).inserted { changed = true }
-        }
-        if changed {
-            rebindNotificationsIfNeeded()
-        }
+        for id in ids where !id.isEmpty { if aliasIds.insert(id).inserted { changed = true } }
+        if changed { rebindNotificationsIfNeeded() }
     }
 
-    private func patchAssistant(id: String, blocks: [MessageBlock], metrics: MessageMetrics?, model: String?, streaming: Bool) {
-        let mergedToolResults = historyToolResults.merging(turnStream.toolResults) { _, new in new }
-        if let index = allMessages.firstIndex(where: { $0.id == id }) {
-            allMessages[index].content = .blocks(blocks)
-            allMessages[index].streaming = streaming
-            allMessages[index].metrics = metrics
-            allMessages[index].model = model
+    private func matches(meta: ConversationEventMeta) -> Bool {
+        let ids = [meta.conversationId, meta.sessionId, meta.runtimeId].filter { !$0.isEmpty }
+        if aliasIds.isEmpty { return liveSessionId == nil }
+        return ids.contains { aliasIds.contains($0) }
+    }
+
+    private func upsertSidebarSession(sessionId: String) {
+        guard !workspacePath.isEmpty, !sessionId.isEmpty else { return }
+        let now = ISO8601DateFormatter().string(from: Date())
+        var groups = sessionGroups
+        if let index = groups.firstIndex(where: { $0.workspace.path == workspacePath }) {
+            var sessions = groups[index].sessions.filter { $0.sessionId != sessionId }
+            sessions.insert(HistorySession(sessionId: sessionId, messageCount: 1, lastTimestamp: now), at: 0)
+            groups[index] = SessionGroup(workspace: groups[index].workspace, sessions: sessions, latestAt: now)
         } else {
-            allMessages.append(ChatMessage(
-                id: id,
-                role: "assistant",
-                content: .blocks(blocks),
-                streaming: streaming,
-                model: model,
-                metrics: metrics
-            ))
+            let workspace = Workspace(id: workspacePath, path: workspacePath, createdAt: now)
+            groups.insert(SessionGroup(workspace: workspace, sessions: [HistorySession(sessionId: sessionId, messageCount: 1, lastTimestamp: now)], latestAt: now), at: 0)
         }
-        visibleMessages = Array(allMessages.suffix(max(pageSize, visibleMessages.count)))
-        toolResults = mergedToolResults
-        streamTick &+= 1
-    }
-
-    private func appendMessage(_ message: ChatMessage) {
-        allMessages.append(message)
-        visibleMessages = Array(allMessages.suffix(max(pageSize, visibleMessages.count)))
-        streamTick &+= 1
+        sessionGroups = groups.sorted { $0.latestAt > $1.latestAt }
     }
 }

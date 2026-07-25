@@ -7,7 +7,7 @@ import {
 } from "./permissionResponses";
 
 const request: PermissionRequest = {
-  sessionId: "sess-1",
+  conversationId: "conversation-1",
   requestId: "req-1",
   toolName: "AskUserQuestion",
   input: {
@@ -34,7 +34,7 @@ describe("permissionResponses", () => {
         updatedInputText: JSON.stringify({ answers: { "继续执行吗？": "确认" } }),
       }),
     ).toEqual({
-      sessionId: "sess-1",
+      conversationId: "conversation-1",
       requestId: "req-1",
       behavior: "allow",
       updatedInput: { answers: { "继续执行吗？": "确认" } },
@@ -43,7 +43,7 @@ describe("permissionResponses", () => {
 
   it("builds allow responses without updatedInput when the user leaves it blank", () => {
     expect(buildPermissionRespondParams(request, "allow", { updatedInputText: "   " })).toEqual({
-      sessionId: "sess-1",
+      conversationId: "conversation-1",
       requestId: "req-1",
       behavior: "allow",
     });
@@ -51,7 +51,7 @@ describe("permissionResponses", () => {
 
   it("builds deny responses with a user message", () => {
     expect(buildPermissionRespondParams(request, "deny", { denyMessage: "不要进入计划" })).toEqual({
-      sessionId: "sess-1",
+      conversationId: "conversation-1",
       requestId: "req-1",
       behavior: "deny",
       message: "不要进入计划",

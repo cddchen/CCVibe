@@ -1,5 +1,7 @@
 # cc-agent-daemon P0 修复与运行时架构
 
+> 2026-07-23：对外协议已升级为仅 `conversation.*` + `conversation/event` 完整消息快照。本文涉及旧 `session.*` 或 SDK 原始事件透传的段落仅记录演进过程，当前契约以 [03-json-rpc-api-reference.md](./03-json-rpc-api-reference.md) 为准。
+
 本文记录 Claude Agent SDK 接入的 P0 修复、当前架构边界与客户端迁移契约。详细 SDK 能力清单见 [01-claude-agent-sdk-integration-guide.md](./01-claude-agent-sdk-integration-guide.md)。
 
 完整接口和参数契约见 [03-json-rpc-api-reference.md](./03-json-rpc-api-reference.md)。
@@ -39,7 +41,7 @@ flowchart LR
 - `ConversationService`：以稳定 `conversationId` 编排打开、恢复、发送和动态配置；`open/get` 只读，不创建 SDK Runtime；第一次 `send` 才 single-flight spawn。
 - `MetaStore`：保存 Conversation 与 SDK session 的映射，以及模型、effort、权限模式变更事件；SQLite 只保存 daemon 元数据，不复制 Claude JSONL 对话正文。
 - `SessionRegistry`：按 `conversationId`、`runtimeId` 和 SDK `sessionId` 建立别名索引；保证同一 Conversation 只有一个活跃 Runner，并负责线程上限和最久未对话优先淘汰。
-- `SessionRunner`：管理 Session/Runtime/Turn 三套状态、订阅者、Turn 队列、事件缓冲和权限 owner；每轮对话结束后刷新自动回收计时器，默认空闲 10 分钟关闭 Runtime，订阅者存在也不阻止资源回收。
+- `SessionRunner`：管理 Session/Runtime/Turn 三套状态、订阅者、唯一 active turn、事件缓冲和权限广播；每轮对话结束后刷新自动回收计时器，默认空闲 10 分钟关闭 Runtime，订阅者存在也不阻止资源回收。
 - `EngineAdapter`：隔离 SDK 类型与控制面，禁止业务层维护一个不完整的手写 `Query` 接口。
 - `ClaudeEngine`：唯一直接调用 `query()`、`interrupt()`、`reinitialize()`、`setPermissionMode()`、`close()` 的适配器。
 - `PermissionRegistry`：维护可跨 WebSocket 重连的 pending decision。
@@ -116,9 +118,9 @@ SDK 依赖固定为精确版本 `0.3.217`，升级需要显式修改版本并跑
 
 允许响应可携带 `updatedInput` 和 `updatedPermissions`，并转换回 SDK 的 `PermissionResult`。
 
-### 4.5 权限请求支持 owner 重连
+### 4.5 权限请求支持多设备广播与首响应结算
 
-连接断开不再自动 deny pending request。重连流程为：
+连接断开不自动 deny pending request。所有订阅设备都能看到和处理请求，首个响应生效：
 
 ```mermaid
 sequenceDiagram
@@ -128,21 +130,17 @@ sequenceDiagram
   participant C2 as Client B
 
   SDK->>D: canUseTool(requestId)
-  D->>C1: permission/request
-  C1--xD: WebSocket disconnected
-  Note over D: pending decision 保留，owner 释放
-  C2->>D: session.attach / attachIfLive
-  D->>C2: replay stored permission/request
-  D->>SDK: Query.reinitialize()
-  opt 原回调已结束但 control_response 在断线期间丢失
-    SDK->>D: canUseTool(same requestId)
-    Note over D: requestId 幂等，新建或复用 pending decision
-  end
-  C2->>D: permission.respond
+  D->>C1: permission_request
+  D->>C2: permission_request
+  C2->>D: permission.respond(allow)
   D->>SDK: allow / deny
+  D->>C1: permission_resolved(allow)
+  D->>C2: permission_resolved(allow)
+  C1->>D: permission.respond(deny, late)
+  D-->>C1: already resolved
 ```
 
-SDK 会跳过仍在执行中的同 requestId 回调，因此 daemon 必须主动保存并向新 owner 重放 prompt；`reinitialize()` 用于找回尚未进入 daemon，或回调已完成但响应在传输空窗中丢失的请求。pending 权限仍受 SDK `AbortSignal`、超时、Runtime 关闭控制，避免永久泄漏。
+daemon 使用 SDK `requestId` 对 pending decision 做幂等和原子结算。新订阅设备会从事件缓冲重放尚未完成的权限请求；`reinitialize()` 仍用于恢复 SDK 交互状态。pending 权限继续受 SDK `AbortSignal`、超时和 Runtime 关闭控制，避免永久泄漏。
 
 ## 5. 公开协议变化
 
@@ -216,4 +214,4 @@ npm run build --prefix web
 npm test --prefix web
 ```
 
-关键回归场景包括：多轮 result 后继续发送、interrupt 后继续发送、Query 正常/异常退出、相同 requestId 幂等等待、权限 owner 断线重连与重新投递。
+关键回归场景包括：多轮 result 后继续发送、interrupt 后继续发送、Query 正常/异常退出、相同 requestId 幂等等待、权限请求多设备广播、首响应结算与断线后继续处理。

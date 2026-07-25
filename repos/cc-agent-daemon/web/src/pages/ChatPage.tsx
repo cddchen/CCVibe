@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ThemeToggle } from "../components/ThemeToggle";
+import { ErrorToast } from "../components/ErrorToast";
 import { VirtualMessageList } from "../components/VirtualMessageList";
 import { QuestionPicker } from "../components/QuestionPicker";
 import { parseAskUserQuestion } from "../lib/askUserQuestion";
 import { useDaemon } from "../context/DaemonContext";
 import { useChatNotify } from "../context/ChatNotifyContext";
 import { useActiveSessions, type ActiveKind } from "../hooks/useActiveSessions";
-import { useTurnStream } from "../hooks/useTurnStream";
 import { activeBadgeClassName, activeBadgeLabel } from "../lib/activeSessionBadge";
 import {
   EFFORT_OPTIONS,
@@ -15,6 +15,7 @@ import {
   PERMISSION_MODE_OPTIONS,
   modelOptionsFromSettings,
   type ConversationSnapshot,
+  type ConversationMessage,
   type DaemonSettings,
   type ModelOption,
   type PermissionMode,
@@ -55,11 +56,11 @@ import {
   permissionInputText,
   type PermissionRequest,
 } from "../lib/permissionResponses";
+import { resolvePermission, upsertPermission } from "../lib/permissionQueue";
 import {
-  buildToolResultsFromConversationEntries,
-  conversationEntriesToChatMessages,
-  type ChatMessage,
-  type ToolResultState,
+  buildToolResultsFromConversationMessages,
+  conversationMessagesToChatMessages,
+  upsertConversationMessage,
 } from "../lib/messageBlocks";
 
 type Effort = (typeof EFFORT_OPTIONS)[number]["id"];
@@ -69,11 +70,10 @@ type SessionEventMeta = {
   conversationId: string;
   sessionId: string;
   runtimeId: string;
-  sdkSessionId: string;
 };
 
 function sessionMetaIds(meta: SessionEventMeta): string[] {
-  return [meta.conversationId, meta.sessionId, meta.runtimeId, meta.sdkSessionId].filter(Boolean);
+  return [meta.conversationId, meta.sessionId, meta.runtimeId].filter(Boolean);
 }
 
 function isMetaForSession(meta: SessionEventMeta, sessionId: string | null): boolean {
@@ -128,6 +128,23 @@ function titleForSession(sessionId: string | null) {
   return sessionId ? `会话 ${sessionId.slice(0, 8)}…` : "新对话";
 }
 
+function readableError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function createClientMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function ChatPage() {
   const navigate = useNavigate();
   const { workspacePath: wpEnc, sessionId: sessionIdParam } = useParams();
@@ -137,8 +154,7 @@ export function ChatPage() {
   const { client, connected, reconnectNonce } = useDaemon();
   const activeMap = useActiveSessions(client, connected, reconnectNonce);
   const { bind } = useChatNotify();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [historyToolResults, setHistoryToolResults] = useState<Record<string, ToolResultState>>({});
+  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
   const [input, setInput] = useState("");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(MODEL_OPTIONS);
   const [model, setModel] = useState(MODEL_OPTIONS[0].id);
@@ -150,6 +166,7 @@ export function ChatPage() {
   const [liveSessionId, setLiveSessionId] = useState<string | null>(historySessionId);
   const [sessionStates, setSessionStates] = useState<Record<string, SessionRunState>>({});
   const [status, setStatus] = useState<string | null>(null);
+  const [errorToast, setErrorToast] = useState<string | null>(null);
   const [sessionList, setSessionList] = useState<SessionListData>(() => getCachedSessionList() ?? { workspaces: [], sessionsByPath: {} });
   const [sidebarOpen, setSidebarOpen] = useState(() => readBooleanPreference(CHAT_SIDEBAR_OPEN_KEY, true));
   const [sidebarExpanded, setSidebarExpanded] = useState<Record<string, boolean>>(() => readExpandedPreference(HOME_EXPANDED_DIRS_KEY));
@@ -157,26 +174,72 @@ export function ChatPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [trusted, setTrusted] = useState(false);
   const [trustPrompt, setTrustPrompt] = useState<TrustInfo | null>(null);
-  const [perm, setPerm] = useState<PermissionRequest | null>(null);
+  const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
+  const perm = permissionQueue[0] ?? null;
   const [permissionUpdatedInput, setPermissionUpdatedInput] = useState("{}");
   const [permissionDenyMessage, setPermissionDenyMessage] = useState("用户拒绝");
+  const [pendingTurn, setPendingTurn] = useState<{
+    clientMessageId: string;
+    content: string;
+    turnId?: string;
+  } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const customModelInputRef = useRef<HTMLInputElement | null>(null);
-  const { beginTurn, onSdkEvent, endTurn, resetTurn, toolResults: liveToolResults } = useTurnStream(setMessages);
-  const streamRef = useRef({ onSdkEvent, endTurn, beginTurn, resetTurn });
-  streamRef.current = { onSdkEvent, endTurn, beginTurn, resetTurn };
-
   const modelRef = useRef(model);
   const effortRef = useRef(effort);
   const permissionModeRef = useRef(permissionMode);
   const liveSessionIdRef = useRef(liveSessionId);
+
+  useEffect(() => {
+    if (!perm) return;
+    setPermissionUpdatedInput(permissionInputText(perm.input));
+    setPermissionDenyMessage("用户拒绝");
+  }, [perm?.conversationId, perm?.requestId]);
   const refreshSessionsAfterTurnRef = useRef(false);
+  const lastSequenceRef = useRef(0);
   const sessionAliasesRef = useRef<Record<string, Set<string>>>({});
+  const errorToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   modelRef.current = model;
   effortRef.current = effort;
   permissionModeRef.current = permissionMode;
   liveSessionIdRef.current = liveSessionId;
+  const messages = useMemo(
+    () => conversationMessagesToChatMessages(conversationMessages, pendingTurn),
+    [conversationMessages, pendingTurn],
+  );
+  const allToolResults = useMemo(
+    () => buildToolResultsFromConversationMessages(conversationMessages),
+    [conversationMessages],
+  );
+
+  const showError = useCallback((error: unknown, context?: string) => {
+    const detail = readableError(error);
+    const message = context ? `${context}：${detail}` : detail;
+    setErrorToast(message);
+    if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current);
+    errorToastTimerRef.current = setTimeout(() => {
+      setErrorToast(null);
+      errorToastTimerRef.current = null;
+    }, 8_000);
+  }, []);
+
+  const reportError = useCallback((error: unknown, context: string) => {
+    setStatus(readableError(error));
+    showError(error, context);
+  }, [showError]);
+
+  useEffect(() => {
+    const onError = (event: ErrorEvent) => showError(event.error ?? event.message, "页面异常");
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => showError(event.reason, "异步操作异常");
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+      if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current);
+    };
+  }, [showError]);
 
   const registerSessionAliases = (ids: string[]) => {
     const valid = [...new Set(ids.filter(Boolean))];
@@ -208,6 +271,7 @@ export function ChatPage() {
       setSessionList(await loadSessionList(client, { force }));
     } catch (e) {
       console.warn("[ChatPage] list sessions failed", e);
+      showError(e, "加载会话列表失败");
     }
   };
 
@@ -231,6 +295,7 @@ export function ChatPage() {
       }
     }).catch((e) => {
       console.warn("[ChatPage] settings.get failed", e);
+      showError(e, "加载设置失败");
     });
     return () => {
       cancelled = true;
@@ -242,12 +307,13 @@ export function ChatPage() {
   }, [client, connected, workspacePath]);
 
   useEffect(() => {
-    streamRef.current.resetTurn();
-    setHistoryToolResults({});
-    setMessages([]);
+    setConversationMessages([]);
+    setPendingTurn(null);
+    setPermissionQueue([]);
+    lastSequenceRef.current = 0;
     setLiveSessionId(historySessionId);
     setStatus(historySessionId ? "加载会话…" : null);
-  }, [historySessionId]);
+  }, [historySessionId, workspacePath]);
 
   useEffect(() => {
     const max = 24 * 4;
@@ -262,76 +328,90 @@ export function ChatPage() {
     const unbind = bind(
       chatNotifyBindOptions(liveSessionId),
       {
-        onSdkEvent: (msg, meta) => {
-          const active = isMetaForSession(meta, liveSessionIdRef.current ?? historySessionId);
-          const m = msg as { type?: string; subtype?: string };
-          if (active) streamRef.current.onSdkEvent(msg);
-          if (m.type === "result" && m.subtype !== "error_during_execution" && m.subtype !== "error") {
-            setRunStateForIds(sessionMetaIds(meta), "completed");
-            if (active) {
-              setStatus(null);
-              streamRef.current.endTurn();
+        onEvent: (envelope, meta) => {
+          const active = isMetaForSession(meta, liveSessionIdRef.current ?? historySessionId)
+            || (!liveSessionIdRef.current && !historySessionId);
+          const event = envelope.event;
+          if (active && envelope.sequence <= lastSequenceRef.current) return;
+          if (active) lastSequenceRef.current = envelope.sequence;
+          if (event.type === "message_start" || event.type === "message_update" || event.type === "message_end") {
+            if (active) setConversationMessages((current) => upsertConversationMessage(current, event.message));
+          } else if (event.type === "conversation_status") {
+            const st = event.status;
+            const err = event.error;
+            if (st === "running" || st === "waiting_permission" || st === "closing") {
+              setRunStateForIds(sessionMetaIds(meta), "running");
+              if (active) setStatus(st === "waiting_permission" ? "等待授权…" : null);
+            } else if (st === "idle" || st === "closed") {
+              setRunStateForIds(sessionMetaIds(meta), "completed");
+              if (active) setStatus(null);
+            } else if (st === "error") {
+              setRunStateForIds(sessionMetaIds(meta), "error");
+              if (active) reportError(err ?? st, "会话异常");
             }
-            if (refreshSessionsAfterTurnRef.current) {
-              refreshSessionsAfterTurnRef.current = false;
-              void loadSessions(true);
+            if (st === "idle" || st === "closed" || st === "error") {
+              if (refreshSessionsAfterTurnRef.current) {
+                refreshSessionsAfterTurnRef.current = false;
+                void loadSessions(true);
+              }
             }
-          }
-        },
-        onStatus: (st, err, meta) => {
-          const active = isMetaForSession(meta, liveSessionIdRef.current ?? historySessionId);
-          if (st === "running" || st === "waiting_permission" || st === "closing") {
-            setRunStateForIds(sessionMetaIds(meta), "running");
-            if (active) setStatus(st === "waiting_permission" ? "等待授权…" : null);
-          } else if (st === "idle" || st === "closed") {
-            setRunStateForIds(sessionMetaIds(meta), "completed");
-            if (active) setStatus(null);
-          } else if (st === "error") {
+          } else if (event.type === "turn_status") {
+            if (active && (event.status === "queued" || event.status === "running")) {
+              setPendingTurn((current) => current && !current.turnId
+                ? { ...current, turnId: event.turnId }
+                : current);
+            }
+            if (active && (event.status === "completed" || event.status === "failed" || event.status === "limited" || event.status === "interrupted")) {
+              setPendingTurn((current) => current?.turnId === event.turnId ? null : current);
+            }
+            if (event.status === "completed") setRunStateForIds(sessionMetaIds(meta), "completed");
+            if (event.status === "failed" || event.status === "limited") setRunStateForIds(sessionMetaIds(meta), "error");
+            if (event.status === "interrupted") setRunStateForIds(sessionMetaIds(meta), "interrupted");
+            if (active && (event.status === "failed" || event.status === "limited")) {
+              reportError(event.error ?? event.status, "对话执行失败");
+            }
+          } else if (active && event.type === "permission_request") {
+            setPermissionQueue((current) => upsertPermission(current, {
+              conversationId: envelope.conversationId,
+              requestId: event.requestId,
+              toolName: event.toolName,
+              input: event.input,
+            }));
+          } else if (active && event.type === "permission_resolved") {
+            setPermissionQueue((current) => resolvePermission(
+              current,
+              envelope.conversationId,
+              event.requestId,
+            ));
+          } else if (event.type === "runtime_initialized") {
+            registerSessionAliases([...sessionMetaIds(meta), event.sdkSessionId, historySessionId ?? "", liveSessionIdRef.current ?? ""]);
+            setRunStateForIds([...sessionMetaIds(meta), event.sdkSessionId], "running");
+            if (active && event.model) {
+              const observedModel = modelValueFromObservedModel(event.model, modelOptions, modelRef.current);
+              setModel(observedModel);
+              setDraftModel(observedModel);
+              setCustomModel((current) => customModelFromObservedModel(event.model ?? "", modelOptions, current));
+            }
+          } else if (event.type === "runtime_status" && event.status === "crashed") {
             setRunStateForIds(sessionMetaIds(meta), "error");
-            if (active) setStatus(err ? `${st}: ${err}` : st);
-          } else {
-            if (active) setStatus(err ? `${st}: ${err}` : st);
-          }
-          if ((st === "idle" || st === "closed" || st === "error") && active) {
-            streamRef.current.endTurn();
-          }
-          if (st === "idle" || st === "closed" || st === "error") {
-            if (refreshSessionsAfterTurnRef.current) {
-              refreshSessionsAfterTurnRef.current = false;
-              void loadSessions(true);
-            }
-          }
-        },
-        onPermission: (p) => {
-          setPerm(p);
-          setPermissionUpdatedInput(permissionInputText(p.input));
-          setPermissionDenyMessage("用户拒绝");
-        },
-        onInit: (info, meta) => {
-          const active = isMetaForSession(meta, liveSessionIdRef.current ?? historySessionId) || (!historySessionId && !liveSessionIdRef.current);
-          if (!active) return;
-          if (info.sessionId) {
-            registerSessionAliases([...sessionMetaIds(meta), info.sessionId, historySessionId ?? "", liveSessionIdRef.current ?? ""]);
-            setRunStateForIds([...sessionMetaIds(meta), info.sessionId], "running");
-          }
-          if (info.model) {
-            const observedModel = modelValueFromObservedModel(info.model, modelOptions, modelRef.current);
-            setModel(observedModel);
-            setDraftModel(observedModel);
-            setCustomModel((current) => customModelFromObservedModel(info.model ?? "", modelOptions, current));
+            if (active) reportError(event.error ?? "Runtime crashed", "模型进程异常");
           }
         },
       },
     );
     return unbind;
-  }, [bind, historySessionId, liveSessionId, modelOptions, workspacePath]);
+  }, [bind, historySessionId, liveSessionId, modelOptions, reportError, workspacePath]);
 
   const hydratedRef = useRef<string | null>(null);
+  const hydrationRequestRef = useRef<{
+    key: string;
+    promise: Promise<ConversationSnapshot>;
+  } | null>(null);
 
   useEffect(() => {
     if (reconnectNonce === 0) return;
     hydratedRef.current = null;
-    streamRef.current.resetTurn();
+    hydrationRequestRef.current = null;
   }, [reconnectNonce]);
 
   useEffect(() => {
@@ -351,12 +431,12 @@ export function ChatPage() {
         }
       })
       .catch((e) => {
-        if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
+        if (!cancelled) reportError(e, "检查工作目录失败");
       });
     return () => {
       cancelled = true;
     };
-  }, [client, connected, workspacePath]);
+  }, [client, connected, reportError, workspacePath]);
 
   useEffect(() => {
     if (!client || !connected || !workspacePath || !trusted) return;
@@ -364,14 +444,21 @@ export function ChatPage() {
     if (hydratedRef.current === hydrationKey) return;
 
     let cancelled = false;
-    void (async () => {
-      try {
-        setStatus(historySessionId ? "加载会话…" : "准备会话…");
-        const snapshot = await client.call<ConversationSnapshot>("conversation.open", {
+    setStatus(historySessionId ? "加载会话…" : "准备会话…");
+    let request = hydrationRequestRef.current;
+    if (!request || request.key !== hydrationKey) {
+      request = {
+        key: hydrationKey,
+        promise: client.call<ConversationSnapshot>("conversation.open", {
           conversationId: historySessionId ?? undefined,
           workspacePath,
           subscribe: true,
-        });
+        }),
+      };
+      hydrationRequestRef.current = request;
+    }
+    const activeRequest = request;
+    void activeRequest.promise.then((snapshot) => {
         if (cancelled) return;
 
         const conversationId = snapshot.conversation.id;
@@ -383,8 +470,10 @@ export function ChatPage() {
           snapshot.runtime.runtimeId ?? "",
           historySessionId ?? "",
         ]);
-        setMessages(conversationEntriesToChatMessages(snapshot.messages));
-        setHistoryToolResults(buildToolResultsFromConversationEntries(snapshot.messages));
+        if (lastSequenceRef.current <= snapshot.revision) {
+          lastSequenceRef.current = snapshot.revision;
+          setConversationMessages(snapshot.messages);
+        }
         setRunStateForIds(
           [conversationId, snapshot.conversation.sdkSessionId ?? "", snapshot.runtime.runtimeId ?? ""],
           runStateFromDaemonStatus(snapshot.runtime.state),
@@ -402,15 +491,15 @@ export function ChatPage() {
         setPermissionMode(snapshot.config.permissionMode);
         if (historySessionId !== conversationId) replaceChatUrl(workspacePath, conversationId);
         setStatus(null);
-      } catch (e) {
-        if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
-      }
-    })();
+      }).catch((e) => {
+        if (hydrationRequestRef.current === activeRequest) hydrationRequestRef.current = null;
+        if (!cancelled) reportError(e, "打开会话失败");
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [client, connected, workspacePath, historySessionId, modelOptions, trusted, reconnectNonce]);
+  }, [client, connected, workspacePath, historySessionId, modelOptions, trusted, reconnectNonce, reportError]);
 
   useEffect(() => {
     return () => {
@@ -428,6 +517,10 @@ export function ChatPage() {
       subscribe: true,
     });
     const conversationId = snapshot.conversation.id;
+    if (lastSequenceRef.current <= snapshot.revision) {
+      lastSequenceRef.current = snapshot.revision;
+      setConversationMessages(snapshot.messages);
+    }
     setLiveSessionId(conversationId);
     registerSessionAliases([conversationId, snapshot.conversation.sdkSessionId ?? "", historySessionId ?? ""]);
     if (historySessionId !== conversationId) replaceChatUrl(workspacePath, conversationId);
@@ -435,24 +528,37 @@ export function ChatPage() {
   };
 
   const applyModel = async (next: string) => {
+    if (next.trim() === modelRef.current.trim()) {
+      setModel(next);
+      setDraftModel(next);
+      setCustomModelEditing(false);
+      return;
+    }
     setModel(next);
     setDraftModel(next);
     setCustomModelEditing(false);
-    if (!client || busy) return;
+    if (!client) {
+      reportError("daemon 客户端尚未初始化", "切换模型失败");
+      return;
+    }
+    if (busy) {
+      reportError("当前会话仍在处理中", "切换模型失败");
+      return;
+    }
     try {
       setStatus("切换模型…");
       const conversationId = await ensureConversation();
       await client.call("conversation.setModel", { conversationId, model: next });
       setStatus(null);
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "切换模型失败");
     }
   };
 
   const onModelKindChange = async (kind: ModelKind) => {
     const state = chooseModelKind(kind, model, modelOptions, customModel);
     if ("error" in state) {
-      setStatus(state.error);
+      reportError(state.error, "切换模型失败");
       return;
     }
     setModel(state.model);
@@ -478,71 +584,94 @@ export function ChatPage() {
 
   const onEffortChange = async (next: Effort) => {
     setEffort(next);
-    if (!client || busy) return;
+    if (!client || busy) {
+      reportError(!client ? "daemon 客户端尚未初始化" : "当前会话仍在处理中", "切换思考强度失败");
+      return;
+    }
     try {
       const conversationId = await ensureConversation();
       await client.call("conversation.setEffort", { conversationId, effort: next });
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "切换思考强度失败");
     }
   };
 
   const onPermissionModeChange = async (next: PermissionMode) => {
     setPermissionMode(next);
     permissionModeRef.current = next;
-    if (!client || busy) return;
+    if (!client || busy) {
+      reportError(!client ? "daemon 客户端尚未初始化" : "当前会话仍在处理中", "切换权限模式失败");
+      return;
+    }
     try {
       const conversationId = await ensureConversation();
       await client.call("conversation.setPermissionMode", { conversationId, mode: next });
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "切换权限模式失败");
     }
   };
 
   const send = async () => {
-    if (!trusted) return;
-    const text = input.trim();
-    if (!text || !client || busy) return;
-    const clientMessageId = crypto.randomUUID();
-    setInput("");
-    setStatus("running");
-    streamRef.current.beginTurn();
-    setMessages((prev) => [...prev, { id: clientMessageId, role: "user", content: text }]);
-
+    let clientMessageId: string | undefined;
     try {
+      if (!trusted) throw new Error("工作目录尚未信任");
+      const text = input.trim();
+      if (!text) throw new Error("消息内容不能为空");
+      if (!client) throw new Error("daemon 客户端尚未初始化");
+      if (!connected) throw new Error("daemon 连接已断开");
+      if (busy) throw new Error("当前会话仍在处理中");
+      const submittedMessageId = createClientMessageId();
+      clientMessageId = submittedMessageId;
+      setInput("");
+      setStatus("running");
+      setPendingTurn({ clientMessageId: submittedMessageId, content: text });
       const sid = await ensureConversation();
       setRunStateForIds([sid, historySessionId ?? "", liveSessionIdRef.current ?? ""], "running");
       refreshSessionsAfterTurnRef.current = true;
-      await client.call("conversation.send", { conversationId: sid, content: text, clientMessageId });
+      const result = await client.call<{ turnId: string }>("conversation.send", {
+        conversationId: sid,
+        content: text,
+        clientMessageId: submittedMessageId,
+      });
+      setPendingTurn((current) => current?.clientMessageId === submittedMessageId
+        ? { ...current, turnId: result.turnId }
+        : current);
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
-      streamRef.current.endTurn();
+      if (clientMessageId) {
+        setPendingTurn((current) => current?.clientMessageId === clientMessageId ? null : current);
+      }
+      reportError(e, "发送消息失败");
       setRunStateForIds([liveSessionIdRef.current ?? "", historySessionId ?? ""], "error");
     }
   };
 
   const stop = async () => {
-    if (!client || !liveSessionId) return;
+    if (!client || !liveSessionId) {
+      reportError(!client ? "daemon 客户端尚未初始化" : "当前没有可停止的会话", "停止对话失败");
+      return;
+    }
     try {
       await client.call("conversation.interrupt", { conversationId: liveSessionId });
-      streamRef.current.endTurn();
       setRunStateForIds([liveSessionId, historySessionId ?? ""], "interrupted");
       setStatus("已停止");
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "停止对话失败");
     }
   };
 
   const respondPerm = async (behavior: "allow" | "deny") => {
-    if (!client || !perm) return;
+    if (!client || !perm) {
+      reportError(!client ? "daemon 客户端尚未初始化" : "权限请求已经失效", "提交权限结果失败");
+      return;
+    }
     try {
       await client.call("permission.respond", buildPermissionRespondParams(perm, behavior, {
         updatedInputText: permissionUpdatedInput,
         denyMessage: permissionDenyMessage,
       }));
-      setPerm(null);
+      setPermissionQueue((current) => resolvePermission(current, perm.conversationId, perm.requestId));
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "提交权限结果失败");
     }
   };
 
@@ -552,36 +681,41 @@ export function ChatPage() {
   );
 
   const respondAsk = async (updatedInput: Record<string, unknown> | null) => {
-    if (!client || !perm) return;
+    if (!client || !perm) {
+      reportError(!client ? "daemon 客户端尚未初始化" : "问题请求已经失效", "提交回答失败");
+      return;
+    }
     try {
       await client.call(
         "permission.respond",
         updatedInput
-          ? { sessionId: perm.sessionId, requestId: perm.requestId, behavior: "allow", updatedInput }
-          : { sessionId: perm.sessionId, requestId: perm.requestId, behavior: "deny", message: "用户取消了问题" },
+          ? { conversationId: perm.conversationId, requestId: perm.requestId, behavior: "allow", updatedInput }
+          : { conversationId: perm.conversationId, requestId: perm.requestId, behavior: "deny", message: "用户取消了问题" },
       );
-      setPerm(null);
+      setPermissionQueue((current) => resolvePermission(current, perm.conversationId, perm.requestId));
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "提交回答失败");
     }
   };
 
   const trustDir = async (path: string) => {
-    if (!client) return;
+    if (!client) {
+      reportError("daemon 客户端尚未初始化", "信任工作目录失败");
+      return;
+    }
     try {
       await client.call("workspace.add", { path });
       clearCachedSessionList();
       setTrustPrompt(null);
       setTrusted(true);
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      reportError(e, "信任工作目录失败");
     }
   };
 
   const activeSessionId = liveSessionId ?? historySessionId;
   const activeRunState = activeSessionId ? sessionStates[activeSessionId] : undefined;
   const busy = activeRunState === "running";
-  const allToolResults = { ...historyToolResults, ...liveToolResults };
   const selectedModel = selectedModelValue(model, modelOptions, customModelEditing);
   const modelDisplay = modelDisplayState(model, modelOptions, effort, customModelEditing);
   const sidebarGroups = useMemo(() => sessionGroups(sessionList), [sessionList]);
@@ -875,6 +1009,17 @@ export function ChatPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {errorToast && (
+        <ErrorToast
+          message={errorToast}
+          onClose={() => {
+            if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current);
+            errorToastTimerRef.current = null;
+            setErrorToast(null);
+          }}
+        />
       )}
 
       {perm && !askQuestion && (

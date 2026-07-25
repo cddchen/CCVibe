@@ -128,10 +128,103 @@ enum ActiveKind: Sendable {
 }
 
 struct ActiveSessionRow: Decodable, Sendable {
+    let conversationId: String
     let sessionId: String
+    let runtimeId: String
     let cwd: String
     let status: String
+    let runtimeStatus: String
     let subscriberCount: Int
+}
+
+struct ConversationMessage: Codable, Equatable, Sendable, Identifiable {
+    let type: String
+    let id: String
+    let turnId: String?
+    let timestamp: String
+    let status: String?
+    let model: String?
+    let content: JSONValue?
+    let metrics: MessageMetrics?
+    let toolCallId: String?
+    let toolName: String?
+    let isError: Bool?
+    let family: String?
+    let modelId: String?
+    let effort: EffortLevel?
+    let mode: PermissionMode?
+    let subtype: String?
+}
+
+struct ConversationSnapshot: Codable, Sendable {
+    struct Conversation: Codable, Sendable {
+        let id: String
+        let sdkSessionId: String?
+        let workspacePath: String
+    }
+
+    struct Runtime: Codable, Sendable {
+        let state: String
+        let runtimeId: String?
+    }
+
+    struct Config: Codable, Sendable {
+        struct Model: Codable, Sendable {
+            let family: String
+            let requestedId: String
+            let effectiveId: String?
+            let source: String
+        }
+
+        struct Effort: Codable, Sendable {
+            let requested: EffortLevel
+            let effective: EffortLevel?
+            let source: String
+        }
+
+        let model: Model
+        let effort: Effort
+        let permissionMode: PermissionMode
+    }
+
+    struct CurrentTurn: Codable, Sendable {
+        let turnId: String
+        let status: String
+    }
+
+    let revision: Int
+    let conversation: Conversation
+    let runtime: Runtime
+    let config: Config
+    let currentTurn: CurrentTurn?
+    let messages: [ConversationMessage]
+}
+
+struct ConversationEventEnvelope: Codable, Sendable {
+    struct Event: Codable, Sendable {
+        let type: String
+        let message: ConversationMessage?
+        let status: String?
+        let error: String?
+        let sdkSessionId: String?
+        let model: String?
+        let cwd: String?
+        let turnId: String?
+        let resultSubtype: String?
+        let requestId: JSONValue?
+        let toolName: String?
+        let input: JSONValue?
+        let behavior: String?
+        let reason: String?
+    }
+
+    let version: Int
+    let sequence: Int
+    let conversationId: String
+    let sessionId: String
+    let runtimeId: String
+    let timestamp: String
+    let event: Event
 }
 
 func reconnectDelayMs(attempt: Int) -> Int {
@@ -156,13 +249,17 @@ func sessionGroups(from data: SessionListData) -> [SessionGroup] {
 func mapActiveSessions(_ rows: [ActiveSessionRow]) -> [String: ActiveKind] {
     var out: [String: ActiveKind] = [:]
     for row in rows {
+        let kind: ActiveKind
         switch row.status {
         case "running":
-            out[row.sessionId] = .running
+            kind = .running
         case "starting":
-            out[row.sessionId] = .starting
+            kind = .starting
         default:
-            out[row.sessionId] = .attachable
+            kind = .attachable
+        }
+        for id in [row.conversationId, row.sessionId, row.runtimeId] where !id.isEmpty {
+            out[id] = kind
         }
     }
     return out
@@ -170,9 +267,9 @@ func mapActiveSessions(_ rows: [ActiveSessionRow]) -> [String: ActiveKind] {
 
 func runStateFromDaemonStatus(_ status: String?) -> SessionRunState {
     switch status {
-    case "running", "starting":
+    case "running", "starting", "spawning", "waiting_permission", "closing", "queued":
         return .running
-    case "error":
+    case "error", "crashed", "failed", "limited":
         return .error
     case "interrupted":
         return .interrupted

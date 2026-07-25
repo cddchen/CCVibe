@@ -44,19 +44,24 @@ function mockConn(): ClientConnection & { _sent: unknown[] } {
 }
 
 describe("SessionRunner", () => {
-  it("broadcasts SDK events with session and runtime IDs", () => {
+  it("broadcasts canonical message snapshots with conversation and runtime IDs", () => {
     const runner = new SessionRunner("r1", "/tmp", mockEngine());
     runner.bindSessionId("sess-1");
     const first = mockConn();
     const second = mockConn();
     runner.subscribe(first);
     runner.subscribe(second);
-    runner.pushEvent({ type: "assistant" });
-    expect(first._sent).toHaveLength(1);
-    expect(second._sent).toHaveLength(1);
+    runner.publishMessage({ type: "system_message", id: "m1", timestamp: "2026-07-23T00:00:00.000Z", content: "ready" });
+    expect(first._sent).toHaveLength(2);
+    expect(second._sent).toHaveLength(2);
     expect(first._sent[0]).toMatchObject({
-      method: "session/event",
-      params: { sessionId: "sess-1", runtimeId: "r1", message: { type: "assistant" } },
+      method: "conversation/event",
+      params: {
+        version: 1,
+        sessionId: "sess-1",
+        runtimeId: "r1",
+        event: { type: "message_start", message: { type: "system_message", id: "m1", content: "ready" } },
+      },
     });
   });
 
@@ -66,7 +71,7 @@ describe("SessionRunner", () => {
     const conn = mockConn();
     runner.subscribe(conn);
     runner.unsubscribe(conn.id);
-    runner.pushEvent({ type: "x" });
+    runner.publishMessage({ type: "system_message", id: "m1", timestamp: "2026-07-23T00:00:00.000Z", content: "ready" });
     expect(conn._sent).toHaveLength(0);
   });
 
@@ -87,15 +92,26 @@ describe("SessionRunner", () => {
     expect(runner.getStatus()).toBe("running");
     expect(runner.getRuntimeStatus()).toBe("running");
     expect(runner.getTurnStatus()).toEqual({ id: turnId, status: "running" });
+    expect(runner.getActiveTurnSnapshot()).toMatchObject({
+      turnId,
+      status: "running",
+      messages: [{ type: "user_message", turnId, content: "hello" }],
+    });
+
+    await expect(runner.send("too soon")).rejects.toThrow("already has an active turn");
 
     onMessage?.({ type: "result", subtype: "success", is_error: false } as never);
     expect(runner.getStatus()).toBe("idle");
     expect(runner.getRuntimeStatus()).toBe("running");
     expect(runner.getTurnStatus()).toBeUndefined();
+    expect(runner.getActiveTurnSnapshot()).toBeUndefined();
+    expect(runner.getLiveMessages()).toEqual([]);
     expect(conn._sent).toContainEqual(
       expect.objectContaining({
-        method: "turn/status",
-        params: expect.objectContaining({ turnId, status: "completed" }),
+        method: "conversation/event",
+        params: expect.objectContaining({
+          event: expect.objectContaining({ type: "turn_status", turnId, status: "completed" }),
+        }),
       }),
     );
   });
@@ -113,7 +129,7 @@ describe("SessionRunner", () => {
     expect(runner.getTurnStatus()).toEqual({ id: turnId, status: "interrupted" });
   });
 
-  it("uses SDK request IDs and replays pending permissions to the latest owner", async () => {
+  it("broadcasts permission requests, replays them to late subscribers, and broadcasts resolution", async () => {
     let canUseTool: Parameters<EngineAdapter["start"]>[1]["canUseTool"] | undefined;
     const engine = mockEngine();
     engine.start = vi.fn(async (_opts, hooks, runtimeId) => {
@@ -122,36 +138,40 @@ describe("SessionRunner", () => {
     });
     const permissions = new PermissionRegistry(1000);
     const runner = new SessionRunner("r1", "/tmp", engine);
-    const oldOwner = mockConn();
-    const newOwner = mockConn();
-    runner.subscribe(oldOwner, true);
+    const first = mockConn();
+    const second = mockConn();
+    runner.subscribe(first, true);
     await runner.startWithEngine({ cwd: "/tmp" }, permissions);
     runner.bindSessionId("sess-1");
 
     const firstDecision = canUseTool!("Bash", { command: "pwd" }, permissionContext("sdk-request"));
-    expect(oldOwner._sent).toContainEqual(
+    expect(first._sent).toContainEqual(
       expect.objectContaining({
-        method: "permission/request",
-        params: expect.objectContaining({
-          requestId: "sdk-request",
-          toolUseId: "tool-use-1",
-          title: "Claude wants to run a command",
-        }),
+        method: "conversation/event",
+        params: expect.objectContaining({ event: expect.objectContaining({
+          type: "permission_request", requestId: "sdk-request", toolUseId: "tool-use-1", title: "Claude wants to run a command",
+        }) }),
       }),
     );
 
-    runner.unsubscribe(oldOwner.id);
-    runner.subscribe(newOwner, true);
+    runner.subscribe(second, true);
     expect(engine.reinitialize).toHaveBeenCalled();
-    expect(newOwner._sent).toContainEqual(
+    expect(second._sent).toContainEqual(
       expect.objectContaining({
-        method: "permission/request",
-        params: expect.objectContaining({ requestId: "sdk-request" }),
+        method: "conversation/event",
+        params: expect.objectContaining({ event: expect.objectContaining({ type: "permission_request", requestId: "sdk-request" }) }),
       }),
     );
     expect(permissions.size()).toBe(1);
-    expect(permissions.respond("r1", "sdk-request", newOwner.id, { behavior: "allow" })).toBe(true);
+    expect(permissions.respond("r1", "sdk-request", { behavior: "allow" })).toBe(true);
     await expect(firstDecision).resolves.toEqual({ behavior: "allow" });
+    for (const conn of [first, second]) {
+      expect(conn._sent).toContainEqual(expect.objectContaining({
+        params: expect.objectContaining({ event: {
+          type: "permission_resolved", requestId: "sdk-request", behavior: "allow",
+        } }),
+      }));
+    }
   });
 
   describe("idle reclaim", () => {
@@ -210,28 +230,17 @@ describe("SessionRunner", () => {
   });
 
   describe("turn buffer replay", () => {
-    it("replays buffered events to a new subscriber", () => {
+    it("replays buffered canonical snapshots to a new subscriber", () => {
       const runner = new SessionRunner("r1", "/tmp", mockEngine());
       runner.bindSessionId("sess-1");
-      runner.pushEvent({ type: "stream_event", n: 1 });
-      runner.pushEvent({ type: "stream_event", n: 2 });
+      runner.publishMessage({ type: "system_message", id: "m1", timestamp: "2026-07-23T00:00:00.000Z", content: "ready" });
       const late = mockConn();
       runner.subscribe(late);
       expect(late._sent).toHaveLength(2);
       expect(late._sent[0]).toMatchObject({
-        method: "session/event",
-        params: { sessionId: "sess-1", runtimeId: "r1", message: { type: "stream_event", n: 1 } },
+        method: "conversation/event",
+        params: { sessionId: "sess-1", runtimeId: "r1", event: { type: "message_start", message: { id: "m1" } } },
       });
-    });
-
-    it("does not replay after a result clears the turn buffer", () => {
-      const runner = new SessionRunner("r1", "/tmp", mockEngine());
-      runner.bindSessionId("sess-1");
-      runner.pushEvent({ type: "assistant" });
-      runner.pushEvent({ type: "result", subtype: "success" });
-      const late = mockConn();
-      runner.subscribe(late);
-      expect(late._sent).toHaveLength(0);
     });
 
     it("clears the previous buffer when a new turn is sent", async () => {
@@ -239,11 +248,12 @@ describe("SessionRunner", () => {
       const runner = new SessionRunner("r1", "/tmp", engine);
       await runner.startWithEngine({ cwd: "/tmp" }, new PermissionRegistry());
       runner.bindSessionId("sess-1");
-      runner.pushEvent({ type: "stream_event", old: true });
+      runner.publishMessage({ type: "system_message", id: "old", timestamp: "2026-07-23T00:00:00.000Z", content: "old" });
       await runner.send("next question");
       const late = mockConn();
       runner.subscribe(late);
-      expect(late._sent.filter((event) => (event as { method?: string }).method === "session/event")).toHaveLength(0);
+      expect(JSON.stringify(late._sent)).not.toContain('"id":"old"');
+      expect(JSON.stringify(late._sent)).toContain("next question");
     });
   });
 });

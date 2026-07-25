@@ -8,7 +8,8 @@
 |---|---|---|
 | server | `src/server.ts` | Fastify、`/health`、`/ws`、token 闸 |
 | rpc | `src/rpc/` | 路由、Zod 校验、JSON-RPC |
-| session | `src/session/` | SessionRunner、Registry、EngineAdapter、Claude 引擎 |
+| conversation | `src/conversation/` | 会话编排、统一 Message 模型、SDK 事件投影 |
+| session | `src/session/` | 内部 RuntimeRunner、Registry、EngineAdapter、Claude 引擎；不直接暴露 API |
 | permission | `src/permission/` | canUseTool ↔ `permission.respond` |
 | history | `src/history/` | 读 `~/.claude/projects/**/*.jsonl` |
 | store | `src/store/db.ts` | `node:sqlite` 元数据 |
@@ -27,9 +28,9 @@ npm run dev -- --insecure-no-auth --port 4733
 
 ## RPC 子集
 
-`ping`、`auth`、`session.*`、`history.*`、`workspace.*`、`permission.respond`、`mcp.listServerStatus`
+`ping`、`auth`、`conversation.*`、`history.list*`、`workspace.*`、`permission.respond`
 
-通知：`session/event`、`session/status`、`runtime/status`、`turn/status`、`permission/request`
+唯一通知：`conversation/event`。更新事件携带服务端投影后的完整 `ConversationMessage` 快照。
 
 设计与接入资料：
 

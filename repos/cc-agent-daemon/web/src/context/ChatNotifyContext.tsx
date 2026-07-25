@@ -1,18 +1,15 @@
 import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 import { useDaemon } from "./DaemonContext";
+import type { ConversationEventEnvelope } from "../lib/daemonClient";
 
-export type StreamEventMeta = {
+export type ConversationEventMeta = {
   conversationId: string;
   sessionId: string;
   runtimeId: string;
-  sdkSessionId: string;
 };
 
 export type StreamHandlers = {
-  onSdkEvent: (message: unknown, meta: StreamEventMeta) => void;
-  onStatus: (status: string, error: string | undefined, meta: StreamEventMeta) => void;
-  onPermission: (p: { sessionId: string; requestId: string | number; toolName: string; input?: unknown }) => void;
-  onInit?: (p: { sessionId?: string; model?: string; cwd?: string; slashCommands?: unknown[] }, meta: StreamEventMeta) => void;
+  onEvent: (envelope: ConversationEventEnvelope, meta: ConversationEventMeta) => void;
 };
 
 type Bind = {
@@ -39,38 +36,17 @@ export function ChatNotifyProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!client) return;
     client.onNotification((method, params) => {
-      const p = params as Record<string, unknown>;
-      const evSid = String(p.sessionId ?? "");
-      const conversationId = String(p.conversationId ?? "");
-      const runtimeId = String(p.runtimeId ?? "");
-      const msg = p.message;
-      const m = msg as { type?: string; subtype?: string; session_id?: string; model?: string; cwd?: string; slash_commands?: unknown[] };
-      const sdkSessionId = String(m?.session_id ?? "");
-      const meta = { conversationId, sessionId: evSid, runtimeId, sdkSessionId };
-
+      if (method !== "conversation/event") return;
+      const envelope = params as ConversationEventEnvelope;
+      if (envelope.version !== 1 || !envelope.event) return;
+      const meta = {
+        conversationId: envelope.conversationId,
+        sessionId: envelope.sessionId,
+        runtimeId: envelope.runtimeId,
+      };
       for (const bind of bindsRef.current) {
-        if (!matches(bind, [conversationId, evSid, runtimeId, sdkSessionId])) continue;
-
-        if (method === "permission/request") {
-          bind.handlers.onPermission({
-            sessionId: evSid,
-            requestId: p.requestId as string | number,
-            toolName: String(p.toolName),
-            input: p.input,
-          });
-        } else if (method === "session/event") {
-          if (msg) bind.handlers.onSdkEvent(msg, meta);
-          if (m?.type === "system" && m.subtype === "init") {
-            bind.handlers.onInit?.({
-              sessionId: m.session_id,
-              model: m.model,
-              cwd: m.cwd,
-              slashCommands: m.slash_commands,
-            }, meta);
-          }
-        } else if (method === "session/status") {
-          bind.handlers.onStatus(p.status as string, p.error as string | undefined, meta);
-        }
+        if (!matches(bind, [meta.conversationId, meta.sessionId, meta.runtimeId])) continue;
+        bind.handlers.onEvent(envelope, meta);
       }
     });
   }, [client]);
@@ -86,7 +62,7 @@ export function ChatNotifyProvider({ children }: { children: ReactNode }) {
     };
     bindsRef.current.push(entry);
     return () => {
-      bindsRef.current = bindsRef.current.filter((b) => b !== entry);
+      bindsRef.current = bindsRef.current.filter((bind) => bind !== entry);
     };
   };
 
@@ -94,7 +70,7 @@ export function ChatNotifyProvider({ children }: { children: ReactNode }) {
 }
 
 export function useChatNotify() {
-  const v = useContext(ChatNotifyCtx);
-  if (!v) throw new Error("useChatNotify outside provider");
-  return v;
+  const value = useContext(ChatNotifyCtx);
+  if (!value) throw new Error("useChatNotify outside provider");
+  return value;
 }

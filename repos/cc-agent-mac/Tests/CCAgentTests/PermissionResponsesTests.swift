@@ -4,7 +4,7 @@ import XCTest
 final class PermissionResponsesTests: XCTestCase {
     private let request = PendingPermission(
         id: "req-1",
-        sessionId: "sess-1",
+        conversationId: "conv-1",
         requestId: "req-1",
         toolName: "AskUserQuestion",
         input: .object(["questions": .array([])])
@@ -22,6 +22,8 @@ final class PermissionResponsesTests: XCTestCase {
             updatedInputText: "{\"answers\":{\"q\":\"a\"}}"
         )
         XCTAssertEqual(params["behavior"] as? String, "allow")
+        XCTAssertEqual(params["conversationId"] as? String, "conv-1")
+        XCTAssertNil(params["sessionId"])
         XCTAssertNotNil(params["updatedInput"])
     }
 

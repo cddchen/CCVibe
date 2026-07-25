@@ -29,12 +29,12 @@ function ChatMessageRowInner({ message, toolResults = {} }: Props) {
 
   return (
     <div className={`flex min-w-0 px-4 py-3 ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`flex min-w-0 max-w-[92%] flex-col gap-1 ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`flex min-w-0 flex-col gap-1 ${isUser ? "max-w-[82%] items-end" : "w-full max-w-full items-stretch"}`}>
         <div
           className={`min-w-0 w-full overflow-hidden rounded-[1.35rem] px-4 py-3 text-sm leading-relaxed shadow-sm ${
             isUser
               ? "bg-violet-600 text-white whitespace-pre-wrap break-words shadow-violet-600/15"
-              : `border border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800/80 dark:bg-zinc-900/90 dark:text-zinc-100 ${
+              : `border border-zinc-200/80 bg-zinc-100/70 text-zinc-900 shadow-zinc-200/40 dark:border-zinc-800/80 dark:bg-zinc-900/70 dark:text-zinc-100 dark:shadow-black/20 ${
                   message.streaming === true ? "model-reply-bubble-active" : ""
                 }`
           }`}
@@ -50,6 +50,7 @@ function ChatMessageRowInner({ message, toolResults = {} }: Props) {
               blocks={message.content}
               toolResults={toolResults}
               streaming={message.streaming}
+              placeholderLabel={message.placeholderLabel}
             />
           ) : (
             <MessageMarkdown content={String(message.content)} />

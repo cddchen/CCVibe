@@ -104,6 +104,16 @@ function notifications(conn: { sent: unknown[] }, method: string): Array<{ metho
   return conn.sent.filter((msg): msg is { method?: string; params?: unknown } => (msg as { method?: string }).method === method);
 }
 
+function conversationEvents(conn: { sent: unknown[] }, type: string): Array<{
+  method?: string;
+  params: { sessionId: string; event: Record<string, unknown> };
+}> {
+  return notifications(conn, "conversation/event").filter((item) => {
+    const params = item.params as { event?: { type?: string } } | undefined;
+    return params?.event?.type === type;
+  }) as Array<{ method?: string; params: { sessionId: string; event: Record<string, unknown> } }>;
+}
+
 function sdkPermissionContext(requestId: string): Record<string, unknown> {
   return {
     signal: new AbortController().signal,
@@ -159,13 +169,15 @@ describe("Claude SDK daemon data flow", () => {
 
     expect(registry.get(runtimeId)).toBe(registry.get("sdk-session"));
     expect(aliases).toEqual([{ sdkSessionId: "sdk-session", runtimeId }]);
-    expect(notifications(conn, "session/status")).toContainEqual(
-      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", status: "running" }) }),
+    expect(conversationEvents(conn, "conversation_status")).toContainEqual(
+      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", event: expect.objectContaining({ status: "running" }) }) }),
     );
-    expect(notifications(conn, "session/event")).toContainEqual(
+    expect(notifications(conn, "conversation/event")).toContainEqual(
       expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session" }) }),
     );
 
+    controller.push({ type: "result", subtype: "success", is_error: false });
+    await waitFor(() => registry.get("sdk-session")?.getTurnStatus() === undefined);
     await registry.get("sdk-session")!.send("next");
     await expect(nextInput(input)).resolves.toMatchObject({
       type: "user",
@@ -177,16 +189,16 @@ describe("Claude SDK daemon data flow", () => {
 
     await registry.get("sdk-session")!.interrupt();
     expect(controller.q.interrupt).toHaveBeenCalledOnce();
-    expect(notifications(conn, "turn/status")).toContainEqual(
-      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", status: "interrupted" }) }),
+    expect(conversationEvents(conn, "turn_status")).toContainEqual(
+      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", event: expect.objectContaining({ status: "interrupted" }) }) }),
     );
 
     controller.push({ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } });
-    await waitFor(() => notifications(conn, "session/event").length >= 2);
+    await waitFor(() => conversationEvents(conn, "message_update").length >= 1 || conversationEvents(conn, "message_start").length >= 1);
     controller.push({ type: "result", subtype: "success" });
     await waitFor(() => registry.listActive().some((s) => s.sessionId === "sdk-session" && s.status === "idle"));
-    expect(notifications(conn, "session/status")).toContainEqual(
-      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", status: "idle" }) }),
+    expect(conversationEvents(conn, "conversation_status")).toContainEqual(
+      expect.objectContaining({ params: expect.objectContaining({ sessionId: "sdk-session", event: expect.objectContaining({ status: "idle" }) }) }),
     );
     controller.finish();
     await waitFor(() => registry.listActive().every((s) => s.sessionId !== "sdk-session"));
@@ -210,12 +222,12 @@ describe("Claude SDK daemon data flow", () => {
     });
     await waitFor(() => registry.get("sdk-session") !== undefined);
 
-    expect(notifications(conn, "session/event")).toContainEqual(
+    expect(conversationEvents(conn, "runtime_initialized")).toContainEqual(
       expect.objectContaining({
         params: expect.objectContaining({
           sessionId: "sdk-session",
-          message: expect.objectContaining({
-            slash_commands: [
+          event: expect.objectContaining({
+            slashCommands: [
               { name: "compact", description: "Compact conversation" },
               { name: "project-skill", description: "Project skill" },
             ],
@@ -248,21 +260,20 @@ describe("Claude SDK daemon data flow", () => {
       { file_path: "/tmp/a" },
       sdkPermissionContext("sdk-read-request"),
     );
-    await waitFor(() => notifications(conn, "permission/request").length === 1);
-    const request = notifications(conn, "permission/request")[0] as {
-      params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
+    await waitFor(() => conversationEvents(conn, "permission_request").length === 1);
+    const request = conversationEvents(conn, "permission_request")[0] as {
+      params: { sessionId: string; event: { requestId: string; toolName: string; input: Record<string, unknown> } };
     };
 
-    expect(request.params).toMatchObject({
+    expect({ sessionId: request.params.sessionId, ...request.params.event }).toMatchObject({
       sessionId: "sdk-session",
       requestId: "sdk-read-request",
       toolName: "Read",
       input: { file_path: "/tmp/a" },
     });
     const permissionScope = registry.get("sdk-session")!.runtimeId;
-    expect(permissions.respond(permissionScope, request.params.requestId, "other", { behavior: "allow" })).toBe(false);
     expect(
-      permissions.respond(permissionScope, request.params.requestId, "owner", {
+      permissions.respond(permissionScope, request.params.event.requestId, {
         behavior: "allow",
         updatedInput: { file_path: "/tmp/b" },
       }),
@@ -287,18 +298,18 @@ describe("Claude SDK daemon data flow", () => {
       { command: "rm -rf /tmp/example" },
       sdkPermissionContext("sdk-bash-request"),
     );
-    await waitFor(() => notifications(conn, "permission/request").length === 1);
-    const request = notifications(conn, "permission/request")[0] as {
-      params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
+    await waitFor(() => conversationEvents(conn, "permission_request").length === 1);
+    const request = conversationEvents(conn, "permission_request")[0] as {
+      params: { sessionId: string; event: { requestId: string; toolName: string; input: Record<string, unknown> } };
     };
 
-    expect(request.params).toMatchObject({
+    expect({ sessionId: request.params.sessionId, ...request.params.event }).toMatchObject({
       sessionId: "sdk-session",
       toolName: "Bash",
       input: { command: "rm -rf /tmp/example" },
     });
     expect(
-      permissions.respond(registry.get("sdk-session")!.runtimeId, request.params.requestId, "owner", {
+      permissions.respond(registry.get("sdk-session")!.runtimeId, request.params.event.requestId, {
         behavior: "deny",
         message: "Use a safer read-only command",
       }),
@@ -323,21 +334,21 @@ describe("Claude SDK daemon data flow", () => {
       { plan: "Implement the approved changes" },
       sdkPermissionContext("sdk-plan-request"),
     );
-    await waitFor(() => notifications(conn, "permission/request").length === 1);
-    const request = notifications(conn, "permission/request")[0] as {
-      params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
+    await waitFor(() => conversationEvents(conn, "permission_request").length === 1);
+    const request = conversationEvents(conn, "permission_request")[0] as {
+      params: { sessionId: string; event: { requestId: string; toolName: string; input: Record<string, unknown> } };
     };
 
-    expect(request.params).toMatchObject({
+    expect({ sessionId: request.params.sessionId, ...request.params.event }).toMatchObject({
       sessionId: "sdk-session",
       toolName: "ExitPlanMode",
       input: { plan: "Implement the approved changes" },
     });
     const permissionScope = registry.get("sdk-session")!.runtimeId;
-    expect(permissions.respond(permissionScope, request.params.requestId, "owner", { behavior: "allow" })).toBe(true);
+    expect(permissions.respond(permissionScope, request.params.event.requestId, { behavior: "allow" })).toBe(true);
     await expect(decision).resolves.toEqual({ behavior: "allow", updatedInput: undefined });
     expect(permissions.size()).toBe(0);
-    expect(permissions.respond(permissionScope, request.params.requestId, "owner", { behavior: "allow" })).toBe(false);
+    expect(permissions.respond(permissionScope, request.params.event.requestId, { behavior: "allow" })).toBe(false);
     controller.finish();
   });
 
@@ -369,18 +380,18 @@ describe("Claude SDK daemon data flow", () => {
       input,
       sdkPermissionContext("sdk-question-request"),
     );
-    await waitFor(() => notifications(conn, "permission/request").length === 1);
-    const request = notifications(conn, "permission/request")[0] as {
-      params: { sessionId: string; requestId: string; toolName: string; input: Record<string, unknown> };
+    await waitFor(() => conversationEvents(conn, "permission_request").length === 1);
+    const request = conversationEvents(conn, "permission_request")[0] as {
+      params: { sessionId: string; event: { requestId: string; toolName: string; input: Record<string, unknown> } };
     };
 
-    expect(request.params).toMatchObject({
+    expect({ sessionId: request.params.sessionId, ...request.params.event }).toMatchObject({
       sessionId: "sdk-session",
       toolName: "AskUserQuestion",
       input,
     });
     expect(
-      permissions.respond(registry.get("sdk-session")!.runtimeId, request.params.requestId, "owner", {
+      permissions.respond(registry.get("sdk-session")!.runtimeId, request.params.event.requestId, {
         behavior: "allow",
         updatedInput: { ...input, answers: { "Which approach should I use?": "Safe" } },
       }),

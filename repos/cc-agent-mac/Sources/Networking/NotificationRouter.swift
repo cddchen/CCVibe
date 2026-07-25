@@ -1,29 +1,20 @@
 import Foundation
 
-struct StreamEventMeta: Sendable {
+struct ConversationEventMeta: Sendable {
+    let conversationId: String
     let sessionId: String
     let runtimeId: String
-    let sdkSessionId: String
 }
 
 struct PermissionRequest: Sendable {
-    let sessionId: String
+    let conversationId: String
     let requestId: String
     let toolName: String
     let input: JSONValue?
 }
 
-struct InitInfo: Sendable {
-    let sessionId: String?
-    let model: String?
-    let cwd: String?
-}
-
 struct StreamHandlers {
-    var onSdkEvent: (JSONValue, StreamEventMeta) -> Void
-    var onStatus: (String, String?, StreamEventMeta) -> Void
-    var onPermission: (PermissionRequest) -> Void
-    var onInit: ((InitInfo, StreamEventMeta) -> Void)?
+    var onEvent: (ConversationEventEnvelope, ConversationEventMeta) -> Void
 }
 
 private struct Bind {
@@ -49,15 +40,15 @@ enum ChatSessionRouting {
     }
 
     static func liveTurnIsBusy(status: String?) -> Bool {
-        status == "running" || status == "starting"
+        status == "running" || status == "starting" || status == "spawning" || status == "waiting_permission"
     }
 
     typealias SessionRunState = String
 
     static func runStateFromDaemonStatus(_ status: String?) -> String {
         switch status {
-        case "running", "starting": return "running"
-        case "error": return "error"
+        case "running", "starting", "spawning", "waiting_permission", "closing": return "running"
+        case "error", "crashed", "failed", "limited": return "error"
         case "interrupted": return "interrupted"
         default: return "completed"
         }
@@ -90,54 +81,20 @@ final class NotificationRouter {
     }
 
     private func dispatch(method: String, params: JSONValue?) {
-        guard let p = params?.objectValue else { return }
-        let evSid = p["sessionId"]?.stringValue ?? ""
-        let runtimeId = p["runtimeId"]?.stringValue ?? ""
-        let msg = p["message"]
-        let msgObj = msg?.objectValue
-        let sdkSessionId = msgObj?["session_id"]?.stringValue ?? ""
-        let meta = StreamEventMeta(sessionId: evSid, runtimeId: runtimeId, sdkSessionId: sdkSessionId)
-        let ids = [evSid, runtimeId, sdkSessionId].filter { !$0.isEmpty }
+        guard method == "conversation/event",
+              let params,
+              let data = try? JSONEncoder().encode(params),
+              let envelope = try? JSONDecoder().decode(ConversationEventEnvelope.self, from: data),
+              envelope.version == 1 else { return }
 
-        // Permission is sent on the create-time connection even after session.detach.
-        // Deliver to every bind so ChatViewModel can park requests for background sessions.
-        if method == "permission/request" {
-            let reqId = p["requestId"]?.stringValue ?? String(describing: p["requestId"])
-            let request = PermissionRequest(
-                sessionId: evSid,
-                requestId: reqId,
-                toolName: p["toolName"]?.stringValue ?? "",
-                input: p["input"]
-            )
-            for bind in binds {
-                bind.handlers.onPermission(request)
-            }
-            return
-        }
-
+        let meta = ConversationEventMeta(
+            conversationId: envelope.conversationId,
+            sessionId: envelope.sessionId,
+            runtimeId: envelope.runtimeId
+        )
+        let ids = [meta.conversationId, meta.sessionId, meta.runtimeId].filter { !$0.isEmpty }
         for bind in binds where matches(bind, ids: ids) {
-            switch method {
-            case "session/event":
-                if let msg {
-                    bind.handlers.onSdkEvent(msg, meta)
-                }
-                if msgObj?["type"]?.stringValue == "system",
-                   msgObj?["subtype"]?.stringValue == "init" {
-                    bind.handlers.onInit?(InitInfo(
-                        sessionId: msgObj?["session_id"]?.stringValue,
-                        model: msgObj?["model"]?.stringValue,
-                        cwd: msgObj?["cwd"]?.stringValue
-                    ), meta)
-                }
-            case "session/status":
-                bind.handlers.onStatus(
-                    p["status"]?.stringValue ?? "",
-                    p["error"]?.stringValue,
-                    meta
-                )
-            default:
-                break
-            }
+            bind.handlers.onEvent(envelope, meta)
         }
     }
 

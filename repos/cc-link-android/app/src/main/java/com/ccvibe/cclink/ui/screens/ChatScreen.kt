@@ -3,6 +3,7 @@
 package com.ccvibe.cclink.ui.screens
 
 import android.graphics.Color as AndroidColor
+import android.graphics.Typeface
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
 import androidx.compose.foundation.background
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -91,7 +93,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ccvibe.cclink.R
 import com.ccvibe.cclink.data.AskQuestion
 import com.ccvibe.cclink.data.ChatMessage
 import com.ccvibe.cclink.data.ChatState
@@ -108,6 +112,8 @@ import com.ccvibe.cclink.data.boolean
 import com.ccvibe.cclink.data.string
 import com.ccvibe.cclink.ui.AppViewModel
 import io.noties.markwon.Markwon
+import io.noties.markwon.AbstractMarkwonPlugin
+import io.noties.markwon.core.MarkwonTheme
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.image.coil.CoilImagesPlugin
@@ -247,6 +253,22 @@ private fun EmptyChat(path: String) {
 
 @Composable
 private fun MessageRow(message: ChatMessage, toolResults: Map<String, ToolResult>) {
+    if (message.role == MessageRole.SYSTEM) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Text(
+                    message.userText.orEmpty(),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        return
+    }
     if (message.role == MessageRole.USER) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
@@ -262,7 +284,38 @@ private fun MessageRow(message: ChatMessage, toolResults: Map<String, ToolResult
         return
     }
 
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            shape = RoundedCornerShape(22.dp, 22.dp, 22.dp, 5.dp),
+        ) {
+            AssistantMessageBody(message, toolResults, Modifier.padding(15.dp))
+        }
+        message.error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        assistantMetadata(message).takeIf { it.isNotEmpty() }?.let { metadata ->
+            Text(
+                metadata.joinToString(" · "),
+                modifier = Modifier.padding(horizontal = 5.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AssistantMessageBody(
+    message: ChatMessage,
+    toolResults: Map<String, ToolResult>,
+    modifier: Modifier = Modifier,
+) {
+    val processBlocks = message.blocks.filter { it is MessageBlock.Thinking || it is MessageBlock.ToolUse }
+    val textBlocks = message.blocks.filterIsInstance<MessageBlock.Text>().filter { it.text.isNotBlank() }
+
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (message.blocks.isEmpty() && message.streaming) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
@@ -270,26 +323,103 @@ private fun MessageRow(message: ChatMessage, toolResults: Map<String, ToolResult
                 Text("CCLink 思考中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        message.blocks.forEach { block ->
-            when (block) {
-                is MessageBlock.Text -> MarkdownText(block.text)
-                is MessageBlock.Thinking -> ThinkingCard(block.text, message.streaming)
-                is MessageBlock.ToolUse -> ToolCard(block, toolResults[block.id])
-            }
+        if (processBlocks.isNotEmpty()) {
+            ProcessGroup(
+                messageId = message.id,
+                blocks = processBlocks,
+                toolResults = toolResults,
+                streaming = message.streaming,
+            )
         }
-        message.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        val metadata = listOfNotNull(
-            message.model,
-            message.metrics?.elapsedSeconds?.let { "${it}s" },
-            message.metrics?.let { metrics ->
-                val total = (metrics.inputTokens ?: 0) + (metrics.outputTokens ?: 0)
-                total.takeIf { it > 0 }?.let { "$it tokens" }
-            },
-        )
-        if (metadata.isNotEmpty()) {
-            Text(metadata.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        textBlocks.forEach { MarkdownText(it.text) }
+        if (message.streaming && textBlocks.isEmpty() && processBlocks.isNotEmpty()) {
+            Text("正在处理…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+@Composable
+private fun ProcessGroup(
+    messageId: String,
+    blocks: List<MessageBlock>,
+    toolResults: Map<String, ToolResult>,
+    streaming: Boolean,
+) {
+    var userExpanded by remember(messageId) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(streaming) {
+        if (!streaming) userExpanded = null
+    }
+    val expanded = userExpanded ?: streaming
+    val thinkingCount = blocks.count { it is MessageBlock.Thinking }
+    val toolCount = blocks.count { it is MessageBlock.ToolUse }
+    val summary = buildList {
+        if (thinkingCount > 0) add("$thinkingCount 思考")
+        if (toolCount > 0) add("$toolCount 工具")
+    }.joinToString(" · ")
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
+        shape = RoundedCornerShape(18.dp),
+        border = CardDefaults.outlinedCardBorder(),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { userExpanded = !expanded }.padding(13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                if (streaming) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF42B96B), modifier = Modifier.size(18.dp))
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (streaming) "过程 · 进行中" else "过程",
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (summary.isNotEmpty()) {
+                        Text(summary, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
+            }
+            if (expanded) {
+                HorizontalDivider()
+                Column(
+                    Modifier.fillMaxWidth().padding(11.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    blocks.forEach { block ->
+                        when (block) {
+                            is MessageBlock.Thinking -> ThinkingCard(block.text, streaming)
+                            is MessageBlock.ToolUse -> ToolCard(block, toolResults[block.id], streaming)
+                            is MessageBlock.Text -> Unit
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun assistantMetadata(message: ChatMessage): List<String> = listOfNotNull(
+    message.model,
+    message.metrics?.elapsedSeconds?.let { seconds ->
+        if (seconds % 1.0 == 0.0) "${seconds.toLong()}s" else "${"%.1f".format(seconds)}s"
+    },
+    message.metrics?.let { metrics ->
+        val total = (metrics.inputTokens ?: 0) + (metrics.outputTokens ?: 0)
+        total.takeIf { it > 0 }?.let { "$it tokens" }
+    },
+)
+
+private sealed interface MarkdownSegment {
+    data class Wrapping(val content: String) : MarkdownSegment
+    data class Code(val content: String) : MarkdownSegment
+    data class Table(val rows: List<List<String>>) : MarkdownSegment
 }
 
 @Composable
@@ -297,13 +427,110 @@ private fun MarkdownText(markdown: String) {
     val context = LocalContext.current
     val color = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
+    val wideBackground = MaterialTheme.colorScheme.surface
+    val segments = remember(markdown) { splitMarkdownSegments(markdown) }
+    val codeTypeface = remember(context) {
+        checkNotNull(ResourcesCompat.getFont(context, R.font.jetbrains_mono_regular)) {
+            "Bundled JetBrains Mono font is unavailable"
+        }
+    }
     val markwon = remember(context) {
         Markwon.builder(context)
             .usePlugin(CoilImagesPlugin.create(context))
             .usePlugin(TablePlugin.create(context))
             .usePlugin(StrikethroughPlugin.create())
+            .usePlugin(object : AbstractMarkwonPlugin() {
+                override fun configureTheme(builder: MarkwonTheme.Builder) {
+                    // Markwon treats color value 0 as "not configured" and restores its gray default.
+                    val transparentCodeBackground = AndroidColor.argb(1, 0, 0, 0)
+                    builder
+                        .codeBackgroundColor(transparentCodeBackground)
+                        .codeBlockBackgroundColor(transparentCodeBackground)
+                        .codeTypeface(codeTypeface)
+                        .codeBlockTypeface(codeTypeface)
+                }
+            })
             .build()
     }
+
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        segments.forEach { segment ->
+            when (segment) {
+                is MarkdownSegment.Wrapping -> MarkdownAndroidText(
+                    markdown = segment.content,
+                    markwon = markwon,
+                    color = color,
+                    linkColor = linkColor,
+                    horizontallyScrollable = false,
+                    typeface = null,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                is MarkdownSegment.Code -> Box(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(wideBackground),
+                ) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                        MarkdownAndroidText(
+                            markdown = segment.content,
+                            markwon = markwon,
+                            color = color,
+                            linkColor = linkColor,
+                            horizontallyScrollable = true,
+                            typeface = codeTypeface,
+                            modifier = Modifier.wrapContentWidth(unbounded = true).padding(4.dp),
+                        )
+                    }
+                }
+                is MarkdownSegment.Table -> Box(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(wideBackground),
+                ) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                        MarkdownTable(segment.rows)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownTable(rows: List<List<String>>) {
+    val columnCount = rows.maxOfOrNull(List<String>::size) ?: return
+    val columnWidths = remember(rows) {
+        (0 until columnCount).map { column ->
+            val longest = rows.maxOfOrNull { row -> row.getOrNull(column)?.visualLength() ?: 0 } ?: 0
+            (longest * 8 + 28).coerceIn(112, 260).dp
+        }
+    }
+    val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f)
+    val headerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+
+    Column {
+        rows.forEachIndexed { rowIndex, row ->
+            Row(Modifier.background(if (rowIndex == 0) headerColor else Color.Transparent)) {
+                repeat(columnCount) { column ->
+                    Text(
+                        text = row.getOrNull(column).orEmpty().toDisplayMarkdownCell(),
+                        modifier = Modifier.width(columnWidths[column]).padding(horizontal = 11.dp, vertical = 9.dp),
+                        fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+            if (rowIndex != rows.lastIndex) HorizontalDivider(color = dividerColor)
+        }
+    }
+}
+
+@Composable
+private fun MarkdownAndroidText(
+    markdown: String,
+    markwon: Markwon,
+    color: Int,
+    linkColor: Int,
+    horizontallyScrollable: Boolean,
+    typeface: Typeface?,
+    modifier: Modifier,
+) {
     AndroidView(
         factory = {
             TextView(it).apply {
@@ -311,33 +538,125 @@ private fun MarkdownText(markdown: String) {
                 movementMethod = LinkMovementMethod.getInstance()
                 textSize = 14f
                 setLineSpacing(0f, 1.16f)
-                setLinkTextColor(linkColor)
                 setBackgroundColor(AndroidColor.TRANSPARENT)
             }
         },
         update = { view ->
             view.setTextColor(color)
             view.setLinkTextColor(linkColor)
+            view.setHorizontallyScrolling(horizontallyScrollable)
+            view.typeface = typeface ?: Typeface.DEFAULT
             markwon.setMarkdown(view, markdown)
         },
-        modifier = if (markdown.contains("```") || markdown.lines().count { it.count { char -> char == '|' } >= 2 } >= 2) {
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-        } else {
-            Modifier.fillMaxWidth()
-        },
+        modifier = modifier,
     )
+}
+
+private fun splitMarkdownSegments(markdown: String): List<MarkdownSegment> {
+    val lines = markdown.lines()
+    val result = mutableListOf<MarkdownSegment>()
+    val wrapping = mutableListOf<String>()
+
+    fun flushWrapping() {
+        if (wrapping.isEmpty()) return
+        wrapping.joinToString("\n").trim('\n').takeIf(String::isNotEmpty)?.let {
+            result += MarkdownSegment.Wrapping(it)
+        }
+        wrapping.clear()
+    }
+
+    var index = 0
+    while (index < lines.size) {
+        val trimmed = lines[index].trimStart()
+        val fence = when {
+            trimmed.startsWith("```") -> "```"
+            trimmed.startsWith("~~~") -> "~~~"
+            else -> null
+        }
+        val isTable = index + 1 < lines.size && lines[index].contains('|') && isMarkdownTableDivider(lines[index + 1])
+        if (fence != null) {
+            flushWrapping()
+            val block = mutableListOf(lines[index++])
+            while (index < lines.size) {
+                block += lines[index]
+                if (lines[index].trimStart().startsWith(fence)) {
+                    index += 1
+                    break
+                }
+                index += 1
+            }
+            result += MarkdownSegment.Code(block.joinToString("\n"))
+        } else if (isTable) {
+            flushWrapping()
+            val block = mutableListOf<String>()
+            while (index < lines.size && lines[index].isNotBlank() && lines[index].contains('|')) {
+                block += lines[index++]
+            }
+            val rows = block.map(::splitMarkdownTableRow).filterIndexed { rowIndex, _ -> rowIndex != 1 }
+            if (rows.isNotEmpty()) result += MarkdownSegment.Table(rows)
+        } else {
+            wrapping += lines[index++]
+        }
+    }
+    flushWrapping()
+    return result.ifEmpty { listOf(MarkdownSegment.Wrapping(markdown)) }
+}
+
+private fun splitMarkdownTableRow(line: String): List<String> {
+    val content = line.trim().removePrefix("|").removeSuffix("|")
+    val cells = mutableListOf<String>()
+    val current = StringBuilder()
+    var escaped = false
+    content.forEach { char ->
+        when {
+            escaped -> {
+                current.append(char)
+                escaped = false
+            }
+            char == '\\' -> escaped = true
+            char == '|' -> {
+                cells += current.toString().trim()
+                current.clear()
+            }
+            else -> current.append(char)
+        }
+    }
+    if (escaped) current.append('\\')
+    cells += current.toString().trim()
+    return cells
+}
+
+private fun String.visualLength(): Int = fold(0) { length, char -> length + if (char.code > 0xFF) 2 else 1 }
+
+private fun String.toDisplayMarkdownCell(): String = this
+    .replace(Regex("!\\[([^]]*)]\\([^)]+\\)"), "\$1")
+    .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "\$1")
+    .replace("<br>", "\n", ignoreCase = true)
+    .replace("**", "")
+    .replace("__", "")
+    .replace("`", "")
+
+private fun isMarkdownTableDivider(line: String): Boolean {
+    val cells = line.trim().trim('|').split('|')
+    return cells.isNotEmpty() && cells.all { cell ->
+        cell.trim().matches(Regex(":?-{3,}:?"))
+    }
 }
 
 @Composable
 private fun ThinkingCard(text: String, streaming: Boolean) {
-    var expanded by remember(text, streaming) { mutableStateOf(streaming) }
+    var userExpanded by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(streaming) {
+        if (!streaming) userExpanded = null
+    }
+    val expanded = userExpanded ?: streaming
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
         shape = RoundedCornerShape(18.dp),
     ) {
         Column {
-            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (streaming) "思考中…" else "思考过程", Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Medium)
+            Row(Modifier.fillMaxWidth().clickable { userExpanded = !expanded }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (streaming) "思考过程 · 进行中" else "思考过程", Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Medium)
                 Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
             }
             if (expanded) {
@@ -349,8 +668,12 @@ private fun ThinkingCard(text: String, streaming: Boolean) {
 }
 
 @Composable
-private fun ToolCard(block: MessageBlock.ToolUse, result: ToolResult?) {
-    var expanded by remember(block.id) { mutableStateOf(false) }
+private fun ToolCard(block: MessageBlock.ToolUse, result: ToolResult?, streaming: Boolean) {
+    var userExpanded by remember(block.id) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(streaming) {
+        if (!streaming) userExpanded = null
+    }
+    val expanded = userExpanded ?: streaming
     val status = result?.status ?: ToolStatus.RUNNING
     val statusColor = when (status) {
         ToolStatus.SUCCESS -> Color(0xFF42D276)
@@ -360,7 +683,7 @@ private fun ToolCard(block: MessageBlock.ToolUse, result: ToolResult?) {
     }
     Card(shape = RoundedCornerShape(20.dp), border = CardDefaults.outlinedCardBorder()) {
         Column {
-            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().clickable { userExpanded = !expanded }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(if (status == ToolStatus.SUCCESS) Icons.Default.CheckCircle else Icons.Default.PlayArrow, null, tint = statusColor)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {

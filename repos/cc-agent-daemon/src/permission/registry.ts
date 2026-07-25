@@ -11,7 +11,6 @@ export type PermissionDecision =
 type Pending = {
   sessionId: string;
   requestId: string;
-  ownerConnId?: string;
   promise: Promise<PermissionDecision>;
   resolve: (decision: PermissionDecision) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -35,13 +34,11 @@ export class PermissionRegistry {
   waitForResponse(
     sessionId: string,
     requestId: string,
-    ownerConnId: string | undefined,
     options: WaitOptions = {},
   ): Promise<PermissionDecision> {
     const key = PermissionRegistry.requestKey(sessionId, requestId);
     const existing = this.pending.get(key);
     if (existing) {
-      if (ownerConnId) existing.ownerConnId = ownerConnId;
       this.attachAbortSignal(key, existing, options.signal);
       return existing.promise;
     }
@@ -53,7 +50,6 @@ export class PermissionRegistry {
     const pending: Pending = {
       sessionId,
       requestId,
-      ownerConnId,
       promise,
       resolve: resolvePromise,
       timer: setTimeout(() => {
@@ -93,38 +89,16 @@ export class PermissionRegistry {
   respond(
     sessionId: string,
     requestId: string | number,
-    connId: string,
     decision: PermissionDecision,
   ): boolean {
     const key = PermissionRegistry.requestKey(sessionId, requestId);
-    const pending = this.pending.get(key);
-    if (!pending || pending.ownerConnId !== connId) return false;
     return this.settle(key, decision);
-  }
-
-  releaseConnection(connId: string): void {
-    for (const pending of this.pending.values()) {
-      if (pending.ownerConnId === connId) pending.ownerConnId = undefined;
-    }
-  }
-
-  claimSession(sessionId: string, connId: string): void {
-    for (const pending of this.pending.values()) {
-      if (pending.sessionId === sessionId) pending.ownerConnId = connId;
-    }
   }
 
   denyAllForSession(sessionId: string): void {
     for (const [key, pending] of [...this.pending]) {
       if (pending.sessionId !== sessionId) continue;
       this.settle(key, { behavior: "deny", message: "session ended" });
-    }
-  }
-
-  denyAllForConnection(connId: string): void {
-    for (const [key, pending] of [...this.pending]) {
-      if (pending.ownerConnId !== connId) continue;
-      this.settle(key, { behavior: "deny", message: "permission client disconnected" });
     }
   }
 

@@ -42,9 +42,12 @@ data class HistorySession(
 )
 
 data class ActiveSession(
+    val conversationId: String,
     val sessionId: String,
+    val runtimeId: String,
     val cwd: String,
     val status: String,
+    val runtimeStatus: String,
     val subscriberCount: Int,
 )
 
@@ -93,12 +96,12 @@ sealed interface MessageBlock {
     ) : MessageBlock
 }
 
-enum class MessageRole { USER, ASSISTANT }
+enum class MessageRole { USER, ASSISTANT, SYSTEM }
 
 data class MessageMetrics(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,
-    val elapsedSeconds: Long? = null,
+    val elapsedSeconds: Double? = null,
 )
 
 data class ChatMessage(
@@ -121,10 +124,16 @@ data class ToolResult(
 )
 
 data class PermissionRequest(
-    val sessionId: String,
+    val conversationId: String,
     val requestId: JsonElement,
     val toolName: String,
     val input: JsonObject,
+)
+
+data class PendingTurnFeedback(
+    val clientMessageId: String,
+    val content: String,
+    val turnId: String? = null,
 )
 
 data class AskQuestion(

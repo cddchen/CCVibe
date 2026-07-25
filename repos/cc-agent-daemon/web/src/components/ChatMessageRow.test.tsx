@@ -107,6 +107,36 @@ describe("ToolUseCard overflow classes", () => {
 });
 
 describe("AssistantMessageBody overflow classes", () => {
+  it("keeps a stable placeholder while the text block is still empty", () => {
+    const html = renderToStaticMarkup(
+      <AssistantMessageBody
+        blocks={[{ type: "text", text: "" }]}
+        toolResults={{}}
+        streaming
+        placeholderLabel="正在连接模型"
+      />,
+    );
+    expect(html).toContain("正在连接模型");
+  });
+
+  it("groups thinking and tools inside a process disclosure", () => {
+    const html = renderToStaticMarkup(
+      <AssistantMessageBody
+        blocks={[
+          { type: "thinking", thinking: "Inspect the project" },
+          { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/tmp/a" } },
+          { type: "text", text: "Final answer" },
+        ]}
+        toolResults={{ "tool-1": { status: "pending" } }}
+        streaming
+      />,
+    );
+    expect(html).toContain("过程 · 进行中");
+    expect(html).toContain("1 思考");
+    expect(html).toContain("1 工具");
+    expect(html).toContain("Final answer");
+  });
+
   it("root div has min-w-0 and w-full to prevent flex child overflow", () => {
     const html = renderToStaticMarkup(
       <AssistantMessageBody

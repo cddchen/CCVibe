@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { JsonlEntry } from "../history/reader.js";
 import type {
-  ConversationEntry,
+  ConversationMessage,
   TextContent,
   ThinkingContent,
   ToolCallContent,
@@ -48,6 +48,7 @@ function agentContent(content: unknown): Array<TextContent | ThinkingContent | T
         input: typeof value.input === "object" && value.input !== null
           ? value.input as Record<string, unknown>
           : {},
+        status: "completed",
       });
     }
   }
@@ -74,9 +75,11 @@ function isHidden(entry: JsonlEntry): boolean {
     || (entry as { subtype?: string }).subtype === "compact_boundary";
 }
 
-export function mapHistoryEntries(entries: JsonlEntry[]): ConversationEntry[] {
-  const result: ConversationEntry[] = [];
+export function mapHistoryEntries(entries: JsonlEntry[]): ConversationMessage[] {
+  const result: ConversationMessage[] = [];
   const toolNames = new Map<string, string>();
+  let turnId = "history";
+  let agentIndex = 0;
   for (const entry of entries) {
     if (entry.type !== "assistant") continue;
     for (const block of agentContent(messageOf(entry).content)) {
@@ -91,8 +94,10 @@ export function mapHistoryEntries(entries: JsonlEntry[]): ConversationEntry[] {
       if (content.length === 0) continue;
       result.push({
         type: "agent_message",
-        id: entry.uuid ?? randomUUID(),
-        timestamp: entry.timestamp,
+        id: `agent:${turnId}:${agentIndex++}`,
+        turnId,
+        timestamp: entry.timestamp ?? new Date().toISOString(),
+        status: "completed",
         model: message.model,
         agentId: (entry as { agentId?: string }).agentId,
         parentToolUseId: (entry as { parentToolUseID?: string }).parentToolUseID,
@@ -110,7 +115,9 @@ export function mapHistoryEntries(entries: JsonlEntry[]): ConversationEntry[] {
         result.push({
           type: "tool_result",
           id: `${entry.uuid ?? randomUUID()}:tool:${index}`,
-          timestamp: entry.timestamp,
+          turnId,
+          timestamp: entry.timestamp ?? new Date().toISOString(),
+          status: value.is_error === true ? "failed" : "completed",
           toolCallId: value.tool_use_id,
           toolName: toolNames.get(value.tool_use_id),
           content: toolResultText(value.content),
@@ -120,11 +127,15 @@ export function mapHistoryEntries(entries: JsonlEntry[]): ConversationEntry[] {
     }
     const content = textFromContent(message.content);
     if (content) {
+      turnId = entry.uuid ?? randomUUID();
+      agentIndex = 0;
       result.push({
         type: "user_message",
-        id: entry.uuid ?? randomUUID(),
-        timestamp: entry.timestamp,
+        id: turnId,
+        turnId,
+        timestamp: entry.timestamp ?? new Date().toISOString(),
         content,
+        status: "completed",
       });
     }
   }

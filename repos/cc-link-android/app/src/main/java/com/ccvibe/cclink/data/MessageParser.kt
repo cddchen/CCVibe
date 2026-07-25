@@ -7,182 +7,203 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 
-data class ParsedHistory(
+data class ProjectedConversation(
     val messages: List<ChatMessage>,
     val toolResults: Map<String, ToolResult>,
 )
 
 object MessageParser {
-    fun parseHistory(entries: JsonArray): ParsedHistory {
+    /** Projects daemon-owned ConversationMessage snapshots. SDK wire messages are intentionally unsupported. */
+    fun project(
+        domainMessages: List<JsonObject>,
+        pendingTurn: PendingTurnFeedback? = null,
+    ): ProjectedConversation {
         val messages = mutableListOf<ChatMessage>()
-        val toolResults = mutableMapOf<String, ToolResult>()
+        val tools = mutableMapOf<String, ToolResult>()
+        val agentIndexByTurn = mutableMapOf<String, Int>()
 
-        entries.forEachIndexed { index, element ->
-            val entry = element as? JsonObject ?: return@forEachIndexed
-            if (entry.boolean("isCompactSummary") || entry.boolean("isVisibleInTranscriptOnly")) return@forEachIndexed
-            if (entry.string("subtype") == "compact_boundary") return@forEachIndexed
-            val type = entry.string("type") ?: return@forEachIndexed
-            val message = entry.obj("message") ?: return@forEachIndexed
-            val content = message["content"]
-
-            if (type == "user") {
-                val blocks = content as? JsonArray
-                if (blocks != null && blocks.isNotEmpty() && blocks.all { (it as? JsonObject)?.string("type") == "tool_result" }) {
-                    blocks.forEach { parseToolResult(it as? JsonObject, toolResults) }
-                    return@forEachIndexed
+        domainMessages.forEach { message ->
+            when (message.string("type")) {
+                "user_message" -> {
+                    val text = textContent(message["content"])
+                    if (text.isNotBlank()) {
+                        messages += ChatMessage(
+                            id = message.string("id") ?: UUID.randomUUID().toString(),
+                            role = MessageRole.USER,
+                            userText = text,
+                        )
+                    }
                 }
-                val text = textContent(content)
-                if (text.isNotBlank()) {
-                    messages += ChatMessage(
-                        id = entry.string("uuid") ?: "history-user-$index",
-                        role = MessageRole.USER,
-                        userText = text,
+                "agent_message" -> {
+                    val blocks = parseAgentBlocks(message["content"])
+                    updateToolStatesFromAgent(message["content"], tools)
+                    val streaming = message.string("status") == "streaming"
+                    if (blocks.isEmpty() && !streaming) return@forEach
+                    val turnKey = message.string("turnId") ?: message.string("id") ?: UUID.randomUUID().toString()
+                    val metrics = parseMetrics(message.obj("metrics"))
+                    val existingIndex = agentIndexByTurn[turnKey]
+                    if (existingIndex == null) {
+                        agentIndexByTurn[turnKey] = messages.size
+                        messages += ChatMessage(
+                            id = message.string("id") ?: "agent-turn:$turnKey",
+                            role = MessageRole.ASSISTANT,
+                            blocks = blocks,
+                            streaming = streaming,
+                            model = message.string("model"),
+                            metrics = metrics,
+                        )
+                    } else {
+                        val current = messages[existingIndex]
+                        messages[existingIndex] = current.copy(
+                            blocks = current.blocks + blocks,
+                            streaming = current.streaming || streaming,
+                            model = message.string("model") ?: current.model,
+                            metrics = mergeMetrics(current.metrics, metrics),
+                        )
+                    }
+                }
+                "tool_result" -> {
+                    val id = message.string("toolCallId") ?: return@forEach
+                    val isError = message.boolean("isError")
+                    tools[id] = ToolResult(
+                        status = if (isError) ToolStatus.FAILED else ToolStatus.SUCCESS,
+                        content = textContent(message["content"]),
+                        isError = isError,
                     )
                 }
-            } else if (type == "assistant") {
-                val parsedBlocks = parseBlocks(content)
-                if (parsedBlocks.isEmpty()) return@forEachIndexed
-                val next = ChatMessage(
-                    id = entry.string("uuid") ?: "history-assistant-$index",
-                    role = MessageRole.ASSISTANT,
-                    blocks = parsedBlocks,
-                    model = message.string("model"),
-                    metrics = metricsFrom(message, entry),
+                "model_changed" -> messages += systemMessage(
+                    message,
+                    "模型已切换为 ${message.string("modelId").orEmpty()}",
                 )
-                val previous = messages.lastOrNull()
-                if (previous?.role == MessageRole.ASSISTANT) {
-                    messages[messages.lastIndex] = previous.copy(
-                        blocks = mergeAdjacent(previous.blocks + next.blocks),
-                        model = next.model ?: previous.model,
-                        metrics = next.metrics ?: previous.metrics,
-                    )
-                } else {
-                    messages += next
+                "effort_changed" -> messages += systemMessage(
+                    message,
+                    "思考强度已切换为 ${message.string("effort").orEmpty()}",
+                )
+                "permission_mode_changed" -> messages += systemMessage(
+                    message,
+                    "权限模式已切换为 ${message.string("mode").orEmpty()}",
+                )
+                "system_message" -> textContent(message["content"]).takeIf(String::isNotBlank)?.let { text ->
+                    messages += systemMessage(message, text)
                 }
             }
         }
-        return ParsedHistory(messages, toolResults)
+
+        pendingTurn?.let { pending ->
+            val resolvedTurnId = pending.turnId ?: domainMessages.asReversed().firstOrNull {
+                it.string("type") == "user_message" && textContent(it["content"]) == pending.content
+            }?.string("turnId")
+            val hasUser = resolvedTurnId?.let { turnId ->
+                domainMessages.any { it.string("type") == "user_message" && it.string("turnId") == turnId }
+            } == true || domainMessages.any {
+                it.string("type") == "user_message" && textContent(it["content"]) == pending.content
+            }
+            val hasAgent = resolvedTurnId?.let { turnId ->
+                domainMessages.any { it.string("type") == "agent_message" && it.string("turnId") == turnId }
+            } == true
+            resolvedTurnId?.let(agentIndexByTurn::get)?.let { index ->
+                messages[index] = messages[index].copy(streaming = true)
+            }
+            if (!hasUser) {
+                messages += ChatMessage(
+                    id = "pending-user:${pending.clientMessageId}",
+                    role = MessageRole.USER,
+                    userText = pending.content,
+                )
+            }
+            if (!hasAgent) {
+                messages += ChatMessage(
+                    id = "pending-agent:${pending.clientMessageId}",
+                    role = MessageRole.ASSISTANT,
+                    streaming = true,
+                )
+            }
+        }
+
+        return ProjectedConversation(messages, tools)
     }
 
-    fun parseBlocks(content: JsonElement?): List<MessageBlock> {
-        if (content is JsonPrimitive && content.isString) {
-            return content.contentOrNull?.takeIf { it.isNotBlank() }?.let { listOf(MessageBlock.Text(it)) }.orEmpty()
-        }
-        val array = content as? JsonArray ?: return emptyList()
-        return array.mapNotNull { element ->
+    fun upsert(messages: List<JsonObject>, message: JsonObject): List<JsonObject> {
+        val id = message.string("id") ?: return messages
+        val index = messages.indexOfFirst { it.string("id") == id }
+        if (index < 0) return messages + message
+        return messages.toMutableList().also { it[index] = message }
+    }
+
+    private fun systemMessage(message: JsonObject, text: String) = ChatMessage(
+        id = message.string("id") ?: UUID.randomUUID().toString(),
+        role = MessageRole.SYSTEM,
+        userText = text,
+    )
+
+    private fun parseAgentBlocks(content: JsonElement?): List<MessageBlock> =
+        (content as? JsonArray).orEmpty().mapNotNull { element ->
             val block = element as? JsonObject ?: return@mapNotNull null
             when (block.string("type")) {
                 "text" -> block.string("text")?.let(MessageBlock::Text)
-                "thinking" -> block.string("thinking")?.let(MessageBlock::Thinking)
-                "tool_use" -> MessageBlock.ToolUse(
-                    id = block.string("id") ?: UUID.randomUUID().toString(),
-                    name = block.string("name") ?: "Tool",
+                "thinking" -> block.string("thinking")?.takeIf(String::isNotBlank)?.let(MessageBlock::Thinking)
+                "tool_call" -> MessageBlock.ToolUse(
+                    id = block.string("toolCallId") ?: UUID.randomUUID().toString(),
+                    name = block.string("toolName") ?: "Tool",
                     input = block.obj("input") ?: JsonObject(emptyMap()),
                 )
                 else -> null
             }
         }
-    }
 
-    fun parseAssistantSnapshot(event: JsonObject): Pair<List<MessageBlock>, String?> {
-        val message = event.obj("message") ?: return emptyList<MessageBlock>() to null
-        return parseBlocks(message["content"]) to message.string("model")
-    }
-
-    fun applyStreamDelta(blocks: List<MessageBlock>, event: JsonObject): List<MessageBlock> {
-        val stream = event.obj("event") ?: return blocks
-        val delta = stream.obj("delta") ?: return blocks
-        val value = delta.string("text") ?: delta.string("thinking") ?: return blocks
-        return when (delta.string("type")) {
-            "thinking_delta" -> appendThinking(blocks, value)
-            "text_delta" -> appendText(blocks, value)
-            else -> if (delta["thinking"] != null) appendThinking(blocks, value) else appendText(blocks, value)
+    private fun updateToolStatesFromAgent(content: JsonElement?, target: MutableMap<String, ToolResult>) {
+        (content as? JsonArray).orEmpty().forEach { element ->
+            val block = element as? JsonObject ?: return@forEach
+            if (block.string("type") != "tool_call") return@forEach
+            val id = block.string("toolCallId") ?: return@forEach
+            val status = when (block.string("status")) {
+                "completed" -> ToolStatus.SUCCESS
+                "failed" -> ToolStatus.FAILED
+                "denied" -> ToolStatus.DENIED
+                "waiting_permission" -> ToolStatus.WAITING_PERMISSION
+                else -> ToolStatus.RUNNING
+            }
+            val current = target[id]
+            target[id] = ToolResult(status, current?.content.orEmpty(), current?.isError == true)
         }
     }
 
-    fun updateToolResultsFromEvent(event: JsonObject, current: Map<String, ToolResult>): Map<String, ToolResult> {
-        val message = event.obj("message")
-        val content = message?.get("content") as? JsonArray ?: return current
-        val next = current.toMutableMap()
-        content.forEach { parseToolResult(it as? JsonObject, next) }
-        return next
-    }
-
-    fun toolIds(blocks: List<MessageBlock>): List<String> = blocks.mapNotNull { (it as? MessageBlock.ToolUse)?.id }
-
-    fun resultMetrics(event: JsonObject, elapsedFallback: Long?): MessageMetrics? {
-        val usage = event.obj("usage")
-        val input = usage?.long("input_tokens") ?: usage?.long("input")
-        val output = usage?.long("output_tokens") ?: usage?.long("output")
-        val durationMs = event.long("duration_ms") ?: event.long("durationMs") ?: event.long("elapsed_ms")
-        val elapsed = durationMs?.div(1000) ?: elapsedFallback
+    private fun parseMetrics(metrics: JsonObject?): MessageMetrics? {
+        metrics ?: return null
+        val usage = metrics.obj("usage")
+        val input = usage?.long("input")
+        val output = usage?.long("output")
+        val elapsed = metrics.double("elapsedSeconds")
         if (input == null && output == null && elapsed == null) return null
         return MessageMetrics(input, output, elapsed)
     }
 
-    private fun parseToolResult(block: JsonObject?, target: MutableMap<String, ToolResult>) {
-        if (block?.string("type") != "tool_result") return
-        val id = block.string("tool_use_id") ?: return
-        val isError = block.boolean("is_error")
-        target[id] = ToolResult(
-            status = if (isError) ToolStatus.FAILED else ToolStatus.SUCCESS,
-            content = textContent(block["content"]),
-            isError = isError,
+    private fun mergeMetrics(current: MessageMetrics?, next: MessageMetrics?): MessageMetrics? {
+        if (next == null) return current
+        if (current == null) return next
+        fun sum(a: Long?, b: Long?): Long? = if (a == null && b == null) null else (a ?: 0) + (b ?: 0)
+        return MessageMetrics(
+            inputTokens = sum(current.inputTokens, next.inputTokens),
+            outputTokens = sum(current.outputTokens, next.outputTokens),
+            elapsedSeconds = next.elapsedSeconds ?: current.elapsedSeconds,
         )
     }
 
     private fun textContent(content: JsonElement?): String = when (content) {
         is JsonPrimitive -> content.contentOrNull.orEmpty()
-        is JsonArray -> content.joinToString("\n") { element ->
-            val block = element as? JsonObject
-            block?.string("text") ?: if (block?.string("type") == "tool_result") textContent(block["content"]) else ""
-        }.trim()
+        is JsonArray -> content.mapNotNull { element ->
+            val block = element as? JsonObject ?: return@mapNotNull null
+            block.string("text")
+        }.joinToString("\n")
         else -> ""
-    }
-
-    private fun metricsFrom(message: JsonObject, entry: JsonObject): MessageMetrics? {
-        val usage = message.obj("usage")
-        val input = usage?.long("input_tokens") ?: usage?.long("input")
-        val output = usage?.long("output_tokens") ?: usage?.long("output")
-        val duration = entry.long("duration_ms") ?: entry.long("elapsed_ms")
-        if (input == null && output == null && duration == null) return null
-        return MessageMetrics(input, output, duration?.div(1000))
-    }
-
-    private fun appendText(blocks: List<MessageBlock>, text: String): List<MessageBlock> {
-        val next = blocks.toMutableList()
-        val last = next.lastOrNull()
-        if (last is MessageBlock.Text) next[next.lastIndex] = last.copy(text = last.text + text)
-        else next += MessageBlock.Text(text)
-        return next
-    }
-
-    private fun appendThinking(blocks: List<MessageBlock>, text: String): List<MessageBlock> {
-        val next = blocks.toMutableList()
-        val last = next.lastOrNull()
-        if (last is MessageBlock.Thinking) next[next.lastIndex] = last.copy(text = last.text + text)
-        else next += MessageBlock.Thinking(text)
-        return next
-    }
-
-    private fun mergeAdjacent(blocks: List<MessageBlock>): List<MessageBlock> {
-        val merged = mutableListOf<MessageBlock>()
-        blocks.forEach { block ->
-            val last = merged.lastOrNull()
-            when {
-                block is MessageBlock.Text && last is MessageBlock.Text -> merged[merged.lastIndex] = last.copy(text = last.text + block.text)
-                block is MessageBlock.Thinking && last is MessageBlock.Thinking -> merged[merged.lastIndex] = last.copy(text = last.text + block.text)
-                else -> merged += block
-            }
-        }
-        return merged
     }
 }
 
 internal fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 internal fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.longOrNull
+internal fun JsonObject.double(key: String): Double? = (this[key] as? JsonPrimitive)?.doubleOrNull
 internal fun JsonObject.boolean(key: String): Boolean = (this[key] as? JsonPrimitive)?.booleanOrNull == true
 internal fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject

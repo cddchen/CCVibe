@@ -13,26 +13,54 @@ export type Workspace = { id: string; path: string; createdAt: string };
 export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto";
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
-export type ConversationEntry =
-  | { type: "user_message"; id: string; timestamp?: string; content: string | Array<{ type: "text"; text: string }> }
+export type MessageMetrics = {
+  usage?: { input?: number; output?: number; total?: number };
+  elapsedSeconds?: number;
+};
+
+export type ConversationMessage =
+  | { type: "user_message"; id: string; turnId: string; timestamp: string; content: string | Array<{ type: "text"; text: string }>; status: "completed" | "interrupted" | "failed" }
   | {
       type: "agent_message";
       id: string;
-      timestamp?: string;
+      turnId: string;
+      timestamp: string;
+      status: "streaming" | "completed" | "interrupted" | "failed";
       model?: string;
+      metrics?: MessageMetrics;
       content: Array<
         | { type: "text"; text: string }
         | { type: "thinking"; thinking: string }
-        | { type: "tool_call"; toolCallId: string; toolName: string; input: Record<string, unknown> }
+        | { type: "tool_call"; toolCallId: string; toolName: string; input: Record<string, unknown>; status: "building" | "pending" | "waiting_permission" | "running" | "completed" | "failed" | "denied" }
       >;
     }
-  | { type: "tool_result"; id: string; timestamp?: string; toolCallId: string; toolName?: string; content: string; isError: boolean }
+  | { type: "tool_result"; id: string; turnId: string; timestamp: string; status: "completed" | "failed"; toolCallId: string; toolName?: string; content: string; isError: boolean }
   | { type: "model_changed"; id: string; timestamp: string; family: "sonnet" | "opus" | "haiku"; modelId: string }
   | { type: "effort_changed"; id: string; timestamp: string; effort: EffortLevel }
   | { type: "permission_mode_changed"; id: string; timestamp: string; mode: PermissionMode }
-  | { type: "system_message"; id: string; timestamp?: string; subtype?: string; content: string };
+  | { type: "system_message"; id: string; timestamp: string; subtype?: string; content: string };
+
+export type ConversationEvent =
+  | { type: "message_start" | "message_update" | "message_end"; message: ConversationMessage }
+  | { type: "conversation_status"; status: string; error?: string }
+  | { type: "runtime_status"; status: string; error?: string }
+  | { type: "runtime_initialized"; sdkSessionId: string; model?: string; cwd?: string; slashCommands?: unknown[] }
+  | { type: "turn_status"; turnId: string; status: string; error?: string; resultSubtype?: string }
+  | { type: "permission_request"; requestId: string; toolName: string; input?: unknown; toolUseId?: string }
+  | { type: "permission_resolved"; requestId: string; behavior: "allow" | "deny"; reason?: string };
+
+export type ConversationEventEnvelope = {
+  version: 1;
+  sequence: number;
+  conversationId: string;
+  sessionId: string;
+  runtimeId: string;
+  timestamp: string;
+  event: ConversationEvent;
+};
 
 export type ConversationSnapshot = {
+  revision: number;
   conversation: { id: string; sdkSessionId?: string; workspacePath: string };
   runtime: { state: "cold" | "spawning" | "idle" | "running" | "waiting_permission" | "closing" | "closed" | "crashed" | "error"; runtimeId?: string };
   config: {
@@ -41,7 +69,7 @@ export type ConversationSnapshot = {
     permissionMode: PermissionMode;
   };
   currentTurn?: { turnId: string; status: string };
-  messages: ConversationEntry[];
+  messages: ConversationMessage[];
 };
 
 export type DaemonSettings = {

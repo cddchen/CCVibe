@@ -48,7 +48,6 @@
 		D84ACC601918A1A21BF8B738 /* GlassBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD3560B7BDE949714FCC34C /* GlassBackground.swift */; };
 		D9825DC492BBDBA282A035C0 /* TrustPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F925DC0DA3C9898F7F964794 /* TrustPromptView.swift */; };
 		DDFA0E89EBE1B881398C4C32 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47BC06047A7D4C47A96439BA /* ChatViewModel.swift */; };
-		E09E6B423FF59BB85A58511E /* TurnStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F5FCD710175905B4F5901B2 /* TurnStream.swift */; };
 		F822ABC6325EFAACD92493B4 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC76E97A15BCAB1E258353AF /* CredentialStore.swift */; };
 /* End PBXBuildFile section */
 
@@ -84,7 +83,6 @@
 		5C41430E66B653EC206DDA1E /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
 		6BC82001FAE73C78394E1C51 /* AskUserQuestionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskUserQuestionTests.swift; sourceTree = "<group>"; };
 		6C903F48DC61E07AC110BF94 /* AssistantMessageBody.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMessageBody.swift; sourceTree = "<group>"; };
-		6F5FCD710175905B4F5901B2 /* TurnStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnStream.swift; sourceTree = "<group>"; };
 		6F8FA930E45F250F16368134 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
 		710DC48507A81D095F714AD7 /* ChatPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPreferencesTests.swift; sourceTree = "<group>"; };
 		747EEB34F0C2BE78679A52E1 /* CCAgentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCAgentApp.swift; sourceTree = "<group>"; };
@@ -239,7 +237,6 @@
 				47BC06047A7D4C47A96439BA /* ChatViewModel.swift */,
 				91A03A975ACD83997B124071 /* MessageBlocks.swift */,
 				9E71EC62387A119FE3C9F1B0 /* PermissionResponses.swift */,
-				6F5FCD710175905B4F5901B2 /* TurnStream.swift */,
 				79A3E2C9FCB68135D6DC7AEE /* Views */,
 			);
 			path = Chat;
@@ -402,7 +399,6 @@
 				923A757DB3EDC1E0990D0D5F /* Theme.swift in Sources */,
 				36CD3ABAA7A1489F1A9063D9 /* ToolUseCard.swift in Sources */,
 				D9825DC492BBDBA282A035C0 /* TrustPromptView.swift in Sources */,
-				E09E6B423FF59BB85A58511E /* TurnStream.swift in Sources */,
 				4CBBCC561C543DA37E33BEE0 /* VisualEffectView.swift in Sources */,
 				A61BCC4DC8DBC7703A634831 /* WSUrl.swift in Sources */,
 			);

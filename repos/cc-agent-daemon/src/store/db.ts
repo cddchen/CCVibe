@@ -224,7 +224,7 @@ export class MetaStore {
     return row;
   }
 
-  /** Idempotent: register path for session.create allowlist */
+  /** Idempotent: register a trusted workspace path. */
   ensureWorkspace(path: string): WorkspaceRow {
     return this.addWorkspace(path);
   }

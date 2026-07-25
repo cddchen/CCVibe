@@ -6,22 +6,26 @@ import { log } from "../logger.js";
 import type {
   EngineAdapter,
   EngineInterruptReceipt,
-  EnginePermissionContext,
 } from "./engine.js";
 import type { PermissionMode, SessionCreateOptions } from "./types.js";
 import type { EffortLevel } from "../settings/reader.js";
+import { ConversationProjector } from "../conversation/projector.js";
+import type {
+  ConversationEvent,
+  ConversationEventEnvelope,
+  ConversationMessage,
+  MessageLifecycleEvent,
+} from "../conversation/types.js";
 
 type TurnState = {
   id: UUID;
   status: TurnStatus;
 };
 
-type PendingPermissionPrompt = {
-  sessionId: string;
-  requestId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  context: EnginePermissionContext;
+export type ActiveTurnSnapshot = {
+  turnId: string;
+  status: TurnStatus;
+  messages: ConversationMessage[];
 };
 
 function isResultError(message: { subtype?: string; is_error?: boolean }): boolean {
@@ -40,13 +44,9 @@ export class SessionRunner {
   conversationId: string;
   readonly cwd: string;
   private subscribers = new Map<string, ClientConnection>();
-  private permissionOwner: ClientConnection | undefined;
-  private permissionRegistry: PermissionRegistry | undefined;
-  private pendingPermissionPrompts = new Map<string, PendingPermissionPrompt>();
   private sessionStatus: SessionStatus = "starting";
   private runtimeStatus: RuntimeStatus = "starting";
   private currentTurn: TurnState | undefined;
-  private queuedTurns: TurnState[] = [];
   private engineStarted = false;
   private runtimeTerminal = false;
   private onRuntimeTerminal?: () => void;
@@ -55,8 +55,13 @@ export class SessionRunner {
   private onReclaim?: () => void;
   private onConversationFinished?: (lastConversationAt: number) => void;
   private lastConversationAt = Date.now();
-  private turnBuffer: unknown[] = [];
+  private turnBuffer: ConversationEventEnvelope[] = [];
   private readonly maxTurnBuffer = 4000;
+  private sequence = 0;
+  private readonly projectors = new Map<string, ConversationProjector>();
+  private readonly liveMessages = new Map<string, ConversationMessage>();
+  private readonly pendingMessageUpdates = new Map<string, MessageLifecycleEvent>();
+  private updateFlushTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     runtimeId: string,
@@ -101,7 +106,6 @@ export class SessionRunner {
     return this.isRuntimeActive()
       && this.engineStarted
       && !this.currentTurn
-      && this.queuedTurns.length === 0
       && this.sessionStatus !== "starting"
       && this.sessionStatus !== "running"
       && this.sessionStatus !== "waiting_permission"
@@ -137,49 +141,117 @@ export class SessionRunner {
   }
 
   private clearTurnBuffer(): void {
+    if (this.updateFlushTimer) clearTimeout(this.updateFlushTimer);
+    this.updateFlushTimer = undefined;
+    this.pendingMessageUpdates.clear();
     this.turnBuffer = [];
+    this.liveMessages.clear();
   }
 
-  private sendEventTo(conn: ClientConnection, message: unknown): void {
-    const sid = this.sessionId ?? this.runtimeId;
-    const payload = {
-      jsonrpc: "2.0" as const,
-      method: "session/event",
-      params: { conversationId: this.conversationId, sessionId: sid, runtimeId: this.runtimeId, message },
-    };
+  private sendEnvelopeTo(conn: ClientConnection, envelope: ConversationEventEnvelope): void {
     try {
-      conn.send(payload);
+      conn.send({ jsonrpc: "2.0", method: "conversation/event", params: envelope });
     } catch {
       // Broken subscribers are removed when their connection closes.
     }
   }
 
-  subscribe(conn: ClientConnection, claimPermissions = false): void {
-    this.subscribers.set(conn.id, conn);
-    if (claimPermissions || !this.permissionOwner) {
-      this.claimPermissionOwnership(conn);
+  private envelope(event: ConversationEvent, incrementSequence = true): ConversationEventEnvelope {
+    if (incrementSequence) this.sequence += 1;
+    return {
+      version: 1,
+      sequence: this.sequence,
+      conversationId: this.conversationId,
+      sessionId: this.sessionId ?? this.runtimeId,
+      runtimeId: this.runtimeId,
+      timestamp: new Date().toISOString(),
+      event,
+    };
+  }
+
+  private publishImmediate(event: ConversationEvent): void {
+    const envelope = this.envelope(event);
+    this.turnBuffer.push(envelope);
+    if (this.turnBuffer.length > this.maxTurnBuffer) this.turnBuffer.shift();
+    for (const conn of this.subscribers.values()) this.sendEnvelopeTo(conn, envelope);
+  }
+
+  private flushPendingMessageUpdates(): void {
+    if (this.updateFlushTimer) clearTimeout(this.updateFlushTimer);
+    this.updateFlushTimer = undefined;
+    const updates = [...this.pendingMessageUpdates.values()];
+    this.pendingMessageUpdates.clear();
+    for (const update of updates) this.publishImmediate(update);
+  }
+
+  private publish(event: ConversationEvent): void {
+    if (event.type === "message_update") {
+      this.pendingMessageUpdates.set(event.message.id, event);
+      if (!this.updateFlushTimer) {
+        this.updateFlushTimer = setTimeout(() => this.flushPendingMessageUpdates(), 40);
+        this.updateFlushTimer.unref?.();
+      }
+      return;
     }
-    for (const message of this.turnBuffer) this.sendEventTo(conn, message);
+    this.flushPendingMessageUpdates();
+    this.publishImmediate(event);
+  }
+
+  private publishLifecycle(events: MessageLifecycleEvent[]): void {
+    for (const event of events) {
+      this.liveMessages.set(event.message.id, structuredClone(event.message));
+      this.publish(event);
+    }
+  }
+
+  private currentProjector(): ConversationProjector | undefined {
+    return this.currentTurn ? this.projectors.get(this.currentTurn.id) : undefined;
+  }
+
+  publishMessage(message: ConversationMessage): void {
+    this.publishLifecycle([
+      { type: "message_start", message: structuredClone(message) },
+      { type: "message_end", message: structuredClone(message) },
+    ]);
+  }
+
+  getLiveMessages(): ConversationMessage[] {
+    return [...this.liveMessages.values()].map((message) => structuredClone(message));
+  }
+
+  getActiveTurnSnapshot(): ActiveTurnSnapshot | undefined {
+    this.flushPendingMessageUpdates();
+    const turn = this.currentTurn;
+    if (!turn) return undefined;
+    return {
+      turnId: turn.id,
+      status: turn.status,
+      messages: [...this.liveMessages.values()]
+        .filter((message) => "turnId" in message && message.turnId === turn.id)
+        .map((message) => structuredClone(message)),
+    };
+  }
+
+  getSequence(): number {
+    this.flushPendingMessageUpdates();
+    return this.sequence;
+  }
+
+  subscribe(conn: ClientConnection, reinitializeInteractiveState = false): void {
+    this.flushPendingMessageUpdates();
+    this.subscribers.set(conn.id, conn);
+    for (const envelope of this.turnBuffer) this.sendEnvelopeTo(conn, envelope);
+    if (reinitializeInteractiveState && this.engineStarted && this.isRuntimeActive()) {
+      void this.reinitializeInteractiveState();
+    }
   }
 
   unsubscribe(connId: string): void {
     this.subscribers.delete(connId);
-    if (this.permissionOwner?.id === connId) {
-      this.permissionOwner = undefined;
-      const nextOwner = [...this.subscribers.values()].at(-1);
-      if (nextOwner) this.claimPermissionOwnership(nextOwner);
-    }
   }
 
-  private claimPermissionOwnership(conn: ClientConnection): void {
-    this.permissionOwner = conn;
-    this.permissionRegistry?.claimSession(this.runtimeId, conn.id);
-    for (const prompt of this.pendingPermissionPrompts.values()) {
-      this.sendPermissionRequest(conn, prompt);
-    }
-    if (this.engineStarted && this.isRuntimeActive()) {
-      void this.reinitializeInteractiveState();
-    }
+  hasSubscriber(connId: string): boolean {
+    return this.subscribers.has(connId);
   }
 
   private async reinitializeInteractiveState(): Promise<void> {
@@ -197,45 +269,20 @@ export class SessionRunner {
     return this.subscribers.size;
   }
 
-  notify(method: string, params: unknown): void {
-    const payload = { jsonrpc: "2.0", method, params };
-    for (const conn of this.subscribers.values()) {
-      try {
-        conn.send(payload);
-      } catch {
-        // Broken subscribers are removed when their connection closes.
-      }
-    }
-  }
-
-  pushEvent(message: unknown): void {
-    this.turnBuffer.push(message);
-    if (this.turnBuffer.length > this.maxTurnBuffer) this.turnBuffer.shift();
-    const sid = this.sessionId ?? this.runtimeId;
-    this.notify("session/event", { conversationId: this.conversationId, sessionId: sid, runtimeId: this.runtimeId, message });
-    const typed = message as { type?: string };
-    if (typed.type === "result") this.clearTurnBuffer();
-  }
-
   setStatus(status: SessionStatus, error?: string): void {
     this.sessionStatus = status;
-    const sid = this.sessionId ?? this.runtimeId;
-    this.notify("session/status", { conversationId: this.conversationId, sessionId: sid, runtimeId: this.runtimeId, status, error });
+    this.publish({ type: "conversation_status", status, error });
   }
 
   private setRuntimeStatus(status: RuntimeStatus, error?: string): void {
     this.runtimeStatus = status;
-    const sid = this.sessionId ?? this.runtimeId;
-    this.notify("runtime/status", { conversationId: this.conversationId, sessionId: sid, runtimeId: this.runtimeId, status, error });
+    this.publish({ type: "runtime_status", status, error });
   }
 
   private setTurnStatus(turn: TurnState, status: TurnStatus, error?: string, resultSubtype?: string): void {
     turn.status = status;
-    const sid = this.sessionId ?? this.runtimeId;
-    this.notify("turn/status", {
-      sessionId: sid,
-      conversationId: this.conversationId,
-      runtimeId: this.runtimeId,
+    this.publish({
+      type: "turn_status",
       turnId: turn.id,
       status,
       error,
@@ -281,7 +328,6 @@ export class SessionRunner {
     onSessionId?: (sessionId: string) => void,
   ): Promise<void> {
     this.bindSessionId(this.runtimeId);
-    this.permissionRegistry = permissions;
     log.info("session runner starting", { runtimeId: this.runtimeId, cwd: opts.cwd });
 
     await this.engine.start(
@@ -294,11 +340,21 @@ export class SessionRunner {
             session_id?: string;
             errors?: string[];
             is_error?: boolean;
+            model?: string;
+            cwd?: string;
+            slash_commands?: unknown[];
           };
           if (typed.type === "system" && typed.subtype === "init" && typed.session_id) {
             log.info("session init", { runtimeId: this.runtimeId, session_id: typed.session_id });
             this.bindSessionId(typed.session_id);
             onSessionId?.(typed.session_id);
+            this.publish({
+              type: "runtime_initialized",
+              sdkSessionId: typed.session_id,
+              model: typed.model,
+              cwd: typed.cwd,
+              slashCommands: typed.slash_commands,
+            });
             this.setRuntimeStatus("running");
             this.setStatus(
               this.currentTurn?.status === "waiting_permission"
@@ -309,36 +365,48 @@ export class SessionRunner {
             );
           }
 
-          this.pushEvent(message);
+          this.publishLifecycle(this.currentProjector()?.accept(message) ?? []);
           if (typed.type === "result") this.handleResult(typed);
         },
         onRuntimeClosed: (error) => this.finalizeRuntime(error),
         canUseTool: async (toolName, input, context) => {
-          const sessionId = this.sessionId ?? this.runtimeId;
-          const owner = this.permissionOwner;
           const turn = this.currentTurn;
-          const prompt: PendingPermissionPrompt = {
-            sessionId,
-            requestId: context.requestId,
-            toolName,
-            input,
-            context,
-          };
-          this.pendingPermissionPrompts.set(context.requestId, prompt);
           if (turn && turn.status !== "interrupted") {
+            this.publishLifecycle(this.currentProjector()?.setToolStatus(context.toolUseId, "waiting_permission") ?? []);
             this.setTurnStatus(turn, "waiting_permission");
             this.setStatus("waiting_permission");
           }
 
-          if (owner) this.sendPermissionRequest(owner, prompt);
+          this.publish({
+            type: "permission_request",
+            requestId: context.requestId,
+            toolName,
+            input,
+            toolUseId: context.toolUseId,
+            agentId: context.agentId,
+            suggestions: context.suggestions,
+            title: context.title,
+            displayName: context.displayName,
+            description: context.description,
+            blockedPath: context.blockedPath,
+            decisionReason: context.decisionReason,
+          });
           try {
-            return await permissions.waitForResponse(this.runtimeId, context.requestId, owner?.id, {
+            const decision = await permissions.waitForResponse(this.runtimeId, context.requestId, {
               signal: context.signal,
             });
+            this.publish({
+              type: "permission_resolved",
+              requestId: context.requestId,
+              behavior: decision.behavior,
+              reason: decision.behavior === "deny" ? decision.message : undefined,
+            });
+            this.publishLifecycle(this.currentProjector()?.setToolStatus(
+              context.toolUseId,
+              decision.behavior === "allow" ? "running" : "denied",
+            ) ?? []);
+            return decision;
           } finally {
-            if (this.pendingPermissionPrompts.get(context.requestId) === prompt) {
-              this.pendingPermissionPrompts.delete(context.requestId);
-            }
             if (turn && this.currentTurn === turn && turn.status === "waiting_permission") {
               this.setTurnStatus(turn, "running");
               this.setStatus("running");
@@ -352,41 +420,6 @@ export class SessionRunner {
     this.engineStarted = true;
     if (this.runtimeStatus === "starting") this.setRuntimeStatus("running");
     if (this.sessionStatus === "starting") this.setStatus("idle");
-  }
-
-  private sendPermissionRequest(
-    owner: ClientConnection,
-    prompt: PendingPermissionPrompt,
-  ): void {
-    const { sessionId, requestId, toolName, input, context } = prompt;
-    try {
-      owner.send({
-        jsonrpc: "2.0",
-        method: "permission/request",
-        params: {
-          sessionId,
-          conversationId: this.conversationId,
-          runtimeId: this.runtimeId,
-          requestId,
-          toolName,
-          input,
-          toolUseId: context.toolUseId,
-          agentId: context.agentId,
-          suggestions: context.suggestions,
-          title: context.title,
-          displayName: context.displayName,
-          description: context.description,
-          blockedPath: context.blockedPath,
-          decisionReason: context.decisionReason,
-        },
-      });
-    } catch (error) {
-      log.warn("permission request delivery failed", {
-        runtimeId: this.runtimeId,
-        requestId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   private handleResult(message: { subtype?: string; errors?: string[]; is_error?: boolean }): void {
@@ -403,23 +436,16 @@ export class SessionRunner {
         }
       }
       this.currentTurn = undefined;
+      this.projectors.delete(turn.id);
       this.markConversationFinished();
     }
-    this.startNextQueuedTurn();
-  }
-
-  private startNextQueuedTurn(): void {
-    const next = this.queuedTurns.shift();
-    if (!next) {
-      if (this.isRuntimeActive() && this.sessionStatus !== "closing") {
-        this.setStatus("idle");
-        this.scheduleReclaim();
-      }
-      return;
+    // The SDK result is the persistence boundary: completed history now belongs
+    // exclusively to Claude Code JSONL, so no live turn state is retained.
+    this.clearTurnBuffer();
+    if (this.isRuntimeActive() && this.sessionStatus !== "closing") {
+      this.setStatus("idle");
+      this.scheduleReclaim();
     }
-    this.currentTurn = next;
-    this.setTurnStatus(next, "running");
-    this.setStatus("running");
   }
 
   private finalizeRuntime(error?: Error): void {
@@ -427,15 +453,14 @@ export class SessionRunner {
     this.runtimeTerminal = true;
 
     if (this.currentTurn && this.currentTurn.status !== "completed") {
+      this.publishLifecycle(this.currentProjector()?.finish(error ? "failed" : "interrupted") ?? []);
       this.setTurnStatus(
         this.currentTurn,
         error ? "failed" : "interrupted",
         error?.message,
       );
+      this.projectors.delete(this.currentTurn.id);
       this.currentTurn = undefined;
-    }
-    for (const queued of this.queuedTurns.splice(0)) {
-      this.setTurnStatus(queued, "interrupted", error?.message);
     }
 
     if (error) {
@@ -450,19 +475,17 @@ export class SessionRunner {
 
   async send(content: string): Promise<{ turnId: string }> {
     if (!this.isRuntimeActive() || !this.engineStarted) throw new Error("session runtime is not active");
+    if (this.currentTurn) throw new Error("conversation already has an active turn");
     this.clearReclaimTimer();
     this.lastConversationAt = Date.now();
-    const turn: TurnState = { id: randomUUID(), status: "queued" };
+    const turn: TurnState = { id: randomUUID(), status: "running" };
     this.clearTurnBuffer();
-
-    if (this.currentTurn) {
-      this.queuedTurns.push(turn);
-      this.setTurnStatus(turn, "queued");
-    } else {
-      this.currentTurn = turn;
-      this.setTurnStatus(turn, "running");
-      this.setStatus("running");
-    }
+    const projector = new ConversationProjector();
+    this.projectors.set(turn.id, projector);
+    this.publishLifecycle(projector.beginTurn(turn.id, content));
+    this.currentTurn = turn;
+    this.setTurnStatus(turn, "running");
+    this.setStatus("running");
 
     try {
       await this.engine.send(this.runtimeId, { id: turn.id, content });
@@ -470,10 +493,15 @@ export class SessionRunner {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (this.currentTurn === turn) this.currentTurn = undefined;
-      else this.queuedTurns = this.queuedTurns.filter((queued) => queued !== turn);
+      this.publishLifecycle(projector.finish("failed"));
+      this.projectors.delete(turn.id);
       this.setTurnStatus(turn, "failed", message);
       this.markConversationFinished();
-      this.startNextQueuedTurn();
+      this.clearTurnBuffer();
+      if (this.isRuntimeActive() && this.sessionStatus !== "closing") {
+        this.setStatus("idle");
+        this.scheduleReclaim();
+      }
       throw error;
     }
   }
@@ -483,18 +511,11 @@ export class SessionRunner {
     const stillQueued = new Set(receipt?.still_queued ?? []);
 
     if (this.currentTurn && !stillQueued.has(this.currentTurn.id)) {
+      this.publishLifecycle(this.currentProjector()?.finish("interrupted") ?? []);
       this.setTurnStatus(this.currentTurn, "interrupted");
+      this.projectors.delete(this.currentTurn.id);
     }
-    if (receipt) {
-      const retained: TurnState[] = [];
-      for (const queued of this.queuedTurns) {
-        if (stillQueued.has(queued.id)) retained.push(queued);
-        else this.setTurnStatus(queued, "interrupted");
-      }
-      this.queuedTurns = retained;
-    }
-
-    if (!this.currentTurn && this.queuedTurns.length === 0) {
+    if (!this.currentTurn) {
       this.markConversationFinished();
       this.setStatus("idle");
       this.scheduleReclaim();
@@ -517,6 +538,7 @@ export class SessionRunner {
   async stop(): Promise<void> {
     if (this.runtimeTerminal) return;
     this.clearReclaimTimer();
+    this.flushPendingMessageUpdates();
     this.setStatus("closing");
     this.setRuntimeStatus("closing");
     await this.engine.stop(this.runtimeId);

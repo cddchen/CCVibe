@@ -31,6 +31,49 @@ function latestEntry(entries: ConversationConfigEntryRow[], type: string): Conve
   return undefined;
 }
 
+/** Removes persisted configuration events that did not change the effective conversation state. */
+export function meaningfulConfigEntries(
+  settings: ClaudePersonalSettings,
+  entries: ConversationConfigEntryRow[],
+  observedModels: Array<{ model: string; timestamp: string }> = [],
+): ConversationConfigEntryRow[] {
+  const baseline = resolveConversationConfig(settings, []);
+  let model = { family: baseline.model.family, modelId: baseline.model.requestedId };
+  let effort = baseline.effort.requested;
+  let permissionMode = baseline.permissionMode;
+  const meaningful: ConversationConfigEntryRow[] = [];
+  const observations = [...observedModels].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  let observationIndex = 0;
+
+  for (const entry of entries) {
+    while (observationIndex < observations.length
+      && observations[observationIndex].timestamp <= entry.createdAt) {
+      model = resolveModelSelection(observations[observationIndex].model, settings);
+      observationIndex += 1;
+    }
+    if (entry.type === "model_changed") {
+      const candidate = typeof entry.payload.modelId === "string"
+        ? entry.payload.modelId
+        : String(entry.payload.family ?? "sonnet");
+      const next = resolveModelSelection(candidate, settings);
+      if (next.family === model.family && next.modelId === model.modelId) continue;
+      model = next;
+    } else if (entry.type === "effort_changed") {
+      const next = entry.payload.effort;
+      if (typeof next !== "string" || !["low", "medium", "high", "xhigh", "max"].includes(next)) continue;
+      if (next === effort) continue;
+      effort = next as EffortLevel;
+    } else {
+      const next = entry.payload.mode;
+      if (typeof next !== "string" || !(PERMISSION_MODES as readonly string[]).includes(next)) continue;
+      if (next === permissionMode) continue;
+      permissionMode = next as ResolvedConversationConfig["permissionMode"];
+    }
+    meaningful.push(entry);
+  }
+  return meaningful;
+}
+
 export function resolveConversationConfig(
   settings: ClaudePersonalSettings,
   configEntries: ConversationConfigEntryRow[],

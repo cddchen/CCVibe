@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ToolResultState, ToolUseBlock } from "../lib/messageBlocks";
 
 function summarizeInput(name: string, input: Record<string, unknown>): string {
@@ -31,15 +31,19 @@ type Props = {
 };
 
 export function ToolUseCard({ block, result, streaming }: Props) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(streaming === true);
   const pending = !result || result.status === "pending";
   const pulse = pending && streaming;
 
+  useEffect(() => {
+    setOpen(streaming === true);
+  }, [streaming]);
+
   return (
-    <div className="my-2 min-w-0 w-full overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 text-xs shadow-sm dark:border-zinc-700/80 dark:bg-zinc-900/60">
+    <div className="min-w-0 w-full overflow-hidden rounded-xl border border-zinc-200/80 bg-white text-xs dark:border-zinc-700/80 dark:bg-zinc-950/50">
       <button
         type="button"
-        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+        className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-zinc-50 dark:hover:bg-zinc-900/70"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
@@ -51,7 +55,7 @@ export function ToolUseCard({ block, result, streaming }: Props) {
           {statusLabel(result)}
         </span>
         <span className="min-w-0 flex-1 truncate text-zinc-500">{summarizeInput(block.name, block.input)}</span>
-        <span className="text-zinc-400">{open ? "▼" : "▶"}</span>
+        <span className="text-base leading-none text-zinc-400">{open ? "⌃" : "⌄"}</span>
       </button>
       {open && (
         <div className="space-y-2 border-t border-zinc-200 px-3 pb-3 pt-2 dark:border-zinc-800">

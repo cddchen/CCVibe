@@ -116,7 +116,7 @@ final class SessionListViewModel: ObservableObject {
     private func pollActive(client: DaemonClient) async {
         struct ActiveListResponse: Decodable { let sessions: [ActiveSessionRow] }
         guard client.phase == .connected else { return }
-        guard let r = try? await client.callDecodable(ActiveListResponse.self, method: "session.listActive", params: [:]) else { return }
+        guard let r = try? await client.callDecodable(ActiveListResponse.self, method: "conversation.listActive", params: [:]) else { return }
         activeMap = mapActiveSessions(r.sessions)
         applyDefaultExpansion()
     }

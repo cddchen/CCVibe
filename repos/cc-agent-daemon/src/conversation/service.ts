@@ -4,11 +4,12 @@ import type { EffortLevel } from "../settings/reader.js";
 import { readClaudePersonalSettings } from "../settings/reader.js";
 import type { MetaStore, ConversationRow } from "../store/db.js";
 import type { SessionRegistry } from "../session/registry.js";
+import type { ActiveTurnSnapshot, SessionRunner } from "../session/runner.js";
 import { loadSessionMessages } from "../history/reader.js";
 import { latestAssistantModel, mapHistoryEntries } from "./messages.js";
-import { resolveConversationConfig, resolveModelSelection } from "./config.js";
+import { meaningfulConfigEntries, resolveConversationConfig, resolveModelSelection } from "./config.js";
 import type {
-  ConversationEntry,
+  ConversationMessage,
   ConversationRuntimeState,
   ConversationSnapshot,
   ModelFamily,
@@ -21,9 +22,21 @@ type OpenInput = {
   subscribe?: boolean;
 };
 
+export function overlayActiveTurn(
+  history: ConversationMessage[],
+  activeTurn?: ActiveTurnSnapshot,
+): ConversationMessage[] {
+  if (!activeTurn) return history;
+  return [
+    ...history.filter((message) => !("turnId" in message && message.turnId === activeTurn.turnId)),
+    ...activeTurn.messages,
+  ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
 export class ConversationService {
   private spawnPromises = new Map<string, Promise<void>>();
   private sendPromises = new Map<string, Promise<{ accepted: true; conversationId: string; turnId: string }>>();
+  private configMutationTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly sessions: SessionRegistry,
@@ -42,8 +55,23 @@ export class ConversationService {
       ?? (conversation.sdkSessionId ? this.sessions.get(conversation.sdkSessionId) : undefined);
   }
 
+  private async serializeConfigMutation<T>(conversationId: string, mutation: () => Promise<T>): Promise<T> {
+    const previous = this.configMutationTails.get(conversationId) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    this.configMutationTails.set(conversationId, tail);
+    await previous.catch(() => {});
+    try {
+      return await mutation();
+    } finally {
+      release();
+      if (this.configMutationTails.get(conversationId) === tail) this.configMutationTails.delete(conversationId);
+    }
+  }
+
   private async loadState(conversation: ConversationRow): Promise<{
-    entries: ConversationEntry[];
+    entries: ConversationMessage[];
     config: ResolvedConversationConfig;
   }> {
     const history = conversation.sdkSessionId
@@ -51,10 +79,19 @@ export class ConversationService {
       : [];
     const settings = await readClaudePersonalSettings();
     const configEntries = this.store.listConversationConfigEntries(conversation.conversationId);
-    const config = resolveConversationConfig(settings, configEntries, latestAssistantModel(history));
-    const entries: ConversationEntry[] = [
-      ...mapHistoryEntries(history),
-      ...configEntries.map((entry): ConversationEntry => {
+    const historyModel = latestAssistantModel(history);
+    const config = resolveConversationConfig(settings, configEntries, historyModel);
+    const historyEntries = mapHistoryEntries(history);
+    const visibleConfigEntries = meaningfulConfigEntries(
+      settings,
+      configEntries,
+      historyEntries.flatMap((message) => message.type === "agent_message" && message.model
+        ? [{ model: message.model, timestamp: message.timestamp }]
+        : []),
+    );
+    const entries: ConversationMessage[] = [
+      ...historyEntries,
+      ...visibleConfigEntries.map((entry): ConversationMessage => {
         if (entry.type === "model_changed") return {
             type: "model_changed",
             id: entry.id,
@@ -79,6 +116,28 @@ export class ConversationService {
     return { entries, config };
   }
 
+  private async loadSnapshotState(
+    conversation: ConversationRow,
+    runner?: SessionRunner,
+  ): Promise<{
+    entries: ConversationMessage[];
+    config: ResolvedConversationConfig;
+    activeTurn?: ActiveTurnSnapshot;
+  }> {
+    const turnBeforeLoad = runner?.getTurnStatus();
+    let state = await this.loadState(conversation);
+    let activeTurn = runner?.getActiveTurnSnapshot();
+
+    // A result may arrive while JSONL is being read. The SDK has persisted it
+    // before emitting result, so reload once when the active turn disappeared or
+    // changed during the read instead of returning a stale pre-result snapshot.
+    if (runner && turnBeforeLoad && turnBeforeLoad.id !== activeTurn?.turnId) {
+      state = await this.loadState(conversation);
+      activeTurn = runner.getActiveTurnSnapshot();
+    }
+    return { ...state, activeTurn };
+  }
+
   async open(input: OpenInput, conn?: ClientConnection): Promise<ConversationSnapshot> {
     const conversation = this.ensureConversation(input);
     const runner = this.findRunner(conversation);
@@ -86,8 +145,8 @@ export class ConversationService {
       runner.bindConversationId(conversation.conversationId);
       if (input.subscribe !== false && conn) runner.subscribe(conn, true);
     }
-    const { entries, config } = await this.loadState(conversation);
-    const turn = runner?.getTurnStatus();
+    const { entries, config, activeTurn } = await this.loadSnapshotState(conversation, runner);
+    const messages = overlayActiveTurn(entries, activeTurn);
     let runtime: { state: ConversationRuntimeState; runtimeId?: string } = { state: "cold" };
     if (runner) {
       const status = runner.getStatus();
@@ -96,7 +155,8 @@ export class ConversationService {
         runtimeId: runner.runtimeId,
       };
     }
-    return {
+    const snapshot: ConversationSnapshot = {
+      revision: runner?.getSequence() ?? 0,
       conversation: {
         id: conversation.conversationId,
         sdkSessionId: conversation.sdkSessionId ?? undefined,
@@ -104,17 +164,20 @@ export class ConversationService {
       },
       runtime,
       config,
-      currentTurn: turn ? { turnId: turn.id, status: turn.status } : undefined,
-      messages: entries,
+      currentTurn: activeTurn
+        ? { turnId: activeTurn.turnId, status: activeTurn.status }
+        : undefined,
+      messages,
     };
+    return snapshot;
   }
 
   async get(conversationId: string): Promise<ConversationSnapshot> {
     const conversation = this.store.getConversation(conversationId);
     if (!conversation) throw new Error("unknown conversation");
     const runner = this.findRunner(conversation);
-    const { entries, config } = await this.loadState(conversation);
-    const turn = runner?.getTurnStatus();
+    const { entries, config, activeTurn } = await this.loadSnapshotState(conversation, runner);
+    const messages = overlayActiveTurn(entries, activeTurn);
     let runtime: ConversationSnapshot["runtime"] = { state: "cold" };
     if (runner) {
       const status = runner.getStatus();
@@ -124,6 +187,7 @@ export class ConversationService {
       };
     }
     return {
+      revision: runner?.getSequence() ?? 0,
       conversation: {
         id: conversation.conversationId,
         sdkSessionId: conversation.sdkSessionId ?? undefined,
@@ -131,8 +195,10 @@ export class ConversationService {
       },
       runtime,
       config,
-      currentTurn: turn ? { turnId: turn.id, status: turn.status } : undefined,
-      messages: entries,
+      currentTurn: activeTurn
+        ? { turnId: activeTurn.turnId, status: activeTurn.status }
+        : undefined,
+      messages,
     };
   }
 
@@ -220,18 +286,23 @@ export class ConversationService {
   }
 
   async setModel(conversationId: string, model: string): Promise<ResolvedConversationConfig["model"]> {
-    const conversation = this.store.getConversation(conversationId);
-    if (!conversation) throw new Error("unknown conversation");
-    const settings = await readClaudePersonalSettings();
-    const selection = resolveModelSelection(model, settings);
-    const runner = this.findRunner(conversation);
-    if (runner) await runner.setModel(selection.modelId);
-    const entry = this.store.appendConversationConfigEntry(conversation.conversationId, "model_changed", selection);
-    runner?.notify("conversation/event", {
-      conversationId: conversation.conversationId,
-      entry: { type: "model_changed", id: entry.id, timestamp: entry.createdAt, ...selection },
+    return this.serializeConfigMutation(conversationId, async () => {
+      const conversation = this.store.getConversation(conversationId);
+      if (!conversation) throw new Error("unknown conversation");
+      const settings = await readClaudePersonalSettings();
+      const selection = resolveModelSelection(model, settings);
+      const { config } = await this.loadState(conversation);
+      if (config.model.family === selection.family && config.model.requestedId === selection.modelId) {
+        return config.model;
+      }
+      const runner = this.findRunner(conversation);
+      if (runner) await runner.setModel(selection.modelId);
+      const entry = this.store.appendConversationConfigEntry(conversation.conversationId, "model_changed", selection);
+      runner?.publishMessage({
+        type: "model_changed", id: entry.id, timestamp: entry.createdAt, ...selection,
+      });
+      return { family: selection.family, requestedId: selection.modelId, source: "conversation" };
     });
-    return { family: selection.family, requestedId: selection.modelId, source: "conversation" };
   }
 
   async setEffort(conversationId: string, effort: EffortLevel): Promise<ResolvedConversationConfig["effort"]> {
@@ -240,9 +311,8 @@ export class ConversationService {
     const runner = this.findRunner(conversation);
     if (runner) await runner.setEffort(effort);
     const entry = this.store.appendConversationConfigEntry(conversation.conversationId, "effort_changed", { effort });
-    runner?.notify("conversation/event", {
-      conversationId: conversation.conversationId,
-      entry: { type: "effort_changed", id: entry.id, timestamp: entry.createdAt, effort },
+    runner?.publishMessage({
+      type: "effort_changed", id: entry.id, timestamp: entry.createdAt, effort,
     });
     return { requested: effort, effective: effort, source: "conversation" };
   }
@@ -257,9 +327,8 @@ export class ConversationService {
       "permission_mode_changed",
       { mode },
     );
-    runner?.notify("conversation/event", {
-      conversationId: conversation.conversationId,
-      entry: { type: "permission_mode_changed", id: entry.id, timestamp: entry.createdAt, mode },
+    runner?.publishMessage({
+      type: "permission_mode_changed", id: entry.id, timestamp: entry.createdAt, mode,
     });
   }
 

@@ -41,7 +41,7 @@ enum PermissionResponses {
         denyMessage: String = ""
     ) throws -> [String: Any] {
         var base: [String: Any] = [
-            "sessionId": request.sessionId,
+            "conversationId": request.conversationId,
             "requestId": request.requestId,
             "behavior": behavior,
         ]

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ClaudePersonalSettings } from "../settings/reader.js";
 import type { ConversationConfigEntryRow } from "../store/db.js";
-import { identifyModelFamily, resolveConversationConfig, resolveModelSelection } from "./config.js";
+import {
+  identifyModelFamily,
+  meaningfulConfigEntries,
+  resolveConversationConfig,
+  resolveModelSelection,
+} from "./config.js";
 
 const settings: ClaudePersonalSettings = {
   models: {
@@ -54,5 +59,28 @@ describe("conversation config resolution", () => {
       effort: { requested: "high", source: "fallback" },
       permissionMode: "default",
     });
+  });
+
+  it("filters persisted configuration events that do not change effective state", () => {
+    const entries = [
+      entry("model_changed", { family: "opus", modelId: "my-opus" }, "2026-01-01T00:00:00Z"),
+      entry("model_changed", { family: "opus", modelId: "my-opus" }, "2026-01-01T00:00:01Z"),
+      entry("model_changed", { family: "haiku", modelId: "my-haiku" }, "2026-01-01T00:00:02Z"),
+      entry("model_changed", { family: "haiku", modelId: "my-haiku" }, "2026-01-01T00:00:03Z"),
+    ];
+
+    expect(meaningfulConfigEntries(settings, entries).map((item) => item.createdAt)).toEqual([
+      "2026-01-01T00:00:02Z",
+    ]);
+  });
+
+  it("compares a model change with the model observed before it in history", () => {
+    const entries = [
+      entry("model_changed", { family: "haiku", modelId: "my-haiku" }, "2026-01-01T00:00:02Z"),
+    ];
+    expect(meaningfulConfigEntries(settings, entries, [
+      { model: "my-opus", timestamp: "2026-01-01T00:00:01Z" },
+      { model: "my-haiku", timestamp: "2026-01-01T00:00:03Z" },
+    ])).toEqual(entries);
   });
 });

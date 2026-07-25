@@ -9,15 +9,7 @@ import type { ClientConnection } from "./connection.js";
 import type { AppContext } from "../app/context.js";
 import {
   authParams,
-  sessionCreateParams,
-  sessionIdParams,
-  sessionSendParams,
-  sessionResumeParams,
-  sessionForkParams,
-  sessionSetPermissionParams,
-  sessionSetMetaParams,
   historyListParams,
-  historyLoadParams,
   workspaceAddParams,
   workspaceRemoveParams,
   workspaceCheckTrustParams,
@@ -33,7 +25,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { assertCwdAllowed, canonicalPath } from "../security/workspaceGuard.js";
 import { validateToken } from "../security/auth.js";
-import { listAllLocalProjects, listSessions, loadSessionMessages } from "../history/reader.js";
+import { listAllLocalProjects, listSessions } from "../history/reader.js";
 import { projectSessionsDir } from "../history/paths.js";
 import { log } from "../logger.js";
 import { readClaudePersonalSettings } from "../settings/reader.js";
@@ -134,168 +126,10 @@ const handlers: Record<string, Handler> = {
     return { ok: true };
   }),
 
-  "session.create": withSchema(sessionCreateParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    log.info("rpc session.create", { cwd: p.cwd, conn: conn.id });
-    assertCwdAllowed(p.cwd, ctx.store.getWorkspacePaths());
-    conn.permissionClientId = conn.id;
-    const workspacePath = canonicalPath(p.cwd);
-    const sessionId = await ctx.sessions.create(
-      {
-        cwd: workspacePath,
-        model: p.model,
-        permissionMode: p.permissionMode,
-        allowedTools: p.allowedTools,
-        disallowedTools: p.disallowedTools,
-        systemPrompt: p.systemPrompt,
-        settingSources: p.settingSources,
-        effort: p.effort,
-      },
-      conn,
-      p.initialMessage,
-      (sdkSessionId, runtimeId) => ctx.store.migrateSessionMeta(runtimeId, sdkSessionId, workspacePath),
-    );
-    ctx.store.upsertSessionMeta(sessionId, workspacePath, {});
-    return { sessionId };
-  }),
-
-  "session.sendMessage": withSchema(sessionSendParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    if (!runner) {
-      const active = ctx.sessions.listActive();
-      log.warn("rpc session.sendMessage unknown session", {
-        sessionId: p.sessionId,
-        active: active.map((s) => s.sessionId),
-      });
-      throw rpcError(
-        RPC_ERROR.INVALID_PARAMS,
-        `unknown session (active: ${active.map((s) => s.sessionId).join(", ") || "none"})`,
-      );
-    }
-    log.info("rpc session.sendMessage", { sessionId: p.sessionId, len: p.content.length });
-    const { turnId } = await runner.send(p.content);
-    return { accepted: true, turnId };
-  }),
-
-  "session.resume": withSchema(sessionResumeParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    assertCwdAllowed(p.cwd, ctx.store.getWorkspacePaths());
-    const workspacePath = canonicalPath(p.cwd);
-    conn.permissionClientId = conn.id;
-    const existing = ctx.sessions.get(p.sessionId);
-    if (existing) await ctx.sessions.remove(p.sessionId);
-    const sessionId = await ctx.sessions.create(
-      {
-        cwd: workspacePath,
-        resumeSessionId: p.sessionId,
-        permissionMode: p.permissionMode,
-        model: p.model,
-        effort: p.effort,
-      },
-      conn,
-      undefined,
-      (sdkSessionId, runtimeId) => ctx.store.migrateSessionMeta(runtimeId, sdkSessionId, workspacePath),
-    );
-    ctx.store.upsertSessionMeta(sessionId, workspacePath, {});
-    return { sessionId };
-  }),
-
-  "session.fork": withSchema(sessionForkParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    assertCwdAllowed(p.cwd, ctx.store.getWorkspacePaths());
-    const workspacePath = canonicalPath(p.cwd);
-    conn.permissionClientId = conn.id;
-    const sessionId = await ctx.sessions.create(
-      {
-        cwd: workspacePath,
-        forkSessionId: p.sessionId,
-        permissionMode: p.permissionMode,
-        model: p.model,
-        effort: p.effort,
-      },
-      conn,
-      undefined,
-      (sdkSessionId, runtimeId) => ctx.store.migrateSessionMeta(runtimeId, sdkSessionId, workspacePath),
-    );
-    ctx.store.upsertSessionMeta(sessionId, workspacePath, {});
-    return { sessionId };
-  }),
-
-  "session.interrupt": withSchema(sessionIdParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    if (!runner) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown session");
-    const receipt = await runner.interrupt();
-    return { ok: true, stillQueued: receipt?.still_queued ?? [] };
-  }),
-
-  "session.setPermissionMode": withSchema(sessionSetPermissionParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    if (!runner) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown session");
-    await runner.setPermissionMode(p.mode);
-    return { ok: true };
-  }),
-
-  "session.attachIfLive": withSchema(sessionIdParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    if (!runner) return { attached: false };
-    conn.permissionClientId = conn.id;
-    runner.subscribe(conn, true);
-    return {
-      attached: true,
-      sessionId: runner.sessionId ?? p.sessionId,
-      status: runner.getStatus(),
-    };
-  }),
-
-  "session.attach": withSchema(sessionIdParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    if (!runner) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown session");
-    runner.subscribe(conn, true);
-    return { ok: true };
-  }),
-
-  "session.detach": withSchema(sessionIdParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    if (runner) runner.unsubscribe(conn.id);
-    return { ok: true };
-  }),
-
-  "session.listActive": async (ctx, conn) => {
+  "conversation.listActive": async (ctx, conn) => {
     requireAuth(conn, ctx);
     return { sessions: ctx.sessions.listActive() };
   },
-
-  "session.delete": withSchema(sessionIdParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    const canonicalSessionId = runner?.sessionId ?? p.sessionId;
-    await ctx.sessions.remove(p.sessionId);
-    ctx.store.deleteSessionMeta(p.sessionId);
-    ctx.store.deleteSessionMeta(canonicalSessionId);
-    return { ok: true };
-  }),
-
-  "session.setMeta": withSchema(sessionSetMetaParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    const runner = ctx.sessions.get(p.sessionId);
-    const sessionId = runner?.sessionId ?? p.sessionId;
-    const workspacePath = runner?.cwd ?? "";
-    if (runner?.sessionId && runner.sessionId !== p.sessionId) {
-      ctx.store.migrateSessionMeta(p.sessionId, runner.sessionId, workspacePath);
-    }
-    ctx.store.upsertSessionMeta(sessionId, workspacePath, {
-      customName: p.customName,
-      pinned: p.pinned,
-      archived: p.archived,
-    });
-    return { ok: true };
-  }),
 
   "history.listAllLocal": async (ctx, conn) => {
     requireAuth(conn, ctx);
@@ -323,15 +157,6 @@ const handlers: Record<string, Handler> = {
     const sessions = await listSessions(workspacePath);
     log.info("rpc history.listSessions", { workspacePath, dir, count: sessions.length });
     return { sessions };
-  }),
-
-  "history.loadSession": withSchema(historyLoadParams, async (ctx, conn, p) => {
-    requireAuth(conn, ctx);
-    if (!p.workspacePath) {
-      throw rpcError(RPC_ERROR.INVALID_PARAMS, "workspacePath required");
-    }
-    assertCwdAllowed(p.workspacePath, ctx.store.getWorkspacePaths());
-    return { messages: await loadSessionMessages(p.sessionId, canonicalPath(p.workspacePath)) };
   }),
 
   "workspace.list": async (ctx, conn) => {
@@ -373,23 +198,23 @@ const handlers: Record<string, Handler> = {
 
   "permission.respond": withSchema(permissionRespondParams, async (ctx, conn, p) => {
     requireAuth(conn, ctx);
-    const permissionScope = ctx.sessions.get(p.sessionId)?.runtimeId ?? p.sessionId;
-    const ok = ctx.permissions.respond(permissionScope, p.requestId, conn.id, {
+    const conversation = ctx.store.getConversation(p.conversationId);
+    if (!conversation) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown conversation");
+    const runner = ctx.sessions.get(conversation.conversationId)
+      ?? (conversation.sdkSessionId ? ctx.sessions.get(conversation.sdkSessionId) : undefined);
+    if (!runner?.hasSubscriber(conn.id)) {
+      throw rpcError(RPC_ERROR.INVALID_PARAMS, "connection is not subscribed to the conversation");
+    }
+    const ok = ctx.permissions.respond(runner.runtimeId, p.requestId, {
       behavior: p.behavior,
       updatedInput: p.updatedInput,
       updatedPermissions: p.updatedPermissions,
       message: p.message,
     });
-    if (!ok) throw rpcError(RPC_ERROR.INVALID_PARAMS, "unknown permission request");
+    if (!ok) throw rpcError(RPC_ERROR.INVALID_PARAMS, "permission request already resolved");
     return { ok: true };
   }),
 
-  "mcp.listServerStatus": withSchema(sessionIdParams, async (ctx, conn) => {
-    requireAuth(conn, ctx);
-    return {
-      servers: [],
-    };
-  }),
 };
 
 function requireAuth(conn: ClientConnection, ctx: AppContext): void {
