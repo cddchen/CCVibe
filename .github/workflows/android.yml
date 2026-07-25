@@ -1,0 +1,132 @@
+name: Android
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "android-v*"
+    paths:
+      - "repos/cc-link-android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "repos/cc-link-android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: repos/cc-link-android
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Resolve build version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version_name="${GITHUB_REF_NAME#android-v}"
+          else
+            version_name="0.1.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "CCLINK_VERSION_NAME=${version_name}" >> "$GITHUB_ENV"
+          echo "CCLINK_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Configure release signing
+        shell: bash
+        run: |
+          signing_values=(
+            "$ANDROID_KEYSTORE_BASE64"
+            "$ANDROID_KEYSTORE_PASSWORD"
+            "$ANDROID_KEY_ALIAS"
+            "$ANDROID_KEY_PASSWORD"
+          )
+          configured=0
+          for value in "${signing_values[@]}"; do
+            if [[ -n "$value" ]]; then
+              configured=$((configured + 1))
+            fi
+          done
+
+          if [[ "$configured" -ne 0 && "$configured" -ne 4 ]]; then
+            echo "Android signing secrets must either all be configured or all be absent." >&2
+            exit 1
+          fi
+
+          if [[ "$configured" -eq 4 ]]; then
+            keystore_path="$RUNNER_TEMP/cclink-release.keystore"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+            echo "ANDROID_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "A tag release requires Android signing secrets." >&2
+            exit 1
+          else
+            echo "Signing secrets are absent; CI will produce an unsigned release APK/AAB."
+          fi
+
+      - name: Test and build release packages
+        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease :app:bundleRelease --stacktrace
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cclink-android-${{ env.CCLINK_VERSION_NAME }}
+          path: |
+            repos/cc-link-android/app/build/outputs/apk/release/*.apk
+            repos/cc-link-android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: cclink-android-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version_name="${GITHUB_REF_NAME#android-v}"
+          release_files=(release-artifacts/*)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
+              --generate-notes \
+              --title "CCLink Android ${version_name}"
+          fi
