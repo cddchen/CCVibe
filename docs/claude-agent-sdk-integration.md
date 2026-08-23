@@ -106,7 +106,9 @@ for await (const msg of q) {
 }
 
 // 运行时控制：
-await q.streamInput(nextUserMessage);   // 追加输入
+// query() 的 prompt 已经是长生命周期 AsyncIterable<SDKUserMessage>；
+// 新消息应由该 iterable yield。Query.streamInput() 接收的也是一个
+// AsyncIterable<SDKUserMessage>，不是单条 SDKUserMessage。
 await q.setPermissionMode("plan");      // 动态切权限模式
 await q.interrupt();                    // 中断当前回合
 ```
@@ -233,7 +235,7 @@ async with ClaudeSDKClient(options=ClaudeAgentOptions(
 
 ## 14. 运行时控制（流式 `Query` / Client）
 
-- `streamInput(msg)`：会话中途追加用户输入。
+- `streamInput(stream)`：接收 `AsyncIterable<SDKUserMessage>`；产品通常直接让 `query()` 的 prompt iterable 持续 yield 新消息。
 - `interrupt()`：中断当前回合（Python 同名）。
 - `setPermissionMode(mode)`：动态切权限模式。
 - TS 还可用 `abortController` 取消整段运行。
