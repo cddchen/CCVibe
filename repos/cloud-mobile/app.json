@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Cloud",
+    "slug": "cloud-mobile",
+    "version": "0.1.0",
+    "orientation": "default",
+    "scheme": "cloud",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.ccvibe.cloud"
+    },
+    "android": {
+      "package": "com.ccvibe.cloud"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
