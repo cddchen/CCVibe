@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="oklch(96.26% 0.0066 286.3)">
+  <title>Cloud 移动端 · Liquid Glass 概念稿</title>
+  <style>
+    :root {
+      --bg: oklch(96.26% 0.0066 286.3);
+      --surface: oklch(100% 0 0);
+      --fg: oklch(0% 0 0);
+      --muted: oklch(64.83% 0.0073 286.2);
+      --border: oklch(82.71% 0.0028 286.3);
+      --accent: oklch(60.28% 0.2177 257.4);
+      --accent-soft: color-mix(in oklch, var(--accent) 12%, transparent);
+      --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
+      --glass: color-mix(in oklch, var(--surface) 72%, transparent);
+      --glass-strong: color-mix(in oklch, var(--surface) 88%, transparent);
+      --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-body: "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+      --radius: 14px;
+      --radius-lg: 24px;
+      --gap-xs: 8px;
+      --gap-sm: 12px;
+      --gap-md: 20px;
+      --gap-lg: 32px;
+      --gutter: 20px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--bg); -webkit-text-size-adjust: 100%; }
+    body {
+      min-height: 100%; margin: 0; overflow-x: hidden; background: var(--bg); color: var(--fg);
+      font-family: var(--font-body); font-size: 15px; line-height: 1.45;
+      text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+    }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    svg { display: block; }
+    p { text-wrap: pretty; }
+    h1, h2, h3 { margin: 0; font-family: var(--font-display); text-wrap: balance; }
+    h1 { font-size: 34px; line-height: 1.05; letter-spacing: -.035em; }
+    h2 { font-size: 24px; line-height: 1.12; letter-spacing: -.025em; }
+    h3 { font-size: 17px; line-height: 1.25; letter-spacing: -.012em; }
+
+    .stage {
+      min-height: 100dvh; display: grid; place-items: center; padding: 28px;
+      position: relative; isolation: isolate; overflow: hidden;
+    }
+    .ambient {
+      position: fixed; z-index: -1; width: 44vw; height: 44vw; max-width: 640px; max-height: 640px;
+      right: -14vw; top: -18vw; border-radius: 50%; background: var(--accent-soft); filter: blur(72px);
+      opacity: .72; pointer-events: none;
+    }
+    .phone {
+      width: min(100%, 402px); height: min(874px, calc(100dvh - 56px)); min-height: 680px;
+      position: relative; overflow: hidden; border-radius: 48px; background: var(--bg);
+      border: 1px solid color-mix(in oklch, var(--fg) 12%, transparent);
+      box-shadow: 0 36px 100px color-mix(in oklch, var(--fg) 22%, transparent), inset 0 0 0 6px var(--surface);
+    }
+    .phone::before {
+      content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 40; border-radius: inherit;
+      box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--surface) 74%, transparent);
+    }
+    .statusbar {
+      height: 52px; padding: 12px 26px 0; display: flex; align-items: center; justify-content: space-between;
+      position: absolute; inset: 0 0 auto; z-index: 25; font-size: 12px; font-weight: 650; letter-spacing: .01em;
+    }
+    .island { position: absolute; left: 50%; top: 10px; width: 116px; height: 31px; transform: translateX(-50%); border-radius: 999px; background: var(--fg); }
+    .system-icons { display: flex; align-items: center; gap: 5px; }
+    .system-icons svg { width: 15px; height: 15px; }
+
+    .app-main { height: 100%; position: relative; }
+    .screen {
+      display: none; height: 100%; overflow-y: auto; overscroll-behavior: contain;
+      padding: 70px var(--gutter) 116px; scrollbar-width: none;
+    }
+    .screen::-webkit-scrollbar { display: none; }
+    .screen.is-active { display: block; animation: appear .28s cubic-bezier(.2,.8,.2,1); }
+    @keyframes appear { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+    .stack { display: flex; flex-direction: column; }
+    .stack > * + * { margin-top: var(--gap-md); }
+    .row { display: flex; align-items: center; gap: var(--gap-sm); }
+    .row-between { display: flex; align-items: center; justify-content: space-between; gap: var(--gap-sm); }
+    .eyebrow { margin: 0; color: var(--muted); font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .section-heading { margin: 30px 2px 12px; }
+    .section-heading h2 { font-size: 20px; }
+
+    .icon-button, .close-button {
+      width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border-radius: 999px;
+      border: 1px solid color-mix(in oklch, var(--surface) 62%, var(--border)); background: var(--glass);
+      box-shadow: 0 8px 28px color-mix(in oklch, var(--fg) 10%, transparent), inset 0 1px 0 color-mix(in oklch, var(--surface) 88%, transparent);
+      backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5);
+      transition: transform .16s ease, background .16s ease, box-shadow .16s ease;
+    }
+    .icon-button:hover, .close-button:hover { background: var(--glass-strong); box-shadow: 0 10px 32px color-mix(in oklch, var(--fg) 14%, transparent); }
+    .icon-button:active, .close-button:active { transform: scale(.94); }
+    .icon-button svg, .close-button svg { width: 20px; height: 20px; }
+
+    .hero-row { align-items: flex-start; }
+    .hero-row .copy { min-width: 0; padding-top: 4px; }
+    .hero-row h1 { margin-top: 5px; }
+    .connection-pill {
+      display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--muted); font-size: 13px;
+    }
+    .connection-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--fg); box-shadow: 0 0 0 4px var(--fg-soft); }
+
+    .home-mini-title {
+      position: sticky; top: 0; z-index: 12; width: calc(100% + var(--gutter) + var(--gutter)); height: 58px;
+      margin-left: calc(0px - var(--gutter)); margin-bottom: -58px; padding: 0 var(--gutter);
+      display: flex; align-items: center; pointer-events: none; opacity: 0; transform: translateY(-8px);
+      background: var(--bg); border-bottom: 1px solid var(--border);
+      font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: -.025em;
+      transition: opacity .24s ease, transform .24s ease;
+    }
+    .home-screen { padding-bottom: 24px; }
+    .home-screen.is-condensed .home-mini-title { opacity: 1; transform: none; }
+    .home-hero { min-height: 50%; position: relative; display: grid; place-items: center; text-align: center; }
+    .home-hero .copy { transition: opacity .24s ease, transform .24s ease; }
+    .home-hero .copy h1 { font-size: 44px; letter-spacing: -.045em; }
+    .home-hero .icon-button { position: absolute; right: 0; top: 4px; }
+    .home-screen.is-condensed .home-hero .copy { opacity: 0; transform: translateY(-14px) scale(.97); }
+
+    .quick-start {
+      margin-top: 28px; padding: 18px; border-radius: var(--radius-lg); background: var(--surface);
+      border: 1px solid color-mix(in oklch, var(--border) 76%, transparent);
+      box-shadow: 0 14px 36px color-mix(in oklch, var(--fg) 7%, transparent);
+    }
+    .home-composer { position: relative; margin-top: 4px; padding: 10px; }
+    .home-prompt {
+      width: 100%; min-height: 132px; max-height: 220px; resize: none; border: 0; outline: 0;
+      padding: 15px 14px 12px; background: transparent; font-size: 17px; line-height: 1.45;
+    }
+    .home-prompt::placeholder { color: var(--muted); }
+    .home-compose-tools {
+      min-height: 52px; padding: 7px 4px 3px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    }
+    .workspace-tool {
+      min-width: 44px; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; font-size: 11px;
+    }
+    .workspace-tool { min-width: 0; flex: 1 1 auto; padding: 0 6px; overflow: hidden; }
+    .workspace-tool svg { width: 19px; height: 19px; flex: 0 0 auto; color: var(--fg); }
+    .workspace-tool span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .workspace-tool:hover { background: var(--fg-soft); color: var(--fg); }
+    .home-compose-tools .composer-model { max-width: 62px; }
+    .home-compose-tools .composer-strength { max-width: 68px; overflow: hidden; text-overflow: ellipsis; }
+    .home-send {
+      width: 44px; height: 44px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 50%;
+      display: grid; place-items: center; background: var(--accent); color: var(--surface);
+      transition: transform .16s ease, background .16s ease, box-shadow .16s ease;
+    }
+    .home-send:hover { background: color-mix(in oklch, var(--accent) 86%, var(--fg)); box-shadow: 0 8px 22px var(--accent-soft); }
+    .home-send:active { transform: scale(.93); }
+    .home-send:disabled { background: var(--border); color: var(--surface); box-shadow: none; cursor: default; }
+    .home-send:disabled:hover { background: var(--border); box-shadow: none; }
+    .home-send:disabled:active { transform: none; }
+    .home-send svg { width: 18px; height: 18px; }
+    .selector {
+      width: 100%; min-height: 50px; padding: 0 14px; border: 0; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; background: transparent; text-align: left;
+    }
+    .selector:last-of-type { border-bottom: 0; }
+    .selector .label { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .selector .label svg { width: 20px; height: 20px; flex: 0 0 auto; }
+    .selector .value { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .selector:hover { background: var(--fg-soft); }
+    .selector:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+
+    .btn {
+      min-height: 46px; border-radius: 999px; padding: 0 18px; border: 1px solid transparent;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 650;
+      transition: transform .16s ease, background .16s ease, box-shadow .16s ease;
+    }
+    .btn-primary { width: 100%; margin-top: 14px; background: var(--accent); color: var(--surface); box-shadow: 0 8px 24px var(--accent-soft); }
+    .btn-primary:hover { background: color-mix(in oklch, var(--accent) 86%, var(--fg)); box-shadow: 0 10px 28px color-mix(in oklch, var(--accent) 20%, transparent); }
+    .btn-secondary { background: var(--surface); color: var(--fg); border-color: var(--border); }
+    .btn-plain { min-height: 44px; padding: 0 10px; background: transparent; color: var(--fg); }
+    .btn:active { transform: scale(.97); }
+
+    .project-group { margin-top: 14px; }
+    .group-label { margin: 0 2px 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .session-list { overflow: hidden; border-radius: 18px; background: var(--surface); border: 1px solid color-mix(in oklch, var(--border) 76%, transparent); }
+    .session {
+      width: 100%; min-height: 72px; padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
+      border: 0; border-bottom: 1px solid var(--border); background: transparent; text-align: left;
+    }
+    .session:last-child { border-bottom: 0; }
+    .session:hover { background: var(--fg-soft); }
+    .session:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .session-copy { min-width: 0; }
+    .session-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .session-detail { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-time { align-self: start; padding-top: 4px; color: var(--muted); font-size: 11px; }
+
+    .chat-screen { padding-left: 0; padding-right: 0; padding-bottom: 98px; }
+    .chat-header { padding: 0 var(--gutter) 14px; }
+    .chat-title { min-width: 0; text-align: center; }
+    .chat-title strong, .chat-title span { display: block; max-width: 220px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .chat-title span { color: var(--muted); font-size: 11px; }
+    .messages { padding: 10px var(--gutter) 160px; }
+    .message { max-width: 88%; margin-bottom: 18px; }
+    .message.user { margin-left: auto; padding: 11px 14px; border-radius: 20px 20px 6px 20px; background: var(--fg); color: var(--surface); }
+    .message.agent { margin-right: auto; }
+    .message.agent p { margin: 0; }
+    .thinking { margin: 8px 0; padding: 10px 12px; border-left: 2px solid var(--border); color: var(--muted); font-size: 13px; }
+    .thinking.is-streaming::after { content: ""; display: inline-block; width: 5px; height: 14px; margin-left: 4px; vertical-align: -2px; border-radius: 2px; background: var(--muted); animation: stream-caret .8s steps(1) infinite; }
+    .reasoning-disclosure { margin: 4px 0 12px; border-bottom: 1px solid var(--border); }
+    .reasoning-disclosure summary { min-height: 44px; display: flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; list-style: none; font-size: 13px; }
+    .reasoning-disclosure summary::-webkit-details-marker { display: none; }
+    .reasoning-disclosure summary::after { content: ""; width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform .18s ease; }
+    .reasoning-disclosure[open] summary::after { transform: rotate(225deg) translate(-2px, -2px); }
+    .reasoning-summary-copy { font-weight: 500; }
+    .reasoning-count { margin-left: auto; font-family: var(--font-mono); font-size: 11px; }
+    .reasoning-content { padding-bottom: 12px; }
+    .reasoning-content .thinking { margin-top: 0; }
+    .tool-call { margin-top: 10px; padding: 12px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); }
+    .tool-call .row { font-family: var(--font-mono); font-size: 11px; }
+    .tool-call p { margin-top: 7px !important; color: var(--muted); font-size: 12px; }
+    @keyframes stream-caret { 50% { opacity: 0; } }
+    .composer-wrap {
+      position: absolute; z-index: 15; left: 12px; right: 12px; bottom: 12px; padding: 8px;
+      border: 1px solid color-mix(in oklch, var(--surface) 64%, var(--border)); border-radius: 28px;
+      background: var(--glass); backdrop-filter: blur(24px) saturate(1.5); -webkit-backdrop-filter: blur(24px) saturate(1.5);
+      box-shadow: 0 12px 36px color-mix(in oklch, var(--fg) 16%, transparent), inset 0 1px 0 color-mix(in oklch, var(--surface) 88%, transparent);
+    }
+    .composer { display: block; }
+    .composer textarea { width: 100%; min-height: 56px; max-height: 112px; resize: none; border: 0; outline: 0; padding: 10px 10px 8px; background: transparent; line-height: 1.35; }
+    .composer-tools { min-height: 52px; padding: 7px 2px 1px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .composer-tools-left, .composer-tools-right { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .composer-tool-button {
+      min-width: 44px; height: 44px; padding: 0 8px; border: 0; border-radius: 12px; background: transparent; color: var(--muted);
+      display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-size: 11px; white-space: nowrap;
+    }
+    .composer-tool-button:hover { background: var(--fg-soft); color: var(--fg); }
+    .composer-tool-button:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .composer-tool-button svg { width: 19px; height: 19px; }
+    .composer-model { max-width: 82px; overflow: hidden; text-overflow: ellipsis; }
+    .composer-strength { min-width: 44px; }
+    .send-button { width: 44px; height: 44px; flex: 0 0 auto; border: 0; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--surface); }
+    .send-button:hover { background: color-mix(in oklch, var(--accent) 86%, var(--fg)); }
+    .send-button:active { transform: scale(.93); }
+    .send-button:disabled { background: var(--border); color: var(--surface); cursor: default; }
+    .send-button:disabled:hover { background: var(--border); }
+    .send-button:disabled:active { transform: none; }
+    .send-button svg { width: 19px; height: 19px; }
+    .composer-menu {
+      position: absolute; z-index: 2; bottom: calc(100% + 8px); min-width: 164px; padding: 6px;
+      border: 1px solid var(--border); border-radius: 16px; background: var(--surface);
+      box-shadow: 0 16px 38px color-mix(in oklch, var(--fg) 18%, transparent);
+    }
+    .composer-menu[hidden] { display: none; }
+    .composer-menu-left { left: 10px; bottom: 61px; }
+    .composer-menu-right { right: 8px; bottom: 61px; }
+    .workspace-menu { width: calc(100% - 20px); min-width: 0; }
+    .workspace-menu-label { margin: 6px 10px 4px; color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+    .workspace-input-form { margin-top: 6px; padding: 8px 6px 2px; display: flex; gap: 6px; border-top: 1px solid var(--border); }
+    .workspace-input-form input { min-width: 0; height: 44px; flex: 1 1 auto; padding: 0 10px; border: 1px solid var(--border); border-radius: 11px; background: var(--bg); outline: 0; font-size: 12px; }
+    .workspace-input-form input::placeholder { color: var(--muted); }
+    .workspace-input-form button { width: auto; min-width: 54px; padding: 0 10px; justify-content: center; background: var(--fg); color: var(--surface); }
+    .workspace-input-form button:hover { background: color-mix(in oklch, var(--fg) 88%, var(--surface)); color: var(--surface); }
+    .composer-menu button {
+      width: 100%; min-height: 44px; padding: 0 12px; border: 0; border-radius: 11px; background: transparent;
+      display: flex; align-items: center; gap: 10px; text-align: left; font-size: 13px;
+    }
+    .composer-menu button:hover { background: var(--fg-soft); }
+    .composer-menu button:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .composer-menu button svg { width: 18px; height: 18px; color: var(--muted); }
+    .composer-menu button[aria-checked="true"]::after { content: "✓"; margin-left: auto; color: var(--fg); }
+    .workspace-menu button[aria-pressed="true"]::after { content: "✓"; margin-left: auto; color: var(--fg); }
+    .composer-state-hidden { display: none; }
+
+    .request-card { padding: 17px; margin-top: 14px; border-radius: 20px; background: var(--surface); border: 1px solid var(--border); }
+    .request-card[hidden] { display: none; }
+    .request-head { align-items: flex-start; }
+    .request-icon { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 13px; display: grid; place-items: center; background: var(--fg-soft); }
+    .request-icon svg { width: 20px; height: 20px; }
+    .request-card p { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+    .code-line { margin-top: 12px; padding: 11px 12px; overflow: auto; border-radius: 12px; background: var(--bg); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+    .request-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+    .empty-state { padding: 70px 24px; text-align: center; color: var(--muted); }
+    .empty-state svg { width: 34px; height: 34px; margin: 0 auto 12px; }
+    .empty-state strong { display: block; color: var(--fg); font-family: var(--font-display); font-size: 18px; }
+
+    .profile-hero { position: relative; padding: 12px 0 8px; text-align: center; }
+    .profile-back-button { position: absolute; top: 0; left: 0; }
+    .profile-back-button[hidden], .setting-input[hidden], .setting-row .value[hidden] { display: none; }
+    .profile-edit-button {
+      position: absolute; top: 0; right: 0; min-width: 52px; height: 44px; padding: 0 8px; border: 0; border-radius: 12px;
+      background: transparent; color: var(--fg); font-size: 14px; font-weight: 600;
+    }
+    .profile-edit-button:hover { background: var(--fg-soft); }
+    .profile-edit-button:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .cloud-mark { width: 70px; height: 70px; margin: 0 auto 14px; display: grid; place-items: center; border-radius: 22px; background: var(--fg); color: var(--surface); box-shadow: 0 16px 34px color-mix(in oklch, var(--fg) 18%, transparent); }
+    .cloud-mark svg { width: 36px; height: 36px; }
+    .settings { overflow: hidden; margin-top: 24px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border); }
+    .setting-row { min-height: 54px; padding: 0 14px; display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--border); }
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-row svg { width: 19px; height: 19px; }
+    .setting-row .value { max-width: 190px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .setting-input {
+      width: min(48vw, 190px); height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 11px;
+      background: var(--bg); color: var(--fg); outline: 0; font-size: 12px;
+    }
+    .setting-input::placeholder { color: var(--muted); }
+    .toggle { width: 52px; height: 44px; padding: 8px 2px; border: 0; border-radius: 999px; background: transparent; position: relative; }
+    .toggle::before { content: ""; position: absolute; inset: 8px 2px; border-radius: 999px; background: var(--fg); }
+    .toggle::after { content: ""; position: relative; z-index: 1; display: block; width: 24px; height: 24px; margin-left: 24px; border-radius: 50%; background: var(--surface); box-shadow: 0 2px 5px color-mix(in oklch, var(--fg) 20%, transparent); transition: margin .18s ease; }
+    .toggle[aria-checked="false"]::before { background: var(--border); }
+    .toggle[aria-checked="false"]::after { margin-left: 0; }
+
+    .scrim { position: absolute; inset: 0; z-index: 50; display: none; background: color-mix(in oklch, var(--fg) 24%, transparent); backdrop-filter: blur(3px); }
+    .scrim.is-open { display: block; animation: fade .2s ease; }
+    @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+    .sheet {
+      position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 51; max-height: 84%; overflow: auto; padding: 10px 18px 26px;
+      border: 1px solid color-mix(in oklch, var(--surface) 66%, var(--border)); border-radius: 34px; background: var(--glass-strong);
+      backdrop-filter: blur(32px) saturate(1.5); -webkit-backdrop-filter: blur(32px) saturate(1.5);
+      box-shadow: 0 24px 60px color-mix(in oklch, var(--fg) 28%, transparent), inset 0 1px 0 var(--surface);
+      transform: translateY(110%); transition: transform .32s cubic-bezier(.2,.8,.2,1);
+    }
+    .scrim.is-open .sheet { transform: none; }
+    .grabber { width: 36px; height: 5px; margin: 0 auto 16px; border-radius: 99px; background: var(--border); }
+    .sheet-head { margin-bottom: 18px; }
+    .field { margin-top: 16px; }
+    .field label { display: block; margin: 0 2px 7px; color: var(--muted); font-size: 12px; }
+    .field select, .field textarea { width: 100%; min-height: 50px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); outline: 0; }
+    .field textarea { min-height: 92px; resize: none; }
+
+    .toast {
+      position: absolute; z-index: 70; top: 58px; left: 50%; min-width: 220px; max-width: calc(100% - 40px); padding: 11px 16px;
+      transform: translate(-50%, -16px); opacity: 0; pointer-events: none; border-radius: 999px; background: var(--fg); color: var(--surface);
+      text-align: center; font-size: 12px; box-shadow: 0 10px 30px color-mix(in oklch, var(--fg) 22%, transparent); transition: .22s ease;
+    }
+    .toast.is-visible { transform: translate(-50%, 0); opacity: 1; }
+
+    :focus-visible { outline: 3px solid color-mix(in oklch, var(--accent) 50%, transparent); outline-offset: 2px; }
+    @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+      .icon-button, .close-button, .composer-wrap, .sheet { background: var(--surface); }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: oklch(17% 0.008 286.3); --surface: oklch(24% 0.008 286.3); --fg: oklch(98% 0 0);
+        --muted: oklch(70% 0.0073 286.2); --border: oklch(35% 0.006 286.3); --glass: color-mix(in oklch, var(--surface) 74%, transparent);
+        --glass-strong: color-mix(in oklch, var(--surface) 90%, transparent);
+      }
+      .phone { box-shadow: 0 36px 100px color-mix(in oklch, var(--bg) 62%, transparent), inset 0 0 0 6px var(--surface); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    }
+    @media (prefers-contrast: more) {
+      :root { --border: color-mix(in oklch, var(--fg) 42%, var(--bg)); }
+      .icon-button, .close-button, .composer-wrap, .sheet { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
+    }
+    @media (max-width: 520px) {
+      .stage { padding: 0; display: block; }
+      .ambient { width: 90vw; height: 90vw; right: -40vw; top: -30vw; }
+      .phone { width: 100%; height: 100dvh; min-height: 600px; border: 0; border-radius: 0; box-shadow: none; }
+      .phone::before, .island { display: none; }
+      .statusbar { padding-top: max(8px, env(safe-area-inset-top)); }
+      .screen { padding-top: calc(66px + env(safe-area-inset-top)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage" data-od-id="prototype-stage">
+    <div class="ambient" aria-hidden="true"></div>
+    <div class="phone" data-od-id="cloud-app-shell">
+      <div class="statusbar" aria-hidden="true">
+        <span id="clock">9:41</span><span class="island"></span>
+        <span class="system-icons">
+          <svg viewBox="0 0 20 14" fill="currentColor"><path d="M1 10h2v3H1zm4-3h2v6H5zm4-3h2v9H9zm4-3h2v12h-2z"></path></svg>
+          <svg viewBox="0 0 20 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 5.5a11 11 0 0 1 16 0M5 8.5a7 7 0 0 1 10 0M8.3 11.5a2.5 2.5 0 0 1 3.4 0"></path></svg>
+          <svg viewBox="0 0 28 14" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1" y="1" width="23" height="12" rx="3"></rect><path d="M26 5v4"></path><rect x="3" y="3" width="17" height="8" rx="1.5" fill="currentColor" stroke="none"></rect></svg>
+        </span>
+      </div>
+
+      <main class="app-main" id="content">
+        <section class="screen home-screen is-active" data-screen="home" data-od-id="home-screen" aria-label="首页">
+          <div class="home-mini-title" aria-hidden="true">Cloud</div>
+          <div class="home-hero">
+            <div class="copy">
+              <p class="eyebrow">演示环境</p>
+              <h1 data-od-id="home-heading">Cloud</h1>
+              <span class="connection-pill" id="hostStatus">Host 已连接</span>
+            </div>
+            <button class="icon-button" id="settingsButton" aria-label="打开设置" data-od-id="settings-button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.08a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"></path></svg>
+            </button>
+          </div>
+
+          <div class="quick-start home-composer" data-od-id="quick-start-card">
+            <div class="composer-menu composer-menu-left workspace-menu" id="homeWorkspaceMenu" data-od-id="home-workspace-menu" role="dialog" aria-label="选择工作区目录" hidden>
+              <p class="workspace-menu-label">已有工作区</p>
+              <button type="button" data-home-workspace-value="/workspace/CCVibe" aria-pressed="true">/workspace/CCVibe</button>
+              <button type="button" data-home-workspace-value="/workspace/cc-agent-host" aria-pressed="false">/workspace/cc-agent-host</button>
+              <form class="workspace-input-form" id="workspacePathForm">
+                <input id="workspacePathInput" type="text" aria-label="输入工作区目录" placeholder="输入工作区目录" autocomplete="off">
+                <button type="submit">使用</button>
+              </form>
+            </div>
+            <div class="composer-menu composer-menu-right" id="homeModelMenu" data-od-id="home-model-menu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-model-value="Opus" aria-checked="false">Opus</button>
+              <button type="button" role="menuitemradio" data-model-value="Sonnet" aria-checked="true">Sonnet</button>
+              <button type="button" role="menuitemradio" data-model-value="Haiku" aria-checked="false">Haiku</button>
+            </div>
+            <div class="composer-menu composer-menu-right" id="homeStrengthMenu" data-od-id="home-strength-menu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-strength-value="low" aria-checked="false">low</button>
+              <button type="button" role="menuitemradio" data-strength-value="medium" aria-checked="true">medium</button>
+              <button type="button" role="menuitemradio" data-strength-value="high" aria-checked="false">high</button>
+              <button type="button" role="menuitemradio" data-strength-value="xhigh" aria-checked="false">xhigh</button>
+            </div>
+            <textarea class="home-prompt" id="homePrompt" aria-label="新会话输入" placeholder="想让 Cloud 做什么？"></textarea>
+            <div class="home-compose-tools" data-od-id="home-compose-tools">
+              <button class="workspace-tool" id="homeWorkspaceButton" type="button" aria-label="选择工作区目录" aria-controls="homeWorkspaceMenu" aria-expanded="false" data-composer-menu-trigger="homeWorkspaceMenu" data-od-id="home-workspace-button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7.5h7l2 2h9v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><path d="M3 7.5V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2.5"></path></svg>
+                <span id="homeWorkspaceValue">/workspace/CCVibe</span>
+              </button>
+              <button class="composer-tool-button composer-model" id="homeModelButton" type="button" aria-label="切换模型" aria-controls="homeModelMenu" aria-expanded="false" data-composer-menu-trigger="homeModelMenu" data-od-id="home-model-button">Sonnet</button>
+              <button class="composer-tool-button composer-strength" id="homeStrengthButton" type="button" aria-label="切换思考强度" aria-controls="homeStrengthMenu" aria-expanded="false" data-composer-menu-trigger="homeStrengthMenu" data-od-id="home-strength-button">medium</button>
+              <button class="home-send" id="homeSendButton" aria-label="发送并创建会话" data-od-id="start-session-cta" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="section-heading row-between">
+            <h2 data-od-id="recent-heading">最近会话</h2>
+          </div>
+          <div class="project-group" data-od-id="project-group-ccvibe">
+            <p class="group-label">CCVibe · 示例</p>
+            <div class="session-list">
+              <button class="session" data-open-chat data-od-id="session-mobile-roadmap">
+                <span class="session-copy"><span class="session-title">移动端 Cloud 路线图</span><span class="session-detail">正在整理权限与重连流程</span></span>
+                <span class="session-time">刚刚</span>
+              </button>
+              <button class="session" data-open-chat data-od-id="session-protocol-schemas">
+                <span class="session-copy"><span class="session-title">检查协议 schemas</span><span class="session-detail">已完成 · 只读示例</span></span>
+                <span class="session-time">昨天</span>
+              </button>
+              <button class="session" data-open-chat data-od-id="session-home-composer">
+                <span class="session-copy"><span class="session-title">首页输入体验打磨</span><span class="session-detail">调整标题、输入区与会话预览比例</span></span>
+                <span class="session-time">周六</span>
+              </button>
+              <button class="session" data-open-chat data-od-id="session-permission-receipts">
+                <span class="session-copy"><span class="session-title">权限回执并发处理</span><span class="session-detail">核对 first-writer-wins 状态收敛</span></span>
+                <span class="session-time">周五</span>
+              </button>
+            </div>
+          </div>
+          <div class="project-group" data-od-id="project-group-agent-host">
+            <p class="group-label">cc-agent-host · 示例</p>
+            <div class="session-list">
+              <button class="session" data-open-chat data-od-id="session-host-catalog">
+                <span class="session-copy"><span class="session-title">Host catalog 缺口</span><span class="session-detail">等待确认工作区投影</span></span>
+                <span class="session-time">周五</span>
+              </button>
+              <button class="session" data-open-chat data-od-id="session-reconnect-snapshot">
+                <span class="session-copy"><span class="session-title">重连 snapshot 策略</span><span class="session-detail">比较 replay 与原子快照替换</span></span>
+                <span class="session-time">周四</span>
+              </button>
+              <button class="session" data-open-chat data-od-id="session-model-catalog">
+                <span class="session-copy"><span class="session-title">模型目录投影</span><span class="session-detail">从 Host canonical state 生成选项</span></span>
+                <span class="session-time">周三</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen chat-screen" data-screen="chat" data-od-id="chat-screen" aria-label="会话">
+          <header class="chat-header row-between" data-od-id="chat-header">
+            <button class="icon-button" data-go-home="" aria-label="返回首页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 5-7 7 7 7"></path></svg></button>
+            <div class="chat-title"><strong>移动端 Cloud 路线图</strong><span>CCVibe · 服务端默认模型</span></div>
+            <button class="icon-button" id="moreButton" aria-label="会话更多选项"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle></svg></button>
+          </header>
+          <div class="messages" id="messages" aria-live="polite">
+            <div class="message user">请检查移动端权限流程是否与服务端权威状态一致。</div>
+            <div class="message agent">
+              <details class="reasoning-disclosure" data-od-id="completed-reasoning-example">
+                <summary><span class="reasoning-summary-copy">用时0分01秒</span></summary>
+                <div class="reasoning-content">
+                  <div class="thinking">已读取 roadmap 与协议边界，正在核对 first-writer-wins 行为。</div>
+                  <div class="tool-call"><div class="row"><span>读取文件</span><span class="meta">完成</span></div><p>docs/mobile/cloud-mobile-roadmap.md</p></div>
+                </div>
+              </details>
+              <p style="margin-top: 12px;">客户端应在 canonical resolve 返回前禁用重复提交；若另一客户端先完成处理，则保留上下文并显示“已由其他客户端处理”。</p>
+            </div>
+          </div>
+          <div class="composer-wrap" data-od-id="message-composer">
+            <div class="composer-menu composer-menu-left" id="attachmentMenu" data-od-id="attachment-menu" role="menu" hidden>
+              <button type="button" id="uploadFileAction" role="menuitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 3h10l6 6v12H4z"></path><path d="M14 3v6h6"></path></svg><span>上传文件</span></button>
+              <button type="button" id="uploadImageAction" role="menuitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="9" cy="10" r="2"></circle><path d="m5 18 5-5 3 3 2-2 4 4"></path></svg><span>上传图片</span></button>
+              <button type="button" id="toolListAction" role="menuitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 7h14M5 12h14M5 17h14"></path></svg><span>工具列表</span></button>
+            </div>
+            <div class="composer-menu composer-menu-right" id="modelMenu" data-od-id="model-menu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-model-value="Opus" aria-checked="false">Opus</button>
+              <button type="button" role="menuitemradio" data-model-value="Sonnet" aria-checked="true">Sonnet</button>
+              <button type="button" role="menuitemradio" data-model-value="Haiku" aria-checked="false">Haiku</button>
+            </div>
+            <div class="composer-menu composer-menu-right" id="strengthMenu" data-od-id="strength-menu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-strength-value="low" aria-checked="false">low</button>
+              <button type="button" role="menuitemradio" data-strength-value="medium" aria-checked="true">medium</button>
+              <button type="button" role="menuitemradio" data-strength-value="high" aria-checked="false">high</button>
+              <button type="button" role="menuitemradio" data-strength-value="xhigh" aria-checked="false">xhigh</button>
+            </div>
+            <div class="composer">
+              <textarea id="composerInput" rows="1" aria-label="消息" placeholder="给 Cloud 发送消息"></textarea>
+              <div class="composer-tools" data-od-id="chat-composer-tools">
+                <div class="composer-tools-left">
+                  <button class="composer-tool-button" id="attachmentButton" type="button" aria-label="添加内容" aria-controls="attachmentMenu" aria-expanded="false" data-composer-menu-trigger="attachmentMenu" data-od-id="chat-add-button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"></path></svg></button>
+                </div>
+                <div class="composer-tools-right">
+                  <button class="composer-tool-button composer-model" id="chatModelButton" type="button" aria-label="切换模型" aria-controls="modelMenu" aria-expanded="false" data-composer-menu-trigger="modelMenu" data-od-id="chat-model-button">Sonnet</button>
+                  <button class="composer-tool-button composer-strength" id="chatStrengthButton" type="button" aria-label="切换思考强度" aria-controls="strengthMenu" aria-expanded="false" data-composer-menu-trigger="strengthMenu" data-od-id="chat-strength-button">medium</button>
+                  <button class="send-button" id="sendButton" aria-label="发送消息" data-od-id="chat-send-button" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"></path></svg></button>
+                </div>
+              </div>
+            </div>
+            <div class="composer-state-hidden"><span id="syncState">已同步 · serverSeq 仅演示状态</span></div>
+            <input id="chatFileInput" type="file" hidden>
+            <input id="chatImageInput" type="file" accept="image/*" hidden>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="requests" data-od-id="requests-screen" aria-label="请求">
+          <div class="row-between hero-row"><div class="copy"><p class="eyebrow">Host 权威状态</p><h1 data-od-id="requests-heading">请求</h1></div><button class="icon-button" id="refreshRequests" aria-label="刷新请求"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M18.5 9A7 7 0 0 0 6 6.5L4 9M5.5 15A7 7 0 0 0 18 17.5l2-2.5"></path></svg></button></div>
+          <div id="requestContent">
+            <div class="request-card" data-od-id="permission-request-card">
+              <div class="row request-head"><span class="request-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6z"></path><path d="M9 12h6"></path></svg></span><div><h3>工具权限</h3><span class="meta">Bash · CCVibe</span></div></div>
+              <p>Agent 请求运行只读检查。原始输入未经客户端执行，仅用于确认。</p>
+              <div class="code-line">npm run typecheck</div>
+              <div class="request-actions"><button class="btn btn-secondary" data-resolve="deny">拒绝</button><button class="btn btn-primary" data-resolve="allow" style="margin-top: 0;">允许一次</button></div>
+            </div>
+            <div class="request-card" data-od-id="question-request-card">
+              <div class="row request-head"><span class="request-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M9.7 9a2.5 2.5 0 1 1 3.1 2.4c-.8.3-.8 1-.8 1.6M12 17h.01"></path></svg></span><div><h3>需要你的选择</h3><span class="meta">AskUserQuestion</span></div></div>
+              <p>移动端首版是否在首页暴露会话归档入口？</p>
+              <div class="request-actions"><button class="btn btn-secondary" data-question="">暂不暴露</button><button class="btn btn-secondary" data-question="">放入更多菜单</button></div>
+            </div>
+          </div>
+          <div class="empty-state" id="emptyRequests" hidden=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m5 12 4 4L19 6"></path><circle cx="12" cy="12" r="10"></circle></svg><strong>请求已处理</strong><span>新的请求会由 Host 同步到这里。</span></div>
+        </section>
+
+        <section class="screen" data-screen="profile" data-od-id="profile-screen" aria-label="我的">
+          <div class="profile-hero">
+            <button class="icon-button profile-back-button" data-go-home="" aria-label="返回首页" data-od-id="profile-back-button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 5-7 7 7 7"></path></svg></button>
+            <button class="profile-edit-button" id="profileEditButton" type="button" data-od-id="profile-edit-button">编辑</button>
+            <div class="cloud-mark"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 23h15a6 6 0 0 0 .6-12A9 9 0 0 0 8 9.6 6.8 6.8 0 0 0 9 23Z"></path></svg></div>
+            <h1 data-od-id="profile-heading">Cloud</h1>
+            <p class="meta">远程移动控制端 · 演示环境</p>
+          </div>
+          <div class="settings" data-od-id="connection-settings">
+            <div class="setting-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg><label for="hostInput">Cloud Host</label><span class="value" id="hostValue">wss://…</span><input class="setting-input" id="hostInput" type="url" inputmode="url" placeholder="输入 wss:// Host 地址" autocomplete="url" data-od-id="host-input" hidden></div>
+            <div class="setting-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z"></path></svg><label for="tokenInput">Token</label><span class="value" id="tokenValue">已保护</span><input class="setting-input" id="tokenInput" type="password" placeholder="输入新 Token" autocomplete="new-password" data-od-id="token-input" hidden></div>
+            <div class="setting-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 12a8 8 0 0 1 14-5M20 12a8 8 0 0 1-14 5"></path><path d="M18 3v4h-4M6 21v-4h4"></path></svg><span>自动重连</span><button class="toggle" role="switch" aria-checked="true" aria-label="自动重连"></button></div>
+          </div>
+          <p class="meta" style="margin: 16px 8px; text-align: center;">Token 不进入 URL、日志或会话内容。</p>
+        </section>
+      </main>
+
+      <div class="scrim" id="newChatScrim" role="presentation">
+        <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" data-od-id="new-chat-sheet">
+          <div class="grabber" aria-hidden="true"></div>
+          <div class="sheet-head row-between"><div><p class="eyebrow">创建会话</p><h2 id="sheetTitle">从 Host 开始</h2></div><button class="close-button" id="closeSheet" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+          <div class="field"><label for="workspaceSelect">工作区</label><select id="workspaceSelect"><option>/workspace/CCVibe（演示）</option><option>/workspace/cc-agent-host（演示）</option></select></div>
+          <div class="field"><label for="modelSelect">模型</label><select id="modelSelect"><option>服务端默认模型</option><option>由 Host 返回的其他模型</option></select></div>
+          <div class="field"><label for="firstPrompt">第一条消息</label><textarea id="firstPrompt" placeholder="描述你想让 Agent 完成的任务"></textarea></div>
+          <button class="btn btn-primary" id="createChat">创建并进入会话</button>
+        </div>
+      </div>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const screens = [...document.querySelectorAll('[data-screen]')];
+      const scrim = document.getElementById('newChatScrim');
+      const composer = document.getElementById('composerInput');
+      const homeScreen = document.querySelector('[data-screen="home"]');
+      const homePrompt = document.getElementById('homePrompt');
+      const homeSendButton = document.getElementById('homeSendButton');
+      const messages = document.getElementById('messages');
+      const sendButton = document.getElementById('sendButton');
+      const toast = document.getElementById('toast');
+      let toastTimer;
+      let activeStreamTimer;
+      let activeStreamAgent;
+      let activeStreamCopy = '';
+      let activeStreamStartedAt = 0;
+      let isGenerating = false;
+
+      const sendIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>';
+      const stopIcon = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>';
+
+      function showScreen(name) {
+        screens.forEach(screen => screen.classList.toggle('is-active', screen.dataset.screen === name));
+      }
+
+      function notify(message) {
+        clearTimeout(toastTimer);
+        toast.textContent = message;
+        toast.classList.add('is-visible');
+        toastTimer = setTimeout(() => toast.classList.remove('is-visible'), 2200);
+      }
+
+      function setGenerationState(active) {
+        isGenerating = active;
+        sendButton.innerHTML = active ? stopIcon : sendIcon;
+        sendButton.setAttribute('aria-label', active ? '停止生成' : '发送消息');
+        sendButton.dataset.mode = active ? 'stop' : 'send';
+        syncChatSendState();
+      }
+
+      function updateRequestState() {
+        const remaining = [...document.querySelectorAll('.request-card')].some(card => !card.hidden);
+        document.getElementById('requestContent').hidden = !remaining;
+        document.getElementById('emptyRequests').hidden = remaining;
+      }
+
+      const composerMenus = [...document.querySelectorAll('.composer-menu')];
+      function closeComposerMenus() {
+        composerMenus.forEach(menu => { menu.hidden = true; });
+        document.querySelectorAll('[data-composer-menu-trigger]').forEach(button => button.setAttribute('aria-expanded', 'false'));
+      }
+      function anchorComposerMenu(button, menu) {
+        if (!menu.classList.contains('composer-menu-right')) return;
+        const wrapRect = button.closest('.composer-wrap, .home-composer').getBoundingClientRect();
+        const buttonRect = button.getBoundingClientRect();
+        const menuWidth = menu.offsetWidth;
+        const centeredLeft = buttonRect.left - wrapRect.left + (buttonRect.width - menuWidth) / 2;
+        const boundedLeft = Math.max(8, Math.min(centeredLeft, wrapRect.width - menuWidth - 8));
+        menu.style.left = boundedLeft + 'px';
+        menu.style.right = 'auto';
+        menu.style.bottom = wrapRect.bottom - buttonRect.top + 8 + 'px';
+      }
+      document.querySelectorAll('[data-composer-menu-trigger]').forEach(button => button.addEventListener('click', event => {
+        event.stopPropagation();
+        const menu = document.getElementById(button.dataset.composerMenuTrigger);
+        const willOpen = menu.hidden;
+        closeComposerMenus();
+        menu.hidden = !willOpen;
+        if (willOpen) anchorComposerMenu(button, menu);
+        button.setAttribute('aria-expanded', String(willOpen));
+      }));
+      document.addEventListener('click', event => { if (!event.target.closest('.composer-menu')) closeComposerMenus(); });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') closeComposerMenus(); });
+
+      document.getElementById('uploadFileAction').addEventListener('click', () => { closeComposerMenus(); document.getElementById('chatFileInput').click(); });
+      document.getElementById('uploadImageAction').addEventListener('click', () => { closeComposerMenus(); document.getElementById('chatImageInput').click(); });
+      document.getElementById('toolListAction').addEventListener('click', () => { closeComposerMenus(); notify('工具列表已打开'); });
+      document.getElementById('chatFileInput').addEventListener('change', event => { if (event.target.files[0]) notify(`已选择文件：${event.target.files[0].name}`); });
+      document.getElementById('chatImageInput').addEventListener('change', event => { if (event.target.files[0]) notify(`已选择图片：${event.target.files[0].name}`); });
+      const homeWorkspaceValue = document.getElementById('homeWorkspaceValue');
+      document.querySelectorAll('[data-home-workspace-value]').forEach(option => option.addEventListener('click', () => {
+        homeWorkspaceValue.textContent = option.dataset.homeWorkspaceValue;
+        document.querySelectorAll('[data-home-workspace-value]').forEach(item => item.setAttribute('aria-pressed', String(item === option)));
+        document.getElementById('workspacePathInput').value = '';
+        closeComposerMenus();
+      }));
+      document.getElementById('workspacePathForm').addEventListener('submit', event => {
+        event.preventDefault();
+        const input = document.getElementById('workspacePathInput');
+        const value = input.value.trim();
+        if (!value) { notify('请输入工作区目录'); input.focus(); return; }
+        homeWorkspaceValue.textContent = value;
+        document.querySelectorAll('[data-home-workspace-value]').forEach(item => item.setAttribute('aria-pressed', 'false'));
+        closeComposerMenus();
+      });
+      document.querySelectorAll('#modelMenu [data-model-value]').forEach(option => option.addEventListener('click', () => {
+        document.getElementById('chatModelButton').textContent = option.dataset.modelValue;
+        document.querySelectorAll('#modelMenu [data-model-value]').forEach(item => item.setAttribute('aria-checked', String(item === option)));
+        closeComposerMenus();
+      }));
+      document.querySelectorAll('#strengthMenu [data-strength-value]').forEach(option => option.addEventListener('click', () => {
+        document.getElementById('chatStrengthButton').textContent = option.dataset.strengthValue;
+        document.querySelectorAll('#strengthMenu [data-strength-value]').forEach(item => item.setAttribute('aria-checked', String(item === option)));
+        closeComposerMenus();
+      }));
+      document.querySelectorAll('#homeModelMenu [data-model-value]').forEach(option => option.addEventListener('click', () => {
+        document.getElementById('homeModelButton').textContent = option.dataset.modelValue;
+        document.querySelectorAll('#homeModelMenu [data-model-value]').forEach(item => item.setAttribute('aria-checked', String(item === option)));
+        closeComposerMenus();
+      }));
+      document.querySelectorAll('#homeStrengthMenu [data-strength-value]').forEach(option => option.addEventListener('click', () => {
+        document.getElementById('homeStrengthButton').textContent = option.dataset.strengthValue;
+        document.querySelectorAll('#homeStrengthMenu [data-strength-value]').forEach(item => item.setAttribute('aria-checked', String(item === option)));
+        closeComposerMenus();
+      }));
+
+      document.querySelectorAll('[data-open-chat]').forEach(button => button.addEventListener('click', () => showScreen('chat')));
+      document.querySelectorAll('[data-go-home]').forEach(button => button.addEventListener('click', () => showScreen('home')));
+      document.getElementById('settingsButton').addEventListener('click', () => showScreen('profile'));
+
+      const profileEditButton = document.getElementById('profileEditButton');
+      const profileBackButton = document.querySelector('[data-od-id="profile-back-button"]');
+      const hostValue = document.getElementById('hostValue');
+      const tokenValue = document.getElementById('tokenValue');
+      const hostInput = document.getElementById('hostInput');
+      const tokenInput = document.getElementById('tokenInput');
+      let isEditingProfile = false;
+
+      function setProfileEditState(active) {
+        isEditingProfile = active;
+        profileBackButton.hidden = active;
+        profileEditButton.textContent = active ? '保存' : '编辑';
+        profileEditButton.setAttribute('aria-label', active ? '保存设置' : '编辑设置');
+        hostValue.hidden = active;
+        tokenValue.hidden = active;
+        hostInput.hidden = !active;
+        tokenInput.hidden = !active;
+        if (active) hostInput.focus();
+      }
+
+      profileEditButton.addEventListener('click', () => {
+        if (!isEditingProfile) {
+          setProfileEditState(true);
+          return;
+        }
+        const nextHost = hostInput.value.trim();
+        if (nextHost && !/^wss?:\/\//i.test(nextHost)) {
+          notify('Host 地址需以 ws:// 或 wss:// 开头');
+          hostInput.focus();
+          return;
+        }
+        if (nextHost) hostValue.textContent = nextHost;
+        if (tokenInput.value.trim()) tokenValue.textContent = '已保护';
+        tokenInput.value = '';
+        setProfileEditState(false);
+        notify('设置已保存');
+      });
+
+      document.querySelectorAll('[data-open-sheet]').forEach(button => button.addEventListener('click', () => {
+        scrim.classList.add('is-open');
+        setTimeout(() => document.getElementById('workspaceSelect').focus(), 180);
+      }));
+      document.getElementById('closeSheet').addEventListener('click', () => scrim.classList.remove('is-open'));
+      scrim.addEventListener('click', event => { if (event.target === scrim) scrim.classList.remove('is-open'); });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') scrim.classList.remove('is-open'); });
+
+      document.getElementById('createChat').addEventListener('click', () => {
+        const firstPrompt = document.getElementById('firstPrompt').value.trim();
+        scrim.classList.remove('is-open');
+        showScreen('chat');
+        if (firstPrompt) {
+          composer.value = firstPrompt;
+          sendMessage();
+        }
+      });
+
+      homeScreen.addEventListener('scroll', () => homeScreen.classList.toggle('is-condensed', homeScreen.scrollTop > 72), { passive: true });
+      function syncHomeSendState() {
+        const isEmpty = homePrompt.value.trim().length === 0;
+        homeSendButton.disabled = isEmpty;
+        homeSendButton.setAttribute('aria-disabled', String(isEmpty));
+      }
+      homePrompt.addEventListener('input', syncHomeSendState);
+      syncHomeSendState();
+      homeSendButton.addEventListener('click', () => {
+        const value = homePrompt.value.trim();
+        if (!value) { homePrompt.focus(); notify('输入任务后即可发送'); return; }
+        composer.value = value;
+        homePrompt.value = '';
+        syncHomeSendState();
+        showScreen('chat');
+        sendMessage();
+      });
+
+      function sendMessage() {
+        const value = composer.value.trim();
+        if (!value) { notify('请输入消息'); return; }
+        const user = document.createElement('div');
+        user.className = 'message user';
+        user.textContent = value;
+        messages.appendChild(user);
+        composer.value = '';
+        document.getElementById('syncState').textContent = '等待 Host 回执…';
+        setGenerationState(true);
+        messages.scrollTop = messages.scrollHeight;
+        clearInterval(activeStreamTimer);
+        const streamCopy = '正在读取会话上下文，并核对 Host 权威状态与 canonical action。';
+        let streamIndex = 0;
+        activeStreamCopy = '';
+        activeStreamStartedAt = Date.now();
+        activeStreamAgent = document.createElement('div');
+        activeStreamAgent.className = 'message agent';
+        activeStreamAgent.innerHTML = '<div class="thinking is-streaming" aria-label="正在生成"></div>';
+        messages.appendChild(activeStreamAgent);
+        const liveThinking = activeStreamAgent.querySelector('.thinking');
+        activeStreamTimer = setInterval(() => {
+          streamIndex += 1;
+          activeStreamCopy = streamCopy.slice(0, streamIndex);
+          liveThinking.textContent = activeStreamCopy;
+          messages.scrollTop = messages.scrollHeight;
+          if (streamIndex < streamCopy.length) return;
+          clearInterval(activeStreamTimer);
+          activeStreamTimer = undefined;
+          const elapsedSeconds = Math.max(1, Math.round((Date.now() - activeStreamStartedAt) / 1000));
+          const elapsedLabel = '用时' + Math.floor(elapsedSeconds / 60) + '分' + String(elapsedSeconds % 60).padStart(2, '0') + '秒';
+          activeStreamAgent.innerHTML = '<details class="reasoning-disclosure"><summary><span class="reasoning-summary-copy">' + elapsedLabel + '</span></summary><div class="reasoning-content"><div class="thinking">' + streamCopy + '</div><div class="tool-call"><div class="row"><span>读取会话上下文</span><span class="meta">完成</span></div><p>Host canonical action</p></div></div></details><p>已收到。这是原型中的流式回执示例；真实内容以 Host 的 canonical action 为准。</p>';
+          document.getElementById('syncState').textContent = '已同步 · Host 权威状态';
+          setGenerationState(false);
+          activeStreamAgent = undefined;
+          messages.scrollTop = messages.scrollHeight;
+        }, 34);
+      }
+      function syncChatSendState() {
+        const isEmpty = composer.value.trim().length === 0;
+        sendButton.disabled = isGenerating ? false : isEmpty;
+        sendButton.setAttribute('aria-disabled', String(sendButton.disabled));
+      }
+      composer.addEventListener('input', syncChatSendState);
+      syncChatSendState();
+      function stopGeneration() {
+        clearInterval(activeStreamTimer);
+        activeStreamTimer = undefined;
+        if (activeStreamAgent) {
+          activeStreamAgent.innerHTML = '<details class="reasoning-disclosure"><summary><span class="reasoning-summary-copy">生成已停止</span><span class="reasoning-count">未完成</span></summary><div class="reasoning-content"><div class="thinking">' + activeStreamCopy + '</div></div></details>';
+          activeStreamAgent = undefined;
+        }
+        setGenerationState(false);
+        document.getElementById('syncState').textContent = '生成已停止';
+        notify('已停止生成');
+      }
+      sendButton.addEventListener('click', () => isGenerating ? stopGeneration() : sendMessage());
+      composer.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' || event.shiftKey) return;
+        event.preventDefault();
+        if (isGenerating) { notify('当前消息仍在生成'); return; }
+        sendMessage();
+      });
+      document.getElementById('moreButton').addEventListener('click', () => notify('会话操作：重命名、归档（规划中）'));
+
+      document.querySelectorAll('[data-resolve]').forEach(button => button.addEventListener('click', () => {
+        document.querySelector('[data-od-id="permission-request-card"]').hidden = true;
+        notify(button.dataset.resolve === 'allow' ? '已允许一次，等待 Host 回执' : '已拒绝，等待 Host 回执');
+        updateRequestState();
+      }));
+      document.querySelectorAll('[data-question]').forEach(button => button.addEventListener('click', () => {
+        document.querySelector('[data-od-id="question-request-card"]').hidden = true;
+        notify('答案已提交，等待 Host 回执');
+        updateRequestState();
+      }));
+      document.getElementById('refreshRequests').addEventListener('click', () => notify('已与 Host 同步'));
+      document.querySelectorAll('.toggle').forEach(toggle => toggle.addEventListener('click', () => toggle.setAttribute('aria-checked', toggle.getAttribute('aria-checked') !== 'true')));
+
+      setInterval(() => {
+        const now = new Date();
+        document.getElementById('clock').textContent = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`;
+      }, 30000);
+    })();
+  </script>
+
+
+</body></html>
