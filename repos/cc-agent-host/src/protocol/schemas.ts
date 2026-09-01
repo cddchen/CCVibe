@@ -259,6 +259,10 @@ export const dispatchActionParamsSchema = z
   })
   .strict();
 
+export const supportedCommandsParamsSchema = z
+  .object({ channel: chatUriSchema })
+  .strict();
+
 const workspaceIdSchema = parsedString(
   boundedString('workspaceId', MAX_OPAQUE_ID_BYTES),
   'workspaceId',
@@ -271,12 +275,15 @@ const modelIdSchema = parsedString(
   parseModelId,
 );
 
+export const effortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+
 /** Create only a provisional chat backing; the first chat/send materializes it. */
 export const catalogCreateChatParamsSchema = z
   .object({
     channel: rootUriSchema,
     workspaceId: workspaceIdSchema,
     modelId: modelIdSchema,
+    effort: effortLevelSchema.optional(),
     initialPrompt: promptSchema.optional(),
     clientSeq: z.number().int().safe().positive(),
     commandId: commandIdSchema,
@@ -300,6 +307,7 @@ export type SubscribeParams = z.infer<typeof subscribeParamsSchema>;
 export type UnsubscribeParams = z.infer<typeof unsubscribeParamsSchema>;
 export type ReconnectParams = z.infer<typeof reconnectParamsSchema>;
 export type DispatchActionParams = z.infer<typeof dispatchActionParamsSchema>;
+export type SupportedCommandsParams = z.infer<typeof supportedCommandsParamsSchema>;
 export type CatalogCreateChatParams = z.infer<typeof catalogCreateChatParamsSchema>;
 export type ResolveApprovalParams = z.infer<typeof resolveApprovalParamsSchema>;
 export type ResolveInputParams = z.infer<typeof resolveInputParamsSchema>;

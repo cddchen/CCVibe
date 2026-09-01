@@ -12,6 +12,7 @@ import type {
 export interface CreateChatCommandInput {
   readonly workspaceId: string;
   readonly modelId: string;
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   readonly prompt: string;
   readonly clientSeq: number;
   readonly commandId: string;
@@ -46,6 +47,7 @@ export function buildCreateChatCommand(input: CreateChatCommandInput): CreateCha
       channel: createRootUri(),
       workspaceId: input.workspaceId,
       modelId: input.modelId,
+      ...(input.effort === undefined ? {} : { effort: input.effort }),
       initialPrompt: prompt,
       clientSeq: input.clientSeq,
       commandId: input.commandId,

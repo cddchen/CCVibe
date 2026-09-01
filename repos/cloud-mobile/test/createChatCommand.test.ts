@@ -11,6 +11,7 @@ describe('Phase 3 chat command builders', () => {
     expect(buildCreateChatCommand({
       workspaceId: 'workspace-a',
       modelId: 'model-a',
+      effort: 'high',
       prompt: '修复连接超时问题',
       clientSeq: 7,
       commandId: 'create-command-7',
@@ -20,6 +21,7 @@ describe('Phase 3 chat command builders', () => {
         channel: createRootUri(),
         workspaceId: 'workspace-a',
         modelId: 'model-a',
+        effort: 'high',
         initialPrompt: '修复连接超时问题',
         clientSeq: 7,
         commandId: 'create-command-7',

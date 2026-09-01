@@ -294,8 +294,13 @@ export type {
 } from './server/start.js';
 export { ClaudeAgentSdkService } from './claude/claudeAgentSdkService.js';
 export type { ClaudeAgentSdkServiceOptions } from './claude/claudeAgentSdkService.js';
-export { projectCatalogSessions } from './claude/catalogSource.js';
+export {
+  projectCatalogModels,
+  projectCatalogSessions,
+  projectCatalogWorkspaces,
+} from './claude/catalogSource.js';
 export type {
+  CatalogSdkModelInfo,
   CatalogListSessionInfo,
   CatalogListSessionsParameters,
   CatalogListSessionsResult,

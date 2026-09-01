@@ -2,6 +2,23 @@ import type { MD3Theme } from 'react-native-paper';
 
 export type CloudColorScheme = 'light' | 'dark';
 
+/**
+ * Shared visual language from the Cloud mobile concept.  Keep these values
+ * platform neutral so native glass, the legacy blur tier, and Material 3 all
+ * agree on the same geometry.
+ */
+export const CLOUD_DESIGN_TOKENS = Object.freeze({
+  background: '#F7F8FC',
+  surface: '#FFFFFF',
+  accent: '#2F6BFF',
+  radiusCard: 28,
+  radiusControl: 24,
+  radiusSmall: 14,
+  spacingPage: 20,
+  spacingSection: 32,
+  minTouchTarget: 44,
+});
+
 const LIGHT_COLORS: Partial<MD3Theme['colors']> = Object.freeze({
   primary: '#2F6BFF',
   onPrimary: '#FFFFFF',
@@ -17,7 +34,7 @@ const LIGHT_COLORS: Partial<MD3Theme['colors']> = Object.freeze({
   onTertiaryContainer: '#07391A',
   background: '#F7F8FC',
   onBackground: '#171A21',
-  surface: '#FBFCFF',
+  surface: CLOUD_DESIGN_TOKENS.surface,
   surfaceVariant: '#E9ECF3',
   onSurface: '#171A21',
   onSurfaceVariant: '#5E6572',

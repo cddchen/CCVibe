@@ -24,6 +24,8 @@ import type {
   HostResolveInputParams,
   HostRootCatalogState,
   HostChatState,
+  HostSlashCommand,
+  HostSupportedCommandsResult,
 } from '../../protocol/hostWire';
 import {
   createAsyncStorageConnectionPreferencesAdapter,
@@ -57,6 +59,7 @@ export type RuntimePhase = 'loading' | 'ready' | 'unconfigured' | 'error';
 export interface RuntimeSelection {
   readonly workspaceId?: string;
   readonly modelId?: string;
+  readonly effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 export interface PendingSend {
@@ -140,6 +143,7 @@ export interface RuntimeSupervisor {
   subscribe(resource: string): Promise<void>;
   createChat(params: HostCreateChatParams): Promise<HostCreateChatResult>;
   dispatchAction(params: HostDispatchActionParams): Promise<HostDispatchActionResult>;
+  supportedCommands?(channel: ChatUri): Promise<HostSupportedCommandsResult>;
   resolveApproval?(params: HostResolveApprovalParams): Promise<HostInteractionResolutionResult>;
   resolveInput?(params: HostResolveInputParams): Promise<HostInteractionResolutionResult>;
 }
@@ -181,7 +185,7 @@ export class CloudRuntime {
       phase: 'loading',
       sync: createSyncState({ subscriptions: [AGENT_ROOT_URI] }),
       tokenAvailable: false,
-      selection: {},
+      selection: { effort: 'medium' },
     });
     this.actionsValue = Object.freeze({
       connect: (values: ConnectionFormValues) => this.connect(values),
@@ -191,9 +195,11 @@ export class CloudRuntime {
       subscribeChat: (chatUri: ChatUri) => this.subscribeChat(chatUri),
       setWorkspace: (workspaceId: string) => this.setWorkspace(workspaceId),
       setModel: (modelId: string) => this.setModel(modelId),
+      setEffort: (effort: RuntimeSelection['effort']) => this.setEffort(effort),
       createChatAndSend: (input: CreateChatAndSendInput) => this.createChatAndSend(input),
       retryPendingSend: () => this.retryPendingSend(),
       sendChat: (input: SendChatInput) => this.sendChat(input),
+      supportedCommands: (chatUri: ChatUri) => this.supportedCommands(chatUri),
       interruptChat: (input: InterruptChatInput) => this.interruptChat(input),
       allowApproval: (input: ResolveApprovalInput) => this.resolveApproval({ ...input, decision: 'allow' }),
       denyApproval: (input: ResolveApprovalInput) => this.resolveApproval({ ...input, decision: 'deny' }),
@@ -229,6 +235,7 @@ export class CloudRuntime {
         savedConnection: savedConnection ?? undefined,
         tokenAvailable: token !== null,
         selection: {
+          effort: 'medium',
           ...(savedConnection?.lastWorkspaceId === undefined ? {} : { workspaceId: savedConnection.lastWorkspaceId }),
           ...(savedConnection?.lastModelId === undefined ? {} : { modelId: savedConnection.lastModelId }),
         },
@@ -382,7 +389,11 @@ export class CloudRuntime {
     void this.persistSelection({ modelId });
   }
 
-  private async persistSelection(selection: RuntimeSelection): Promise<void> {
+  private setEffort(effort: RuntimeSelection['effort']): void {
+    this.setState({ selection: { ...this.state.selection, effort } });
+  }
+
+  private async persistSelection(selection: Partial<RuntimeSelection>): Promise<void> {
     const savedConnection = this.state.savedConnection;
     if (savedConnection === undefined) return;
     try {
@@ -406,6 +417,7 @@ export class CloudRuntime {
       const command = buildCreateChatCommand({
         workspaceId: input.workspaceId,
         modelId: input.modelId,
+        effort: input.effort ?? this.state.selection.effort,
         prompt: input.prompt,
         clientSeq: this.nextClientSeq(),
         commandId: this.nextCommandId('create'),
@@ -471,6 +483,17 @@ export class CloudRuntime {
       return { status: 'accepted', operation: 'send', chatUri: input.chatUri };
     } catch (error) {
       return this.failChatOperation('send', input.chatUri, errorCode(error));
+    }
+  }
+
+  private async supportedCommands(chatUri: ChatUri): Promise<readonly HostSlashCommand[]> {
+    const supervisor = this.requireConnectedSupervisor();
+    if (supervisor?.supportedCommands === undefined) return Object.freeze([]);
+    try {
+      if (!this.state.sync.subscriptions.includes(chatUri)) await supervisor.subscribe(chatUri);
+      return (await supervisor.supportedCommands(chatUri)).commands;
+    } catch {
+      return Object.freeze([]);
     }
   }
 
@@ -663,6 +686,7 @@ export interface CreateChatAndSendInput {
   readonly prompt: string;
   readonly workspaceId: string;
   readonly modelId: string;
+  readonly effort?: RuntimeSelection['effort'];
 }
 
 export interface CloudRuntimeActions {
@@ -673,9 +697,11 @@ export interface CloudRuntimeActions {
   subscribeChat(chatUri: ChatUri): Promise<boolean>;
   setWorkspace(workspaceId: string): void;
   setModel(modelId: string): void;
+  setEffort(effort: RuntimeSelection['effort']): void;
   createChatAndSend(input: CreateChatAndSendInput): Promise<NewChatResult>;
   retryPendingSend(): Promise<NewChatResult>;
   sendChat(input: SendChatInput): Promise<ChatActionResult>;
+  supportedCommands(chatUri: ChatUri): Promise<readonly HostSlashCommand[]>;
   interruptChat(input: InterruptChatInput): Promise<ChatActionResult>;
   allowApproval(input: ResolveApprovalInput): Promise<ChatActionResult>;
   denyApproval(input: ResolveApprovalInput): Promise<ChatActionResult>;

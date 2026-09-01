@@ -29,7 +29,7 @@
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Cloud/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* Cloud-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "Cloud-Bridging-Header.h"; path = "Cloud/Cloud-Bridging-Header.h"; sourceTree = "<group>"; };
 		F68B17DC27421286A110A4F6 /* libPods-Cloud.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Cloud.a"; sourceTree = BUILT_PRODUCTS_DIR; };
-		F8234DBBE90772E42ECCFAC5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = Cloud/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		F8234DBBE90772E42ECCFAC5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = Cloud/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,7 +73,6 @@
 				6706432646810D2F543E1525 /* Pods-Cloud.debug.xcconfig */,
 				005D7045E07AB0ED420AF09B /* Pods-Cloud.release.xcconfig */,
 			);
-			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
 		};
@@ -339,6 +338,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Cloud/Cloud.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = U4MJ79YZ4K;
 				ENABLE_BITCODE = NO;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -375,6 +375,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Cloud/Cloud.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = U4MJ79YZ4K;
 				INFOPLIST_FILE = Cloud/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (

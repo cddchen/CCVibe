@@ -133,6 +133,12 @@ function createHarness(
     readonly acl?: AccessControlList;
     readonly principal?: Principal;
     readonly requireAuthorization?: boolean;
+    readonly supportedCommandsProvider?: (channel: ReturnType<typeof createChatUri>) => Promise<readonly {
+      readonly name: string;
+      readonly description: string;
+      readonly argumentHint: string;
+      readonly aliases?: readonly string[];
+    }[]>;
   } = {},
 ): {
   readonly host: HostStateManager;
@@ -163,6 +169,7 @@ function createHarness(
     stateProvider: provider,
     clientRegistry: registry,
     chatActor: actor,
+    ...(options.supportedCommandsProvider === undefined ? {} : { supportedCommandsProvider: options.supportedCommandsProvider }),
     ...(options.supportedResources === undefined ? {} : { supportedResources: options.supportedResources }),
     ...(options.acl === undefined ? {} : { acl: options.acl }),
     ...(options.principal === undefined ? {} : { principal: options.principal }),
@@ -214,6 +221,25 @@ function actionMessage(connection: MemoryConnection): Record<string, unknown> | 
 }
 
 describe('ProtocolServerHandler', () => {
+  it('returns the subscribed chat slash commands from the Host provider', async () => {
+    const { handler } = createHarness(8, {
+      supportedCommandsProvider: async (channel) => {
+        expect(channel).toBe(chat);
+        return [{ name: 'animate', description: 'Add motion', argumentHint: '<target>', aliases: ['motion'] }];
+      },
+    });
+    const connection = new MemoryConnection();
+    await initialize(handler, connection, clientA, [chat]);
+
+    await handler.handle(connection, request('commands', 'chat/supportedCommands', { channel: chat }));
+
+    expect(connection.lastResponse()).toEqual({
+      jsonrpc: '2.0',
+      id: 'commands',
+      result: { commands: [{ name: 'animate', description: 'Add motion', argumentHint: '<target>', aliases: ['motion'] }] },
+    });
+  });
+
   it('routes catalog/createChat and publishes the accepted chat to root subscribers', async () => {
     const host = new HostStateManager({ now: () => 'server-time', replayCapacity: 8 });
     host.registerCatalog(root, createRootCatalogState({

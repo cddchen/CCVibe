@@ -59,6 +59,9 @@ export interface AgentHostServerConfig {
   readonly allowAnonymousDev: boolean;
   readonly allowedWorkspaces: readonly CatalogWorkspace[];
   readonly models: readonly CatalogModel[];
+  /** Whether the corresponding JSON variable was explicitly supplied. */
+  readonly workspacesConfigured?: boolean;
+  readonly modelsConfigured?: boolean;
   readonly defaultModelId?: ModelId;
 }
 
@@ -116,27 +119,18 @@ export function parseAgentHostConfig(
     throw configurationError('CCVIBE_BEARER_TOKEN is required in production');
   }
 
-  const allowedWorkspaces = parseWorkspaces(
-    readAliasedEnvironment(
-      environment,
-      'CCVIBE_ALLOWED_WORKSPACES_JSON',
-      'CCVIBE_WORKSPACES_JSON',
-    ),
+  const workspaceCatalogValue = readAliasedEnvironment(
+    environment,
+    'CCVIBE_ALLOWED_WORKSPACES_JSON',
+    'CCVIBE_WORKSPACES_JSON',
   );
-  const models = parseModels(
-    readAliasedEnvironment(
-      environment,
-      'CCVIBE_MODEL_CATALOG_JSON',
-      'CCVIBE_MODELS_JSON',
-    ),
+  const modelCatalogValue = readAliasedEnvironment(
+    environment,
+    'CCVIBE_MODEL_CATALOG_JSON',
+    'CCVIBE_MODELS_JSON',
   );
-  if (mode === 'production' && allowedWorkspaces.length === 0) {
-    throw configurationError('CCVIBE_ALLOWED_WORKSPACES_JSON must contain a workspace in production');
-  }
-  if (mode === 'production' && models.length === 0) {
-    throw configurationError('CCVIBE_MODEL_CATALOG_JSON must contain a model in production');
-  }
-
+  const allowedWorkspaces = parseWorkspaces(workspaceCatalogValue);
+  const models = parseModels(modelCatalogValue);
   const defaultModelId = parseDefaultModelId(
     environment.CCVIBE_DEFAULT_MODEL_ID,
     models,
@@ -152,6 +146,8 @@ export function parseAgentHostConfig(
     allowAnonymousDev,
     allowedWorkspaces: Object.freeze([...allowedWorkspaces]),
     models: Object.freeze([...models]),
+    ...(hasExplicitCatalogValue(workspaceCatalogValue) ? { workspacesConfigured: true } : {}),
+    ...(hasExplicitCatalogValue(modelCatalogValue) ? { modelsConfigured: true } : {}),
     ...(defaultModelId === undefined ? {} : { defaultModelId }),
   });
 }
@@ -315,7 +311,17 @@ function parseDefaultModelId(
     return firstModel?.id;
   }
   const normalized = value.trim();
-  if (firstModel === undefined || !models.some((model) => model.id === normalized)) {
+  // With no explicit model catalog, the SDK-backed host resolves this value
+  // after its Query probe. Keep validating the identifier shape now, but defer
+  // membership validation until refreshCatalog has discovered SDK models.
+  if (firstModel === undefined) {
+    try {
+      return parseModelId(normalized);
+    } catch {
+      throw configurationError('CCVIBE_DEFAULT_MODEL_ID must identify a model in the catalog');
+    }
+  }
+  if (!models.some((model) => model.id === normalized)) {
     throw configurationError('CCVIBE_DEFAULT_MODEL_ID must identify a model in the catalog');
   }
   try {
@@ -357,6 +363,10 @@ function readAliasedEnvironment(
     throw configurationError(`${canonical} and ${alias} must not disagree`);
   }
   return value ?? aliasValue;
+}
+
+function hasExplicitCatalogValue(value: string | undefined): boolean {
+  return value !== undefined && value.trim().length > 0;
 }
 
 function isPublicBind(host: string): boolean {

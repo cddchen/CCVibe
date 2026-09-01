@@ -1,7 +1,12 @@
 import type {
   AnyZodRawShape,
   InferShape,
+  ModelInfo,
   SdkMcpToolDefinition,
+  Options,
+  Query,
+  SDKUserMessage,
+  WarmQuery,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -78,6 +83,54 @@ export class ClaudeAgentSdkService implements ClaudeAgentSdkServiceFacade {
     ...args: Parameters<ClaudeSdkBindings['getSessionMessages']>
   ): Promise<Awaited<ReturnType<ClaudeSdkBindings['getSessionMessages']>>> {
     return this.invoke('getSessionMessages', args);
+  }
+
+  /**
+   * Read the model catalog from an initialized SDK Query without exposing the
+   * Query or its initialization metadata to callers. The warm query is
+   * intentionally short-lived: it is only a catalog probe and never receives
+   * a user prompt.
+   */
+  public async listSupportedModels(cwd?: string): Promise<readonly ModelInfo[]> {
+    const abortController = new AbortController();
+    const options = {
+      abortController,
+      ...(cwd === undefined ? {} : { cwd }),
+      systemPrompt: { type: 'preset', preset: 'claude_code' },
+      settingSources: ['user', 'project', 'local'],
+      permissionMode: 'default',
+      allowDangerouslySkipPermissions: true,
+      disallowedTools: ['WebSearch'],
+    } satisfies Options;
+
+    let warmQuery: WarmQuery | undefined;
+    let query: Query | undefined;
+    try {
+      warmQuery = await this.startup({ options });
+      query = warmQuery.query(emptyUserInput(abortController.signal));
+
+      // Newer SDKs expose supportedModels directly. The initialization result
+      // is the compatibility path for SDKs that only return models there.
+      if (typeof query.supportedModels === 'function') {
+        return Object.freeze([...(await query.supportedModels())]);
+      }
+      const initialization = await query.initializationResult();
+      return Object.freeze([...initialization.models]);
+    } finally {
+      // Query.close() is synchronous in the official SDK. Keep cleanup best
+      // effort so a probe failure never replaces the useful original error.
+      try {
+        query?.close();
+      } catch {
+        // Ignore probe cleanup failures.
+      }
+      try {
+        warmQuery?.close();
+      } catch {
+        // Ignore probe cleanup failures.
+      }
+      abortController.abort();
+    }
   }
 
   public listSubagents(
@@ -172,4 +225,17 @@ export class ClaudeAgentSdkService implements ClaudeAgentSdkServiceFacade {
       // Reporter failures must not replace the loader's original rejection.
     }
   }
+}
+
+async function* emptyUserInput(signal: AbortSignal): AsyncGenerator<SDKUserMessage, void> {
+  // Keep the streaming input open while the control request is in flight. An
+  // immediately completed input stream can make the CLI terminate before
+  // supportedModels()/initializationResult() responds.
+  await new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
 }

@@ -32,6 +32,7 @@ import {
   type ClaudeAgentHostRuntime,
   type ClaudeAgentHostRuntimeSession,
   type ClaudeAgentHostSdkService,
+  type CatalogSdkModelInfo,
   type CatalogListSessionsResult,
   type CatalogSource,
 } from '../../src/index.js';
@@ -613,6 +614,56 @@ describe('createClaudeAgentHost', () => {
     }
   });
 
+  it('discovers the default catalog from SDK sessions and Query models', async () => {
+    const harness = serviceHarness();
+    const sdkSessions = [{
+      sessionId: 'sdk-session-auto',
+      summary: 'Auto discovered session',
+      lastModified: 1_700_000_000_000,
+      cwd: '/tmp/auto-project',
+      fileSize: 99,
+    }] satisfies CatalogListSessionsResult;
+    const sdkModels = [{
+      value: 'sonnet',
+      displayName: 'Claude Sonnet',
+      description: 'SDK model',
+      supportsAdaptiveThinking: true,
+    }] satisfies CatalogSdkModelInfo[];
+    const service: ClaudeAgentHostSdkService = {
+      ...harness.service,
+      listSessions: () => sdkSessions,
+      listSupportedModels: () => sdkModels,
+    };
+    const host = await createClaudeAgentHost(baseOptions(service));
+
+    try {
+      const first = await host.refreshCatalog();
+      const second = await host.refreshCatalog();
+
+      expect(first.workspaces).toHaveLength(1);
+      expect(first.workspaces).toEqual(second.workspaces);
+      expect(first.workspaces[0]).toMatchObject({
+        path: '/tmp/auto-project',
+        displayName: 'auto-project',
+      });
+      expect(first.models).toEqual([{
+        id: 'sonnet',
+        displayName: 'Claude Sonnet',
+        description: 'SDK model',
+        capabilities: ['adaptive-thinking'],
+      }]);
+      expect(first.defaultModelId).toBe('sonnet');
+      expect(first.sessions).toMatchObject([{
+        sdkSessionRef: 'sdk-session-auto',
+        workspaceId: first.workspaces[0]?.id,
+      }]);
+      expect(host.registry.getBacking(parseChatUri('agent-chat://epoch-1/sdk-session-auto'))?.lifecycle)
+        .toBe('materialized');
+    } finally {
+      await host.shutdown();
+    }
+  });
+
   it('keeps the last known good catalog when refresh fails', async () => {
     const harness = serviceHarness();
     const workspace = createWorkspace({
@@ -683,6 +734,7 @@ describe('createClaudeAgentHost', () => {
         channel: root,
         workspaceId: createWorkspaceId('workspace-a'),
         modelId: createModelId('model-a'),
+        effort: 'high',
         initialPrompt: 'first title',
         clientSeq: 1,
         commandId: createCommandId('catalog-create-1'),
@@ -694,6 +746,7 @@ describe('createClaudeAgentHost', () => {
       });
       expect(host.registry.size).toBe(1);
       expect(host.registry.getBacking(firstChatUri)?.lifecycle).toBe('provisional');
+      expect(host.registry.getBacking(firstChatUri)?.desiredConfig.effort).toBe('high');
       expect(harness.startupOptions).toHaveLength(0);
       expect(chatIdCalls).toBe(1);
 

@@ -6,8 +6,8 @@ import {
   type GlassSurfaceProps,
 } from './GlassSurface';
 
-const DEFAULT_RADIUS = 16;
-const DEFAULT_BLUR_INTENSITY = 50;
+const DEFAULT_RADIUS = 24;
+const DEFAULT_BLUR_INTENSITY = 58;
 
 export type GlassPanelProps = Readonly<{
   children?: React.ReactNode;

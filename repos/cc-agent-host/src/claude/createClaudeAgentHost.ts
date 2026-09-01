@@ -78,7 +78,10 @@ import {
 import type { ActionOrigin, ChatActionEnvelope } from '../protocol/types.js';
 import {
   projectCatalogSessions,
+  projectCatalogModels,
+  projectCatalogWorkspaces,
   type CatalogListSessionsResult,
+  type CatalogSdkModelInfo,
   type CatalogSource,
   type CatalogSourceSnapshot,
 } from './catalogSource.js';
@@ -150,11 +153,13 @@ export interface ClaudeAgentHostSdkService {
   startup(...args: never[]): unknown;
   listSessions?(...args: never[]): unknown;
   getSessionMessages(...args: never[]): unknown;
+  /** Optional SDK Query catalog probe; absent in lightweight test adapters. */
+  listSupportedModels?(...args: never[]): unknown;
 }
 
 type InternalClaudeAgentHostSdkService = Pick<
   ClaudeAgentSdkService,
-  'startup' | 'listSessions' | 'getSessionMessages'
+  'startup' | 'listSessions' | 'getSessionMessages' | 'listSupportedModels'
 >;
 
 /** SDK-free registry view exposed by a composed host. */
@@ -493,7 +498,11 @@ export async function createClaudeAgentHost(
       chatUri: createChatUri(options.hostEpoch, createChatId()),
       sdkSessionId: createSdkSessionId(),
       cwd: workspace.path,
-      desiredConfig: { permissionMode: 'default', model: model.id },
+      desiredConfig: {
+        permissionMode: 'default',
+        model: model.id,
+        ...(input.effort === undefined ? {} : { effort: input.effort }),
+      },
     });
     let registered = false;
     try {
@@ -544,6 +553,7 @@ export async function createClaudeAgentHost(
     stateProvider,
     logicalClientRegistry,
     chatActor: actor,
+    supportedCommandsProvider: (chatUri) => registry.supportedCommands(chatUri),
     ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
     ...(options.acl === undefined ? {} : { acl: options.acl }),
     ...(options.accessControlList === undefined ? {} : { accessControlList: options.accessControlList }),
@@ -580,12 +590,6 @@ export async function createClaudeAgentHost(
     const sourced = options.catalogSource === undefined
       ? {}
       : await options.catalogSource.load();
-    const workspaces = (sourced.workspaces ?? configured.workspaces ?? []).map(createWorkspace);
-    const models = (sourced.models ?? configured.models ?? []).map(createModel);
-    const configuredDefaultModelId = sourced.defaultModelId ?? configured.defaultModelId;
-    const defaultModelId = configuredDefaultModelId === undefined
-      ? undefined
-      : parseModelId(String(configuredDefaultModelId));
 
     const sourceListSessions = options.catalogSource?.listSessions;
     const listSessions = sourceListSessions === undefined
@@ -596,7 +600,96 @@ export async function createClaudeAgentHost(
     const sdkSessions: CatalogListSessionsResult = listSessions === undefined
       ? []
       : await listSessions();
-    const sessions = projectCatalogSessions(sdkSessions, workspaces, options.hostEpoch);
+    const configuredWorkspaces = configured.workspaces ?? [];
+    const explicitSourceWorkspaces = sourced.workspaces;
+    const workspaceInputs = explicitSourceWorkspaces ?? configuredWorkspaces;
+    // Environment-backed configuration is an override when non-empty. An
+    // empty environment value is deliberately treated as "discover" so the
+    // default development server can use the SDK session index.
+    const workspaces = workspaceInputs.length > 0 || explicitSourceWorkspaces !== undefined
+      ? workspaceInputs.map(createWorkspace)
+      : projectCatalogWorkspaces(sdkSessions);
+
+    const configuredModels = configured.models ?? [];
+    const explicitSourceModels = sourced.models;
+    const modelInputs = explicitSourceModels ?? configuredModels;
+    let models = modelInputs.length > 0 || explicitSourceModels !== undefined
+      ? modelInputs.map(createModel)
+      : [];
+    if (models.length === 0 && explicitSourceModels === undefined && typeof sdkService.listSupportedModels === 'function') {
+      const probeCwd = workspaces[0]?.path ?? process.cwd();
+      try {
+        const sdkModels = await sdkService.listSupportedModels(probeCwd) as readonly CatalogSdkModelInfo[];
+        models = [...projectCatalogModels(sdkModels)];
+      } catch {
+        // Catalog discovery is best effort. A missing Claude login, an
+        // unavailable directory, or an older SDK must not prevent the host
+        // from exposing an otherwise useful session/workspace catalog.
+        models = [];
+      }
+    }
+    const configuredDefaultModelId = sourced.defaultModelId ?? configured.defaultModelId;
+    const requestedDefaultModelId = configuredDefaultModelId === undefined
+      ? undefined
+      : parseModelId(String(configuredDefaultModelId));
+    // A deferred configured default is only published when the discovered
+    // catalog contains it; otherwise use the SDK's first model as the UI's
+    // sensible default. Explicit catalog validation still happens in config.
+    const defaultModelId = requestedDefaultModelId !== undefined
+      && models.some((model) => model.id === requestedDefaultModelId)
+      ? requestedDefaultModelId
+      : models[0]?.id;
+    const projectedSessions = projectCatalogSessions(sdkSessions, workspaces, options.hostEpoch);
+    const sessions = [] as typeof projectedSessions[number][];
+    const sdkSessionsById = new Map(sdkSessions.map((session) => [session.sessionId, session]));
+
+    for (const session of projectedSessions) {
+      const existingBacking = registry.getBacking(session.chatUri);
+      if (existingBacking !== undefined) {
+        sessions.push(session);
+        continue;
+      }
+
+      // SDK listSessions exposes resumable Claude Code sessions, but the Host
+      // protocol can only subscribe to resources registered in both the
+      // registry and HostStateManager. Hydrate that bridge during catalog
+      // refresh so every advertised session is actually openable.
+      if (registry.listBackings().some((backing) => backing.sdkSessionId === session.sdkSessionRef)) {
+        continue;
+      }
+      const sdkSession = sdkSessionsById.get(session.sdkSessionRef);
+      const workspace = workspaces.find((candidate) => candidate.id === session.workspaceId);
+      if (sdkSession === undefined || workspace === undefined) {
+        continue;
+      }
+
+      let restored = false;
+      try {
+        registry.restorePersistedBacking({
+          chatUri: session.chatUri,
+          sdkSessionId: session.sdkSessionRef,
+          cwd: sdkSession.cwd ?? workspace.path,
+          desiredConfig: {
+            permissionMode: 'default',
+            ...(defaultModelId === undefined ? {} : { model: defaultModelId }),
+          },
+          lifecycle: 'materialized',
+        });
+        restored = true;
+        hostStateManager.registerChat(session.chatUri);
+        const messages = await sdkService.getSessionMessages(session.sdkSessionRef, {
+          dir: sdkSession.cwd ?? workspace.path,
+          includeSystemMessages: true,
+        });
+        hydrateClaudeHistory(hostStateManager, session.chatUri, messages, options.nowAction());
+        sessions.push(session);
+      } catch {
+        hostStateManager.unregisterChat(session.chatUri);
+        if (restored) {
+          await registry.disposeChat(session.chatUri).catch(() => undefined);
+        }
+      }
+    }
 
     const timestamp = options.nowAction();
     if (timestamp.length === 0) {

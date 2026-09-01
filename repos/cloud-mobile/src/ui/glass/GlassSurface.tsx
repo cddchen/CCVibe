@@ -59,9 +59,9 @@ const IOS_FALLBACK_CHROME_STYLE: ViewStyle = Object.freeze({
   borderWidth: StyleSheet.hairlineWidth,
   borderColor: 'rgba(255,255,255,0.46)',
   shadowColor: '#000000',
-  shadowOpacity: 0.10,
-  shadowRadius: 9,
-  shadowOffset: { width: 0, height: 2 },
+  shadowOpacity: 0.08,
+  shadowRadius: 16,
+  shadowOffset: { width: 0, height: 5 },
 });
 
 function getClientPlatform(): 'ios' | 'android' | 'web' | 'unknown' {
@@ -96,9 +96,9 @@ function getSolidColor(props: GlassSurfaceProps, reduceTransparency: boolean): C
 
 function getWebBlurStyle(): ViewStyle {
   const style: WebBlurStyle = {
-    backgroundColor: 'rgba(255,255,255,0.72)',
-    backdropFilter: 'blur(10px)',
-    WebkitBackdropFilter: 'blur(10px)',
+    backgroundColor: 'rgba(255,255,255,0.78)',
+    backdropFilter: 'blur(18px) saturate(1.45)',
+    WebkitBackdropFilter: 'blur(18px) saturate(1.45)',
   };
   return style as unknown as ViewStyle;
 }

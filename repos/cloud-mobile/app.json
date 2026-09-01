@@ -9,7 +9,10 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.ccvibe.cloud"
+      "bundleIdentifier": "com.ccvibe.cloud",
+      "infoPlist": {
+        "CADisableMinimumFrameDurationOnPhone": true
+      }
     },
     "android": {
       "package": "com.ccvibe.cloud"
@@ -17,7 +20,8 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      "expo-font"
+      "expo-font",
+      "./plugins/withAndroidCleartextTraffic"
     ],
     "experiments": {
       "typedRoutes": true

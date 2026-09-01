@@ -12,13 +12,14 @@ export CCVIBE_HOST=127.0.0.1
 export CCVIBE_PORT=8787
 export CCVIBE_HOST_EPOCH=dev-local
 export CCVIBE_BEARER_TOKEN="$(openssl rand -hex 32)"
-export CCVIBE_ALLOWED_WORKSPACES_JSON='[{"id":"ccvibe","path":"/absolute/path/to/CCVibe","displayName":"CCVibe"}]'
-export CCVIBE_MODEL_CATALOG_JSON='[{"id":"sonnet","displayName":"Claude Sonnet","capabilities":["adaptive-thinking"]}]'
-export CCVIBE_DEFAULT_MODEL_ID=sonnet
 
 npm run build
 npm start
 ```
+
+默认情况下，Host 会调用 Claude Agent SDK 的 `listSessions()`，从已有会话的
+绝对 `cwd` 自动发现并去重工作区，再从 SDK Query 初始化结果读取模型目录。
+没有任何历史会话时 SDK 无法推断目录，此时需要显式配置工作区才能创建新会话。
 
 也可以使用 `npm run start:dev` 或 `npm run start:prod`。这两个脚本都会先构建当前包；脚本不会替换已经设置的 `CCVIBE_ENV`。
 
@@ -33,9 +34,9 @@ npm start
 | `CCVIBE_BEARER_TOKEN` | 生产必需 | 只接受 `Authorization: Bearer <token>`；不会放入 URL、响应或日志 |
 | `CCVIBE_ALLOW_ANONYMOUS_DEV` | 否 | 仅开发/测试环境有效，必须为 `true` 才允许无 token 启动 |
 | `CCVIBE_ALLOW_PUBLIC_DEV` | 否 | 仅开发/测试环境有效，用于明确确认公网绑定风险 |
-| `CCVIBE_ALLOWED_WORKSPACES_JSON` | 生产必需 | 工作区数组；只列出的绝对路径可通过 catalog 创建会话 |
-| `CCVIBE_MODEL_CATALOG_JSON` | 生产必需 | 模型目录数组；模型 ID 必须是部署允许使用的值 |
-| `CCVIBE_DEFAULT_MODEL_ID` | 否 | 必须存在于模型目录；未设置时使用目录第一项 |
+| `CCVIBE_ALLOWED_WORKSPACES_JSON` | 否 | 非空时作为显式工作区覆盖/访问约束；未配置或空数组时从 SDK 会话 `cwd` 自动发现 |
+| `CCVIBE_MODEL_CATALOG_JSON` | 否 | 非空时作为显式模型覆盖；未配置或空数组时从 SDK Query 自动发现 |
+| `CCVIBE_DEFAULT_MODEL_ID` | 否 | 显式目录中必须存在；SDK 自动目录中存在时优先使用，否则使用目录第一项 |
 
 工作区 JSON 项支持 `id`、`path`、`displayName` 和可选 `status`（`available`/`unavailable`）。模型 JSON 项支持 `id`、`displayName`、可选 `description` 和能力标签 `effort`、`adaptive-thinking`、`fast-mode`、`auto-mode`。也可用 `CCVIBE_WORKSPACES_JSON` 和 `CCVIBE_MODELS_JSON` 作为前两个 JSON 变量的兼容别名。
 
@@ -45,7 +46,7 @@ npm start
 
 开发默认只监听回环地址。若需要局域网调试，显式设置 `CCVIBE_HOST` 和 `CCVIBE_ALLOW_PUBLIC_DEV=true`，同时仍建议配置 Bearer token。
 
-生产环境必须配置 Bearer token 和至少一个工作区/模型。服务本身提供 HTTP/WebSocket，公网部署应放在 TLS 反向代理之后，由代理提供 `wss://`；移动端连接地址形如 `wss://host.example/ws`，token 通过 WebSocket 的 `Authorization` header 发送，不能拼接 `?token=...`。
+生产环境必须配置 Bearer token；工作区和模型默认由 SDK 自动发现，显式 JSON 仍可用于覆盖/约束。服务本身提供 HTTP/WebSocket，公网部署应放在 TLS 反向代理之后，由代理提供 `wss://`；移动端连接地址形如 `wss://host.example/ws`，token 通过 WebSocket 的 `Authorization` header 发送，不能拼接 `?token=...`。
 
 示例 systemd 单元：
 

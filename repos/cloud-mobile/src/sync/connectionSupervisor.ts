@@ -7,6 +7,7 @@ import {
   parseHostDispatchActionResult,
   parseHostInteractionResolutionResult,
   parseHostSubscribeResult,
+  parseHostSupportedCommandsResult,
   parseHostUnsubscribeResult,
   type HostCreateChatParams,
   type HostCreateChatResult,
@@ -16,8 +17,9 @@ import {
   type HostResolveInputParams,
   type HostInteractionResolutionResult,
   type HostNotification,
+  type HostSupportedCommandsResult,
 } from '../protocol/hostWire';
-import { parseResourceUri } from '../protocol/resourceUri';
+import { parseResourceUri, type ChatUri } from '../protocol/resourceUri';
 import {
   applyJitter,
   calculateBackoffDelay,
@@ -186,6 +188,12 @@ export class ConnectionSupervisor {
     const transport = this.requireTransport();
     const raw = await transport.request('dispatchAction', params as unknown as JsonValue);
     return parseHostDispatchActionResult(raw);
+  }
+
+  public async supportedCommands(channel: ChatUri): Promise<HostSupportedCommandsResult> {
+    const transport = this.requireTransport();
+    const raw = await transport.request('chat/supportedCommands', { channel } as unknown as JsonValue);
+    return parseHostSupportedCommandsResult(raw);
   }
 
   public async resolveApproval(params: HostResolveApprovalParams): Promise<HostInteractionResolutionResult> {

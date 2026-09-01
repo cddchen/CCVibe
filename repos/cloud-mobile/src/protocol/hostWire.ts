@@ -371,6 +371,7 @@ export interface HostCreateChatParams {
   readonly channel: RootUri;
   readonly workspaceId: string;
   readonly modelId: string;
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   readonly initialPrompt?: string;
   readonly clientSeq: number;
   readonly commandId: string;
@@ -381,6 +382,17 @@ export interface HostDispatchActionParams {
   readonly clientSeq: number;
   readonly commandId: string;
   readonly action: HostClientChatAction;
+}
+
+export interface HostSlashCommand {
+  readonly name: string;
+  readonly description: string;
+  readonly argumentHint: string;
+  readonly aliases?: readonly string[];
+}
+
+export interface HostSupportedCommandsResult {
+  readonly commands: readonly HostSlashCommand[];
 }
 
 export interface HostResolveApprovalParams {
@@ -618,6 +630,17 @@ export function parseHostDispatchActionResult(value: unknown): HostDispatchActio
   return deepFreeze({ receipt: accepted });
 }
 
+export function parseHostSupportedCommandsResult(value: unknown): HostSupportedCommandsResult {
+  return deepFreeze(parseWithSchema(z.object({
+    commands: z.array(z.object({
+      name: requiredTextSchema,
+      description: textSchema,
+      argumentHint: textSchema,
+      aliases: z.array(requiredTextSchema).readonly().optional(),
+    }).strict()).readonly(),
+  }).strict(), value, 'chat/supportedCommands result'));
+}
+
 export function parseHostInteractionResolutionResult(value: unknown): HostInteractionResolutionResult {
   const base = parseWithSchema(z.object({ receipt: commandReceiptSchema }).strict(), value, 'interaction resolution result');
   if (base.receipt.status === 'rejected') {
@@ -665,6 +688,8 @@ export function parseHostRpcResult(method: string, value: unknown): unknown {
       return parseHostCreateChatResult(value);
     case 'dispatchAction':
       return parseHostDispatchActionResult(value);
+    case 'chat/supportedCommands':
+      return parseHostSupportedCommandsResult(value);
     case 'chat/resolveApproval':
     case 'chat/resolveInput':
       return parseHostInteractionResolutionResult(value);

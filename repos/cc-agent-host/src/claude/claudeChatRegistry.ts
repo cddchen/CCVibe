@@ -21,7 +21,16 @@ import type {
 export interface ClaudeChatRuntime extends Pick<
   ClaudeQueryRuntime,
   'start' | 'send' | 'interrupt' | 'applyRuntimeConfig' | 'close' | 'state'
-> {}
+> {
+  supportedCommands?(): Promise<readonly ClaudeSupportedCommand[]>;
+}
+
+export interface ClaudeSupportedCommand {
+  readonly name: string;
+  readonly description: string;
+  readonly argumentHint: string;
+  readonly aliases?: readonly string[];
+}
 
 export interface ClaudeChatRuntimeSession {
   readonly kind: 'new' | 'resume';
@@ -257,6 +266,20 @@ export class ClaudeChatRegistry {
       throw new Error('materialization flight was not installed');
     }
     return flight;
+  }
+
+  public async supportedCommands(chatUri: ChatUri): Promise<readonly ClaudeSupportedCommand[]> {
+    const runtime = await this.materialize(chatUri);
+    if (typeof runtime.supportedCommands !== 'function') {
+      return Object.freeze([]);
+    }
+    const commands = await runtime.supportedCommands();
+    return Object.freeze(commands.map((command) => Object.freeze({
+      name: command.name,
+      description: command.description,
+      argumentHint: command.argumentHint,
+      ...(command.aliases === undefined ? {} : { aliases: Object.freeze([...command.aliases]) }),
+    })));
   }
 
   /** Serialize materialization and handle creation, never turn completion. */

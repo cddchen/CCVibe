@@ -3,6 +3,7 @@ import type { UUID } from 'node:crypto';
 import type {
   Options,
   Query,
+  SlashCommand,
   SDKControlInterruptResponse,
   SDKMessage,
   SDKResultMessage,
@@ -153,6 +154,15 @@ export class ClaudeQueryRuntime {
     const attempt = this.startInternal();
     this.startPromise = attempt;
     return attempt;
+  }
+
+  public async supportedCommands(): Promise<readonly SlashCommand[]> {
+    await this.start();
+    const query = this.query;
+    if (query === undefined || this.closeRequested || this.terminalSignalSent) {
+      throw new Error(RUNTIME_CLOSED_MESSAGE);
+    }
+    return Object.freeze(await query.supportedCommands());
   }
 
   public send(

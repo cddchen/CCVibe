@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MD3Theme } from 'react-native-paper';
 
-import { createCloudTheme } from '../src/ui/theme/cloudTheme';
+import { CLOUD_DESIGN_TOKENS, createCloudTheme } from '../src/ui/theme/cloudTheme';
 
 const baseTheme = {
   colors: {
@@ -11,6 +11,14 @@ const baseTheme = {
 } as unknown as MD3Theme;
 
 describe('Cloud MD3 theme', () => {
+  it('exposes the shared mobile geometry contract used by every material tier', () => {
+    expect(CLOUD_DESIGN_TOKENS.background).toBe('#F7F8FC');
+    expect(CLOUD_DESIGN_TOKENS.surface).toBe('#FFFFFF');
+    expect(CLOUD_DESIGN_TOKENS.radiusCard).toBe(28);
+    expect(CLOUD_DESIGN_TOKENS.radiusControl).toBe(24);
+    expect(CLOUD_DESIGN_TOKENS.minTouchTarget).toBeGreaterThanOrEqual(44);
+  });
+
   it('keeps light and dark semantic colors readable and distinct', () => {
     const light = createCloudTheme(baseTheme, 'light');
     const dark = createCloudTheme(baseTheme, 'dark');

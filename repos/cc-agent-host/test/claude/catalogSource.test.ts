@@ -7,11 +7,79 @@ import {
   createWorkspaceId,
 } from '../../src/index.js';
 import {
+  projectCatalogModels,
   projectCatalogSessions,
+  projectCatalogWorkspaces,
+  type CatalogSdkModelInfo,
   type CatalogListSessionsResult,
 } from '../../src/claude/catalogSource.js';
 
 describe('catalog SDK projection', () => {
+  it('discovers stable, deduplicated workspaces from absolute session cwds', () => {
+    const sessions = [
+      {
+        sessionId: 'session-a',
+        summary: 'A',
+        lastModified: 1,
+        cwd: '/tmp/project/./',
+        fileSize: 1,
+      },
+      {
+        sessionId: 'session-b',
+        summary: 'B',
+        lastModified: 2,
+        cwd: '/tmp/project',
+        fileSize: 1,
+      },
+      {
+        sessionId: 'session-c',
+        summary: 'C',
+        lastModified: 3,
+        cwd: 'relative-project',
+        fileSize: 1,
+      },
+    ] satisfies CatalogListSessionsResult;
+
+    const first = projectCatalogWorkspaces(sessions);
+    const second = projectCatalogWorkspaces(sessions);
+
+    expect(first).toEqual(second);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({
+      path: '/tmp/project',
+      displayName: 'project',
+      status: 'available',
+    });
+    expect(first[0]?.id).toMatch(/^workspace-[0-9a-f]{32}$/u);
+  });
+
+  it('projects only supported model fields and capability flags', () => {
+    const models = [
+      {
+        value: 'sonnet',
+        displayName: ' Claude Sonnet ',
+        description: 'Fast model',
+        supportsEffort: true,
+        supportsAdaptiveThinking: true,
+        supportsFastMode: false,
+        supportsAutoMode: true,
+        resolvedModel: 'claude-sonnet-5',
+      },
+      {
+        value: 'invalid model',
+        displayName: 'Invalid',
+        description: 'not representable',
+      },
+    ] satisfies CatalogSdkModelInfo[];
+
+    expect(projectCatalogModels(models)).toEqual([{
+      id: createModelId('sonnet'),
+      displayName: 'Claude Sonnet',
+      description: 'Fast model',
+      capabilities: ['effort', 'adaptive-thinking', 'auto-mode'],
+    }]);
+  });
+
   it('projects the typed listSessions result without leaking SDK metadata', () => {
     const workspace = createWorkspace({
       id: createWorkspaceId('workspace-a'),

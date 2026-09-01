@@ -50,6 +50,7 @@ import {
   resolveApprovalParamsSchema,
   resolveInputParamsSchema,
   subscribeParamsSchema,
+  supportedCommandsParamsSchema,
   toSafeValidationIssues,
   unsubscribeParamsSchema,
   type DispatchActionParams,
@@ -60,6 +61,7 @@ import {
   type ResolveApprovalParams,
   type ResolveInputParams,
   type SubscribeParams,
+  type SupportedCommandsParams,
   type SubscribeResult,
   type UnsubscribeParams,
   type UnsubscribeResult,
@@ -144,6 +146,12 @@ export interface ProtocolServerHandlerOptions {
   readonly chatActor?: ChatCommandActor;
   /** Catalog create is supplied by the actor that owns command dedupe/backings. */
   readonly catalogChatCreator?: Pick<ChatCommandActor, 'createChat'>;
+  readonly supportedCommandsProvider?: (channel: import('../domain/ids.js').ChatUri) => Promise<readonly {
+    readonly name: string;
+    readonly description: string;
+    readonly argumentHint: string;
+    readonly aliases?: readonly string[];
+  }[]>;
   readonly supportedResources?: ReadonlySet<AgentResource>;
   /** Transport-neutral authentication and resource policy boundary. */
   readonly authorization?: ProtocolAuthorizationOptions;
@@ -207,6 +215,7 @@ const METHODS = new Set([
   'reconnect',
   'dispatchAction',
   'catalog/createChat',
+  'chat/supportedCommands',
   'chat/resolveApproval',
   'chat/resolveInput',
 ]);
@@ -225,6 +234,7 @@ export class ProtocolServerHandler {
   private readonly clientRegistry: LogicalClientRegistry<ClientCapabilities>;
   private readonly chatActor: ChatCommandActor;
   private readonly catalogChatCreator: Pick<ChatCommandActor, 'createChat'>;
+  private readonly supportedCommandsProvider: ProtocolServerHandlerOptions['supportedCommandsProvider'];
   private readonly supportedResources: ReadonlySet<AgentResource> | undefined;
   private readonly acl: AccessControlList | ResourceAcl | undefined;
   private readonly principal: Principal | undefined;
@@ -256,6 +266,7 @@ export class ProtocolServerHandler {
     this.clientRegistry = clientRegistry;
     this.chatActor = chatActor;
     this.catalogChatCreator = options.catalogChatCreator ?? chatActor;
+    this.supportedCommandsProvider = options.supportedCommandsProvider;
     this.supportedResources = options.supportedResources === undefined
       ? undefined
       : new Set(options.supportedResources);
@@ -435,6 +446,9 @@ export class ProtocolServerHandler {
           return;
         case 'catalog/createChat':
           await this.handleCreateChat(context, request.id, this.parseParams(request, catalogCreateChatParamsSchema));
+          return;
+        case 'chat/supportedCommands':
+          await this.handleSupportedCommands(context, request.id, this.parseParams(request, supportedCommandsParamsSchema));
           return;
         case 'chat/resolveApproval':
           await this.handleResolveApproval(context, request.id, this.parseParams(request, resolveApprovalParamsSchema));
@@ -859,6 +873,7 @@ export class ProtocolServerHandler {
           {
             workspaceId: params.workspaceId,
             modelId: params.modelId,
+            ...(params.effort === undefined ? {} : { effort: params.effort }),
             ...(params.initialPrompt === undefined ? {} : { initialPrompt: params.initialPrompt }),
           },
         );
@@ -866,6 +881,20 @@ export class ProtocolServerHandler {
       this.clientRegistry.recordProcessedClientSeq(clientId, params.clientSeq);
     }
     await this.trySendResponse(context, id, { receipt });
+  }
+
+  private async handleSupportedCommands(
+    context: ConnectionContext,
+    id: JsonRpcId,
+    params: SupportedCommandsParams,
+  ): Promise<void> {
+    this.requireCurrentClient(context);
+    this.requireAuthorized(context, 'read', params.channel);
+    this.requireSubscribedChannel(context, params.channel);
+    const commands = this.supportedCommandsProvider === undefined
+      ? []
+      : await this.supportedCommandsProvider(params.channel);
+    await this.trySendResponse(context, id, { commands });
   }
 
   private async handleResolveApproval(

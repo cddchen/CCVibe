@@ -4,9 +4,18 @@ import {
   parseHostCreateChatResult,
   parseHostDispatchActionResult,
   parseHostRpcResult,
+  parseHostSupportedCommandsResult,
 } from '../src/protocol/hostWire';
 
 describe('Host Phase 1 command receipts', () => {
+  it('parses Host-provided slash commands without inventing client commands', () => {
+    expect(parseHostSupportedCommandsResult({
+      commands: [{ name: 'animate', description: 'Add motion', argumentHint: '<target>', aliases: ['motion'] }],
+    })).toEqual({
+      commands: [{ name: 'animate', description: 'Add motion', argumentHint: '<target>', aliases: ['motion'] }],
+    });
+  });
+
   it('parses the exact accepted ChatUri receipt returned by catalog/createChat', () => {
     const result = parseHostCreateChatResult({
       receipt: {

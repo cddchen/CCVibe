@@ -26,6 +26,7 @@ export type ChatCommandReceipt = CommandReceipt<ChatCommandAcceptedValue>;
 export interface CatalogCreateChatInput {
   readonly workspaceId: WorkspaceId;
   readonly modelId: ModelId;
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   readonly initialPrompt?: string;
 }
 

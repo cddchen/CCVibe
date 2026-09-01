@@ -1,6 +1,8 @@
 import type {
   AnyZodRawShape,
   InferShape,
+  ModelInfo,
+  Query,
   SdkMcpToolDefinition,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -252,6 +254,72 @@ describe('ClaudeAgentSdkService loading', () => {
 });
 
 describe('ClaudeAgentSdkService passthrough facade', () => {
+  it('reads supported models from an initialized Query and always cleans up the probe', async () => {
+    const calls = new Map<ClaudeSdkBindingName, readonly unknown[]>();
+    const models = [{
+      value: 'sonnet',
+      displayName: 'Claude Sonnet',
+      description: 'A model',
+    }] satisfies ModelInfo[];
+    let queryClosed = 0;
+    let warmClosed = 0;
+    const query = {
+      supportedModels: async () => models,
+      close: () => {
+        queryClosed += 1;
+      },
+    } as unknown as Query;
+    const warm = {
+      query: () => query,
+      close: () => {
+        warmClosed += 1;
+      },
+    } as unknown as BindingResult<'startup'>;
+    const defaultBindings = makeFakeBindings(calls);
+    const bindings: ClaudeSdkBindings = {
+      ...defaultBindings,
+      startup: (...args: BindingParameters<'startup'>): ReturnType<ClaudeSdkBindings['startup']> => {
+        calls.set('startup', args);
+        return Promise.resolve(warm);
+      },
+    };
+    const service = makeService(async () => bindings);
+
+    await expect(service.listSupportedModels('/tmp/project')).resolves.toEqual(models);
+    expect(queryClosed).toBe(1);
+    expect(warmClosed).toBe(1);
+    expect((calls.get('startup')?.[0] as { options?: { cwd?: string } } | undefined)?.options?.cwd)
+      .toBe('/tmp/project');
+  });
+
+  it('falls back to initializationResult.models for older Query implementations', async () => {
+    const calls = new Map<ClaudeSdkBindingName, readonly unknown[]>();
+    const models = [{
+      value: 'opus',
+      displayName: 'Claude Opus',
+      description: 'A model',
+    }] satisfies ModelInfo[];
+    const query = {
+      initializationResult: async () => ({ models }),
+      close: () => undefined,
+    } as unknown as Query;
+    const warm = {
+      query: () => query,
+      close: () => undefined,
+    } as unknown as BindingResult<'startup'>;
+    const defaultBindings = makeFakeBindings(calls);
+    const bindings: ClaudeSdkBindings = {
+      ...defaultBindings,
+      startup: (...args: BindingParameters<'startup'>): ReturnType<ClaudeSdkBindings['startup']> => {
+        calls.set('startup', args);
+        return Promise.resolve(warm);
+      },
+    };
+    const service = makeService(async () => bindings);
+
+    await expect(service.listSupportedModels()).resolves.toEqual(models);
+  });
+
   it('preserves every binding argument and result identity', async () => {
     const calls = new Map<ClaudeSdkBindingName, readonly unknown[]>();
     const bindings = makeFakeBindings(calls);

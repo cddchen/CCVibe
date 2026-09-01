@@ -166,8 +166,8 @@ async function createConfiguredHost(config: AgentHostServerConfig): Promise<Agen
     nowServer: () => new Date().toISOString(),
     nowAction: () => new Date().toISOString(),
     catalog: {
-      workspaces: config.allowedWorkspaces,
-      models: config.models,
+      ...(config.allowedWorkspaces.length === 0 ? {} : { workspaces: config.allowedWorkspaces }),
+      ...(config.models.length === 0 ? {} : { models: config.models }),
       ...(config.defaultModelId === undefined ? {} : { defaultModelId: config.defaultModelId }),
     },
     server: {

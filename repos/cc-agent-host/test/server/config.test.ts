@@ -118,6 +118,19 @@ describe('agent host environment configuration', () => {
     expect(parseAgentHostConfig(environment).host).toBe('0.0.0.0');
   });
 
+  it('allows production catalog discovery without explicit workspace/model JSON', () => {
+    const environment = validEnvironment();
+    environment.CCVIBE_ENV = 'production';
+    delete environment.CCVIBE_ALLOWED_WORKSPACES_JSON;
+    delete environment.CCVIBE_MODEL_CATALOG_JSON;
+    delete environment.CCVIBE_DEFAULT_MODEL_ID;
+
+    const config = parseAgentHostConfig(environment);
+
+    expect(config.allowedWorkspaces).toEqual([]);
+    expect(config.models).toEqual([]);
+  });
+
   it('requires the default model to be present in the catalog', () => {
     const environment = validEnvironment();
     environment.CCVIBE_DEFAULT_MODEL_ID = 'unknown-model';
