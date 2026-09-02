@@ -452,7 +452,43 @@ describe('ClaudeQueryRuntime', () => {
       type: 'runtime/init',
       generation: 7,
       sdkSessionId: SESSION_ID,
+      model: 'claude-sonnet',
+      permissionMode: 'default',
       capabilities: { interrupt_receipt_v1: true },
+    });
+  });
+
+  it('attributes a follow-up response as soon as the SDK consumes its input without requiring a user echo', async () => {
+    const harness = makeHarness();
+    await harness.runtime.start();
+
+    const first = harness.runtime.send(turn('turn-1'), 'first');
+    await harness.warm.acceptNext();
+    await first.accepted;
+    harness.query.yield(successMessage(first.sdkUuid));
+    await first.completed;
+
+    const second = harness.runtime.send(turn('turn-2'), 'follow up');
+    await harness.warm.acceptNext();
+    await second.accepted;
+    // Real SDK versions may start streaming the assistant response without
+    // first echoing an SDKUserMessage for the streamed input.
+    harness.query.yield(assistantMessage());
+    await flush();
+
+    const assistantSignal = [...harness.signals].reverse().find(
+      (signal): signal is Extract<ClaudeRuntimeSignal, { type: 'runtime/message' }> =>
+        signal.type === 'runtime/message' && signal.message.type === 'assistant',
+    );
+    expect(assistantSignal).toMatchObject({
+      phase: 'active',
+      turnId: second.turnId,
+    });
+
+    harness.query.yield(successMessage(second.sdkUuid));
+    await expect(second.completed).resolves.toEqual({
+      status: 'completed',
+      resultSubtype: 'success',
     });
   });
 

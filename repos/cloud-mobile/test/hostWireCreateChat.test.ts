@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseHostCreateChatResult,
+  parseHostConfigureChatResult,
   parseHostDispatchActionResult,
   parseHostRpcResult,
   parseHostSupportedCommandsResult,
@@ -46,5 +47,18 @@ describe('Host Phase 1 command receipts', () => {
     expect(() => parseHostDispatchActionResult({
       receipt: { status: 'accepted', value: { acceptedAtSeq: 12 }, extra: true },
     })).toThrow(TypeError);
+  });
+
+  it('parses the authoritative configuration returned by the Host', () => {
+    expect(parseHostConfigureChatResult({
+      config: { modelId: 'claude-sonnet', effort: 'xhigh', permissionMode: 'plan' },
+    })).toEqual({
+      config: { modelId: 'claude-sonnet', effort: 'xhigh', permissionMode: 'plan' },
+    });
+    expect(parseHostRpcResult('chat/configure', {
+      config: { modelId: 'claude-sonnet', permissionMode: 'default' },
+    })).toEqual({
+      config: { modelId: 'claude-sonnet', permissionMode: 'default' },
+    });
   });
 });

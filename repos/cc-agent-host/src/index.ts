@@ -44,6 +44,8 @@ export type {
   ClientAction,
   CatalogCreateChatParams,
   CatalogCreateChatResult,
+  ResolveWorkspaceParams,
+  ResolveWorkspaceResult,
   DispatchActionParams,
   DispatchActionResult,
   InitializeParams,
@@ -63,6 +65,9 @@ export {
   catalogCreateChatParamsSchema,
   catalogCreateChatSchema,
   createChatParamsSchema,
+  resolveWorkspaceParamsSchema,
+  resolveWorkspaceSchema,
+  workspacePathSchema,
   inputRequestIdSchema,
   resolveApprovalParamsSchema,
   resolveApprovalSchema,
@@ -79,6 +84,7 @@ export {
   MAX_PROTOCOL_VERSIONS,
   MAX_RESOURCE_URI_BYTES,
   MAX_SUBSCRIPTIONS,
+  MAX_WORKSPACE_PATH_BYTES,
   MAX_URI_SEGMENT_BYTES,
   PROTOCOL_VERSION,
 } from './protocol/limits.js';
@@ -192,6 +198,7 @@ export type {
   ProtocolAuthorizationOptions,
   ProtocolPrincipalResolver,
   ProtocolServerHandlerOptions,
+  ProtocolWorkspaceResolver,
   ReconnectRpcResult,
 } from './protocol/protocolServerHandler.js';
 export { SequencerByKey } from './chat/sequencer.js';
@@ -297,8 +304,24 @@ export type { ClaudeAgentSdkServiceOptions } from './claude/claudeAgentSdkServic
 export {
   projectCatalogModels,
   projectCatalogSessions,
+  projectCatalogWorkspace,
   projectCatalogWorkspaces,
 } from './claude/catalogSource.js';
+export {
+  createFilesystemWorkspaceResolver,
+  resolveFilesystemWorkspace,
+} from './claude/workspaceResolver.js';
+export {
+  WorkspaceResolverError,
+  WORKSPACE_RESOLVE_ERROR_CODES,
+} from './catalog/workspaceResolver.js';
+export type {
+  FilesystemWorkspaceResolver,
+  WorkspaceFilesystem,
+} from './claude/workspaceResolver.js';
+export type {
+  WorkspaceResolveErrorCode,
+} from './catalog/workspaceResolver.js';
 export type {
   CatalogSdkModelInfo,
   CatalogListSessionInfo,

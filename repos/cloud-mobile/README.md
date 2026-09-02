@@ -41,6 +41,28 @@ cd /Users/cdd/Documents/ClaudeCodeRemote/CCVibe/repos/cloud-mobile
 npm install
 ```
 
+推荐使用项目内置命令，产物统一写入 `.build-artifacts`：
+
+```bash
+# 一次打包 iOS 真机 IPA 和 Android release APK
+npm run build:mobile:release
+
+# 只打 iOS 真机 IPA（需要先在 Xcode 登录并配置签名证书）
+npm run build:ios:device
+
+# 只打 Android release APK
+npm run build:android:release
+```
+
+默认产物：
+
+```text
+.build-artifacts/Cloud-0.1.0-ios-device.ipa
+.build-artifacts/Cloud-0.1.0-android-release.apk
+```
+
+脚本会自动读取 `package.json` 版本号和 Xcode 工程中的 Development Team。需要覆盖签名 Team 时，可执行 `IOS_DEVELOPMENT_TEAM=<Team ID> npm run build:ios:device`。
+
 ### Android APK
 
 首次构建或本地尚无 `android` 目录时，先生成原生工程：
@@ -93,7 +115,7 @@ NODE_ENV=production xcodebuild \
   -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath build-artifacts/ios-derived \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGN_STYLE=Automatic \
   ARCHS=arm64 \
   ONLY_ACTIVE_ARCH=YES \
   build

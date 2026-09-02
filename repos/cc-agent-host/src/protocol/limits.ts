@@ -33,6 +33,9 @@ export const MAX_HOST_EPOCH_BYTES = MAX_OPAQUE_ID_BYTES;
 /** Maximum UTF-8 size of a chat/send prompt. */
 export const MAX_PROMPT_BYTES = 256 * 1024;
 
+/** Maximum UTF-8 size of one user-supplied workspace path. */
+export const MAX_WORKSPACE_PATH_BYTES = 4096;
+
 /** Maximum UTF-8 size accepted for one incoming JSON frame. */
 export const MAX_JSON_FRAME_BYTES = 512 * 1024;
 

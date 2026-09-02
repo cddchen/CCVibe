@@ -86,6 +86,14 @@ const modelSchema = z.object({
   displayName: requiredTextSchema,
   description: textSchema.optional(),
   capabilities: z.array(z.enum(['effort', 'adaptive-thinking', 'fast-mode', 'auto-mode'])).readonly(),
+  supportedEffortLevels: z.array(z.enum(['low', 'medium', 'high', 'xhigh', 'max'])).readonly().optional(),
+}).strict();
+
+const permissionModeSchema = z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']);
+const permissionModeOptionSchema = z.object({
+  id: permissionModeSchema,
+  displayName: requiredTextSchema,
+  description: requiredTextSchema,
 }).strict();
 
 const catalogSessionSchema = z.object({
@@ -96,6 +104,10 @@ const catalogSessionSchema = z.object({
   updatedAt: requiredTextSchema,
   status: z.enum(['idle', 'in_progress', 'input_needed', 'error']),
   archived: z.boolean(),
+  /** Optional for sessions whose historical transcript has no model metadata. */
+  modelId: opaqueIdSchema.optional(),
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  permissionMode: permissionModeSchema.optional(),
 }).strict();
 
 export const hostRootCatalogStateSchema = z.object({
@@ -105,6 +117,8 @@ export const hostRootCatalogStateSchema = z.object({
   workspaces: z.array(workspaceSchema).readonly(),
   sessions: z.array(catalogSessionSchema).readonly(),
   models: z.array(modelSchema).readonly(),
+  permissionModes: z.array(permissionModeOptionSchema).readonly().optional(),
+  defaultPermissionMode: permissionModeSchema.optional(),
   defaultModelId: opaqueIdSchema.optional(),
   modifiedAt: textSchema,
 }).strict();
@@ -372,9 +386,37 @@ export interface HostCreateChatParams {
   readonly workspaceId: string;
   readonly modelId: string;
   readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly permissionMode?: HostPermissionMode;
   readonly initialPrompt?: string;
   readonly clientSeq: number;
   readonly commandId: string;
+}
+
+/** Resolve a user-entered workspace path against the Host's real workspace catalog. */
+export interface HostResolveWorkspaceParams {
+  readonly channel: RootUri;
+  readonly path: string;
+}
+
+export interface HostResolveWorkspaceResult {
+  readonly workspace: HostRootCatalogState['workspaces'][number];
+}
+
+export type HostPermissionMode = z.infer<typeof permissionModeSchema>;
+
+export interface HostConfigureChatParams {
+  readonly channel: ChatUri;
+  readonly modelId?: string;
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly permissionMode?: HostPermissionMode;
+}
+
+export interface HostConfigureChatResult {
+  readonly config: {
+    readonly modelId?: string;
+    readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    readonly permissionMode: HostPermissionMode;
+  };
 }
 
 export interface HostDispatchActionParams {
@@ -615,6 +657,14 @@ export function parseHostCreateChatResult(value: unknown): HostCreateChatResult 
   return deepFreeze({ receipt: accepted });
 }
 
+const resolveWorkspaceResultSchema = z.object({
+  workspace: workspaceSchema,
+}).strict();
+
+export function parseHostResolveWorkspaceResult(value: unknown): HostResolveWorkspaceResult {
+  return parseWithSchema(resolveWorkspaceResultSchema, value, 'catalog/resolveWorkspace result');
+}
+
 export function parseHostDispatchActionResult(value: unknown): HostDispatchActionResult {
   const base = parseWithSchema(z.object({ receipt: commandReceiptSchema }).strict(), value, 'dispatchAction result');
   if (base.receipt.status === 'rejected') {
@@ -657,6 +707,18 @@ export function parseHostInteractionResolutionResult(value: unknown): HostIntera
   return deepFreeze({ receipt: accepted });
 }
 
+const configureChatResultSchema = z.object({
+  config: z.object({
+    modelId: opaqueIdSchema.optional(),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    permissionMode: permissionModeSchema,
+  }).strict(),
+}).strict();
+
+export function parseHostConfigureChatResult(value: unknown): HostConfigureChatResult {
+  return parseWithSchema(configureChatResultSchema, value, 'configure chat result');
+}
+
 export function parseHostNotification(value: unknown): HostNotification | undefined {
   const base = parseWithSchema(z.object({
     jsonrpc: z.literal('2.0'),
@@ -686,10 +748,14 @@ export function parseHostRpcResult(method: string, value: unknown): unknown {
       return parseHostUnsubscribeResult(value);
     case 'catalog/createChat':
       return parseHostCreateChatResult(value);
+    case 'catalog/resolveWorkspace':
+      return parseHostResolveWorkspaceResult(value);
     case 'dispatchAction':
       return parseHostDispatchActionResult(value);
     case 'chat/supportedCommands':
       return parseHostSupportedCommandsResult(value);
+    case 'chat/configure':
+      return parseHostConfigureChatResult(value);
     case 'chat/resolveApproval':
     case 'chat/resolveInput':
       return parseHostInteractionResolutionResult(value);

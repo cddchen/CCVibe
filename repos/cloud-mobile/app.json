@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cloud",
     "slug": "cloud-mobile",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "orientation": "default",
     "scheme": "cloud",
     "userInterfaceStyle": "automatic",
@@ -10,12 +10,14 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.ccvibe.cloud",
+      "buildNumber": "2",
       "infoPlist": {
         "CADisableMinimumFrameDurationOnPhone": true
       }
     },
     "android": {
-      "package": "com.ccvibe.cloud"
+      "package": "com.ccvibe.cloud",
+      "versionCode": 2
     },
     "plugins": [
       "expo-router",

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { basename, isAbsolute, normalize, parse as parsePath } from 'node:path';
 
-import type { ModelInfo } from '@anthropic-ai/claude-agent-sdk';
+import type { ModelInfo, SessionMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import type { ClaudeAgentSdkService } from './claudeAgentSdkService.js';
 import {
@@ -13,6 +13,8 @@ import {
   type CatalogSession,
   type CatalogWorkspace,
   type CatalogWorkspaceInput,
+  type CatalogEffortLevel,
+  normalizeCatalogSessionConfiguration,
 } from '../catalog/types.js';
 import { createWorkspaceId } from '../domain/ids.js';
 import { createChatUri } from '../domain/resources.js';
@@ -38,6 +40,12 @@ export type CatalogListSessionsParameters = Parameters<ClaudeAgentSdkService['li
 export type CatalogListSessionsResult = Awaited<ReturnType<ClaudeAgentSdkService['listSessions']>>;
 export type CatalogListSessionInfo = CatalogListSessionsResult[number];
 
+/** Configuration observed while reading one SDK transcript. */
+export interface CatalogSessionConfiguration {
+  readonly modelId?: CatalogModel['id'];
+  readonly effort?: CatalogEffortLevel;
+}
+
 /** The SDK fields used to build the protocol-owned model catalog. */
 export type CatalogSdkModelInfo = Pick<
   ModelInfo,
@@ -46,6 +54,7 @@ export type CatalogSdkModelInfo = Pick<
   | 'displayName'
   | 'description'
   | 'supportsEffort'
+  | 'supportedEffortLevels'
   | 'supportsAdaptiveThinking'
   | 'supportsFastMode'
   | 'supportsAutoMode'
@@ -66,18 +75,26 @@ export function projectCatalogWorkspaces(
     if (cwd === undefined || !isAbsolute(cwd)) {
       continue;
     }
-    const normalized = normalize(cwd);
-    const root = parsePath(normalized).root;
-    const path = normalized === root ? normalized : normalized.replace(/[\\/]+$/u, '');
-    if (paths.has(path)) {
+    const workspace = projectCatalogWorkspace(cwd);
+    if (paths.has(workspace.path)) {
       continue;
     }
-    paths.add(path);
-    workspaces.push({
-      ...createCatalogWorkspace(path),
-    });
+    paths.add(workspace.path);
+    workspaces.push(workspace);
   }
   return Object.freeze(workspaces);
+}
+
+/**
+ * Project one canonical/absolute filesystem path using the same stable ID
+ * algorithm as SDK session discovery.
+ *
+ * The caller that owns filesystem access must resolve symlinks first. This
+ * helper only normalizes the path representation and projects protocol data;
+ * it never probes the filesystem.
+ */
+export function projectCatalogWorkspace(path: string): CatalogWorkspace {
+  return createCatalogWorkspace(normalizeCatalogWorkspacePath(path));
 }
 
 /** Project SDK model metadata into the deliberately small wire catalog shape. */
@@ -101,7 +118,10 @@ export function projectCatalogModels(
     }
 
     const capabilities = [
-      ...(sdkModel.supportsEffort === true ? ['effort' as const] : []),
+      ...(sdkModel.supportsEffort === true
+        || (sdkModel.supportedEffortLevels !== undefined && sdkModel.supportedEffortLevels.length > 0)
+        ? ['effort' as const]
+        : []),
       ...(sdkModel.supportsAdaptiveThinking === true ? ['adaptive-thinking' as const] : []),
       ...(sdkModel.supportsFastMode === true ? ['fast-mode' as const] : []),
       ...(sdkModel.supportsAutoMode === true ? ['auto-mode' as const] : []),
@@ -116,6 +136,9 @@ export function projectCatalogModels(
         displayName: sdkModel.displayName.trim(),
         ...(description === undefined ? {} : { description }),
         capabilities,
+        ...(sdkModel.supportedEffortLevels === undefined
+          ? {}
+          : { supportedEffortLevels: sdkModel.supportedEffortLevels }),
       });
       ids.add(sdkModel.value);
       models.push(model);
@@ -132,6 +155,9 @@ export function projectCatalogSessions(
   sdkSessions: CatalogListSessionsResult,
   workspaces: readonly CatalogWorkspace[],
   hostEpoch: string,
+  configurations?: ReadonlyMap<string, CatalogSessionConfiguration>,
+  models: readonly CatalogModel[] = [],
+  defaultModelId?: CatalogModel['id'],
 ): readonly CatalogSession[] {
   const sessions: CatalogSession[] = [];
   const sessionIds = new Set<string>();
@@ -151,6 +177,15 @@ export function projectCatalogSessions(
       throw new TypeError('SDK session lastModified must be finite');
     }
     const updatedAt = new Date(sdkSession.lastModified).toISOString();
+    const observedConfiguration = configurations?.get(sdkSession.sessionId);
+    // Configuration values can originate in persisted overlays or an SDK
+    // adapter, so never publish them without resolving against real catalog
+    // entries. An empty catalog consequently removes unresolvable values.
+    const configuration = normalizeCatalogSessionConfiguration(
+      observedConfiguration ?? {},
+      models,
+      defaultModelId,
+    );
     sessions.push(createCatalogSession({
       chatUri: createChatUri(hostEpoch, sdkSession.sessionId),
       sdkSessionRef: sdkSession.sessionId,
@@ -159,10 +194,67 @@ export function projectCatalogSessions(
       updatedAt,
       status: 'idle',
       archived: false,
+      ...(configuration?.modelId === undefined ? {} : { modelId: configuration.modelId }),
+      ...(configuration?.effort === undefined ? {} : { effort: configuration.effort }),
     }));
     sessionIds.add(sdkSession.sessionId);
   }
   return Object.freeze(sessions);
+}
+
+/**
+ * Read the model emitted in an SDK assistant transcript message.
+ *
+ * SDKSessionInfo intentionally omits model and effort. Assistant messages do
+ * retain their actual model. Newer SDK transcript shapes may expose an effort
+ * or effortLevel field, so those values are accepted only after the same
+ * catalog/model capability normalization as persisted host configuration.
+ */
+export function projectSessionConfiguration(
+  messages: readonly SessionMessage[],
+  models: readonly CatalogModel[] = [],
+  defaultModelId?: CatalogModel['id'],
+): CatalogSessionConfiguration {
+  let rawModel: unknown;
+  let rawEffort: unknown;
+  let modelObserved = false;
+  let effortObserved = false;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.type !== 'assistant') {
+      continue;
+    }
+    const envelope = asRecord(message?.message);
+    if (envelope === undefined) {
+      continue;
+    }
+
+    if (!modelObserved && typeof envelope.model === 'string' && envelope.model.trim().length > 0) {
+      rawModel = envelope.model.trim();
+      modelObserved = true;
+    }
+
+    if (!effortObserved) {
+      if (Object.prototype.hasOwnProperty.call(envelope, 'effort')) {
+        rawEffort = envelope.effort;
+        effortObserved = true;
+      } else if (Object.prototype.hasOwnProperty.call(envelope, 'effortLevel')) {
+        rawEffort = envelope.effortLevel;
+        effortObserved = true;
+      }
+    }
+
+    if (modelObserved && effortObserved) {
+      break;
+    }
+  }
+
+  return normalizeCatalogSessionConfiguration(
+    { modelId: rawModel, effort: rawEffort },
+    models,
+    defaultModelId,
+  );
 }
 
 function createCatalogWorkspace(path: string): CatalogWorkspace {
@@ -175,6 +267,15 @@ function createCatalogWorkspace(path: string): CatalogWorkspace {
       displayName,
     }),
   };
+}
+
+function normalizeCatalogWorkspacePath(value: string): string {
+  if (typeof value !== 'string' || value.includes('\0') || !isAbsolute(value)) {
+    throw new TypeError('workspace.path must be an absolute path');
+  }
+  const normalized = normalize(value);
+  const root = parsePath(normalized).root;
+  return normalized === root ? normalized : normalized.replace(/[\\/]+$/u, '');
 }
 
 function findWorkspace(
@@ -196,4 +297,11 @@ function sessionTitle(session: CatalogListSessionInfo): string {
     }
   }
   return 'Untitled chat';
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
 }

@@ -6,6 +6,7 @@ import {
   type CloudRuntimeDependencies,
   type RuntimeSupervisor,
 } from '../src/features/runtime/runtimeStore';
+import { TransportRpcError } from '../src/sync/transport';
 
 function createCatalog() {
   return {
@@ -104,5 +105,85 @@ describe('Cloud runtime new-chat flow', () => {
     expect(harness.dispatchParams.action).toEqual({ type: 'chat/send', prompt: '检查连接' });
     expect(harness.dispatchParams.clientSeq).toBeGreaterThan(1);
     expect(harness.dispatchParams.commandId).not.toBe(harness.createParams.commandId);
+  });
+
+  it('subscribes before sending a configuration mutation to the Host', async () => {
+    const harness = createSupervisorHarness();
+    const chatUri = 'agent-chat://session-a/chat-a' as ChatUri;
+    let configured: unknown;
+    const supervisor: RuntimeSupervisor = {
+      ...harness.supervisor,
+      configureChat: async (params) => {
+        configured = params;
+        return { config: { modelId: params.modelId, effort: params.effort, permissionMode: params.permissionMode ?? 'default' } };
+      },
+    };
+    const runtime = new CloudRuntime(dependencies(supervisor));
+    runtime.hydrateForTest({ catalog: createCatalog(), syncStatus: 'connected', supervisor });
+
+    const result = await runtime.actions.configureChat({ channel: chatUri, modelId: 'model-a', effort: 'high', permissionMode: 'plan' });
+
+    expect(result).toMatchObject({ status: 'accepted', operation: 'configure', chatUri });
+    expect(harness.calls).toContain(`subscribe:${chatUri}`);
+    expect(configured).toEqual({ channel: chatUri, modelId: 'model-a', effort: 'high', permissionMode: 'plan' });
+  });
+
+  it('resolves a manually entered workspace through the Host and selects its returned id', async () => {
+    const harness = createSupervisorHarness();
+    const resolvedWorkspace = {
+      id: 'workspace-resolved',
+      path: '/tmp/resolved-workspace',
+      displayName: 'Resolved Workspace',
+      status: 'available' as const,
+    };
+    let params: unknown;
+    const supervisor: RuntimeSupervisor = {
+      ...harness.supervisor,
+      resolveWorkspace: async (request) => {
+        params = request;
+        return { workspace: resolvedWorkspace };
+      },
+    };
+    const runtime = new CloudRuntime(dependencies(supervisor));
+    runtime.hydrateForTest({ catalog: createCatalog(), syncStatus: 'connected', supervisor });
+
+    const result = await runtime.actions.resolveWorkspace('/tmp/resolved-workspace');
+
+    expect(result).toEqual({ status: 'accepted', workspace: resolvedWorkspace });
+    expect(params).toEqual({ channel: 'agent-root://', path: '/tmp/resolved-workspace' });
+    expect(runtime.getState().selection.workspaceId).toBe('workspace-resolved');
+  });
+
+  it('maps stable Host workspace validation codes to local user-facing copy', async () => {
+    const harness = createSupervisorHarness();
+    const path = '/private/secret/path';
+    const supervisor: RuntimeSupervisor = {
+      ...harness.supervisor,
+      resolveWorkspace: async () => {
+        throw new TransportRpcError({
+          code: -32004,
+          message: 'Resource not found',
+          data: { code: 'WORKSPACE_NOT_FOUND' },
+        });
+      },
+    };
+    const runtime = new CloudRuntime(dependencies(supervisor));
+    runtime.hydrateForTest({ catalog: createCatalog(), syncStatus: 'connected', supervisor });
+
+    const result = await runtime.actions.resolveWorkspace(path);
+
+    expect(result).toEqual({
+      status: 'error',
+      operation: 'workspace',
+      code: 'WORKSPACE_NOT_FOUND',
+      message: '找不到这个工作区路径',
+    });
+    expect(runtime.getState().operationError).toEqual({
+      operation: 'workspace',
+      code: 'WORKSPACE_NOT_FOUND',
+      message: '找不到这个工作区路径',
+    });
+    expect(JSON.stringify(result)).not.toContain(path);
+    expect(JSON.stringify(result)).not.toContain('Resource not found');
   });
 });

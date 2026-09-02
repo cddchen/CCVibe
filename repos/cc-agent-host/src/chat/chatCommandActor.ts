@@ -27,6 +27,7 @@ export interface CatalogCreateChatInput {
   readonly workspaceId: WorkspaceId;
   readonly modelId: ModelId;
   readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
   readonly initialPrompt?: string;
 }
 

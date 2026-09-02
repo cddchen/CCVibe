@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createConnectionId } from '../src/protocol/ids';
+import { AGENT_ROOT_URI } from '../src/protocol/resourceUri';
 import { createSyncStore } from '../src/sync/syncState';
 import { TransportRpcError, type JsonRpcTransportPort, type TransportStatusEvent } from '../src/sync/transport';
 import type { HostNotification } from '../src/protocol/hostWire';
@@ -218,6 +219,53 @@ describe('connection supervisor', () => {
     transport.resolveRequest({ ...initializeResult() as object, hostEpoch: 'epoch-2' } as JsonValue);
     await flush();
     expect(store.getState()).toMatchObject({ status: 'connected', hostEpoch: 'epoch-2' });
+    supervisor.stop();
+  });
+
+  it('forwards catalog/resolveWorkspace and parses the returned workspace', async () => {
+    const timer = new ManualTimer();
+    const appState = new FakeAppState();
+    const store = createSyncStore({ address: 'wss://cloud.example.test', subscriptions: ['agent-root://'] });
+    const transport = new FakeTransport();
+    const supervisor = new ConnectionSupervisor({
+      config: { connectionId: createConnectionId('connection-d'), address: 'wss://cloud.example.test', token: 'secret', mode: 'production' },
+      clientId: 'client-d',
+      clientInfo: { name: 'Cloud', version: '0.2.0', platform: 'ios' },
+      store,
+      timer,
+      appState,
+      transportFactory: () => transport,
+    });
+
+    supervisor.start();
+    transport.resolveOpen();
+    await flush();
+    transport.resolveRequest(initializeResult());
+    await flush();
+
+    const resultPromise = supervisor.resolveWorkspace({ channel: AGENT_ROOT_URI, path: '/tmp/resolved-workspace' });
+    await flush();
+    expect(transport.requests[1]).toEqual({
+      method: 'catalog/resolveWorkspace',
+      params: { channel: 'agent-root://', path: '/tmp/resolved-workspace' },
+    });
+    transport.resolveRequest({
+      workspace: {
+        id: 'workspace-resolved',
+        path: '/tmp/resolved-workspace',
+        displayName: 'Resolved Workspace',
+        status: 'available',
+      },
+    });
+
+    await expect(resultPromise).resolves.toEqual({
+      workspace: {
+        id: 'workspace-resolved',
+        path: '/tmp/resolved-workspace',
+        displayName: 'Resolved Workspace',
+        status: 'available',
+      },
+    });
     supervisor.stop();
   });
 });

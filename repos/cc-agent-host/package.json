@@ -1,12 +1,19 @@
 {
-  "name": "@ccvibe/agent-host",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@cddchen/cloud",
+  "version": "0.2.0",
+  "description": "Run a Cloud Agent Host for Claude Code sessions.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "ccvibe-agent-host": "./dist/bin/agent-host.js"
+    "cloud": "dist/bin/cloud.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "exports": {
     ".": {
@@ -21,10 +28,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/bin/agent-host.js",
-    "start:dev": "npm run build && node dist/bin/agent-host.js",
-    "start:prod": "npm run build && node dist/bin/agent-host.js"
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "start": "node dist/bin/cloud.js start",
+    "start:dev": "npm run build && node dist/bin/cloud.js start",
+    "start:prod": "npm run build && node dist/bin/cloud.js start --env=production --foreground"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

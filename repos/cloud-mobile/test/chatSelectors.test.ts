@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildStructuredInputAnswers,
+  formatTurnDuration,
   parseMarkdownBlocks,
   selectChatViewModel,
   type PendingInputViewModel,
@@ -90,6 +91,55 @@ const chatState: HostChatState = {
 };
 
 describe('canonical chat selector', () => {
+  it('shows only server-canonical session model and effort values', () => {
+    const configured = selectChatViewModel({
+      chatUri,
+      chatState,
+      catalog: {
+        ...rootState,
+        sessions: [{ ...rootState.sessions[0], modelId: 'model-a', effort: 'high' }],
+      },
+    });
+    expect(configured.modelId).toBe('model-a');
+    expect(configured.modelDisplayName).toBe('GPT-5.6 Terra');
+    expect(configured.effort).toBe('high');
+
+    const unknown = selectChatViewModel({
+      chatUri,
+      chatState,
+      catalog: {
+        ...rootState,
+        sessions: [{ ...rootState.sessions[0], modelId: 'provider-model', effort: undefined }],
+      },
+    });
+    expect(unknown.modelId).toBeUndefined();
+    expect(unknown.modelDisplayName).toBeUndefined();
+    expect(unknown.effort).toBeUndefined();
+    expect(unknown.models[0]?.supportedEffortLevels).toEqual([]);
+
+    const unavailable = selectChatViewModel({ chatUri, chatState, catalog: rootState });
+    expect(unavailable.modelId).toBeUndefined();
+    expect(unavailable.modelDisplayName).toBeUndefined();
+    expect(unavailable.effort).toBeUndefined();
+
+    const unsupportedEffort = selectChatViewModel({
+      chatUri,
+      chatState,
+      catalog: {
+        ...rootState,
+        models: [{ ...rootState.models[0], supportedEffortLevels: ['low', 'medium'] }],
+        sessions: [{ ...rootState.sessions[0], modelId: 'model-a', effort: 'max' }],
+      },
+    });
+    expect(unsupportedEffort.effort).toBeUndefined();
+  });
+
+  it('formats duration only from valid non-negative timestamp pairs', () => {
+    expect(formatTurnDuration('2026-08-29T09:00:00.000Z', '2026-08-29T09:00:53.000Z')).toBe('用时0分53秒');
+    expect(formatTurnDuration('not-a-time', '2026-08-29T09:00:53.000Z')).toBeUndefined();
+    expect(formatTurnDuration('2026-08-29T09:01:00.000Z', '2026-08-29T09:00:53.000Z')).toBeUndefined();
+  });
+
   it('projects history and active turn without duplicating the active turn', () => {
     const view = selectChatViewModel({ chatUri, chatState, catalog: rootState });
 

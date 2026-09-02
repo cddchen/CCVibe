@@ -467,6 +467,8 @@ export class ClaudeQueryRuntime {
       type: 'runtime/init' as const,
       generation: this.generation,
       sdkSessionId: message.session_id,
+      model: message.model,
+      permissionMode: message.permissionMode,
       ...(capabilities === undefined ? {} : { capabilities }),
     } satisfies ClaudeRuntimeSignal;
     await this.emitSignal(signal);
@@ -551,6 +553,11 @@ export class ClaudeQueryRuntime {
     }
     entry.acceptedBySdk = true;
     this.sdkVisibleResultQueue.push({ kind: 'pending', turn: entry });
+    // Consuming the streamed SDK input is the authoritative boundary between
+    // the previous result tail and this turn. The SDK does not guarantee a
+    // user-message echo before assistant stream events, so waiting for that
+    // optional envelope misattributes every later response to the prior turn.
+    this.activeTurnId = entry.turnId;
   }
 
   private peekFirstSdkVisiblePending(): PendingTurn | undefined {

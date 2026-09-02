@@ -10,6 +10,7 @@ type HostActiveTurn = NonNullable<HostChatState['activeTurn']>;
 type HostPart = HostActiveTurn['parts'][number];
 type HostApproval = HostChatState['pendingApprovals'][number];
 type HostInput = NonNullable<HostChatState['pendingInputs']>[number];
+type EffortLevel = NonNullable<HostRootCatalogState['sessions'][number]['effort']>;
 
 export type MarkdownBlock =
   | { readonly kind: 'paragraph'; readonly text: string }
@@ -116,6 +117,18 @@ export interface ChatViewModel {
   readonly workspacePath: string;
   readonly hostStatus: 'online' | 'degraded' | 'offline';
   readonly hostStatusLabel: string;
+  /** Session model shown only when its server id maps to the current catalog. */
+  readonly modelId?: string;
+  readonly modelDisplayName?: string;
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly permissionMode?: NonNullable<HostRootCatalogState['sessions'][number]['permissionMode']>;
+  readonly models: readonly {
+    readonly id: string;
+    readonly displayName: string;
+    readonly description?: string;
+    readonly supportedEffortLevels: readonly ('low' | 'medium' | 'high' | 'xhigh' | 'max')[];
+  }[];
+  readonly permissionModes: NonNullable<HostRootCatalogState['permissionModes']>;
   readonly history: readonly ChatTurnViewModel[];
   readonly activeTurn?: ChatTurnViewModel;
   readonly transcript: readonly ChatTranscriptItem[];
@@ -161,6 +174,20 @@ export function selectChatViewModel(input: ChatSelectorInput): ChatViewModel {
   const pendingInputs = state?.pendingInputs?.map(projectInput) ?? [];
   const status = state?.status ?? (session === undefined ? 'missing' : 'loading');
   const hostStatus = input.catalog?.connection.displayStatus ?? 'offline';
+  const catalogModels = input.catalog?.models ?? [];
+  const resolvedModel = session?.modelId === undefined
+    ? undefined
+    : catalogModels.find((candidate) => candidate.id === session.modelId);
+  const supportedEffortLevels = resolvedModel === undefined
+    ? []
+    : resolveSupportedEffortLevels(resolvedModel);
+  // Keep an explicitly canonical session effort visible even when an older
+  // catalog omits its supported list; never synthesize the list itself.
+  const effort = resolvedModel !== undefined
+    && session?.effort !== undefined
+    && (resolvedModel.supportedEffortLevels === undefined || supportedEffortLevels.includes(session.effort))
+    ? session.effort
+    : undefined;
 
   return Object.freeze({
     status,
@@ -172,6 +199,16 @@ export function selectChatViewModel(input: ChatSelectorInput): ChatViewModel {
     workspacePath: workspace?.path ?? '',
     hostStatus,
     hostStatusLabel: hostStatusLabel(hostStatus),
+    ...(resolvedModel === undefined ? {} : { modelId: resolvedModel.id, modelDisplayName: resolvedModel.displayName }),
+    ...(effort === undefined ? {} : { effort }),
+    ...(session?.permissionMode === undefined ? {} : { permissionMode: session.permissionMode }),
+    models: Object.freeze(catalogModels.map((model) => Object.freeze({
+      id: model.id,
+      displayName: model.displayName,
+      ...(model.description === undefined ? {} : { description: model.description }),
+      supportedEffortLevels: resolveSupportedEffortLevels(model),
+    }))),
+    permissionModes: Object.freeze([...(input.catalog?.permissionModes ?? [])]),
     history: Object.freeze(history),
     ...(activeTurn === undefined ? {} : { activeTurn }),
     transcript: Object.freeze(transcript),
@@ -179,6 +216,15 @@ export function selectChatViewModel(input: ChatSelectorInput): ChatViewModel {
     pendingInputs: Object.freeze(pendingInputs),
     hasPendingInteraction: pendingApprovals.length > 0 || pendingInputs.length > 0,
   });
+}
+
+function resolveSupportedEffortLevels(
+  model: HostRootCatalogState['models'][number],
+): readonly EffortLevel[] {
+  if (model.supportedEffortLevels !== undefined) {
+    return Object.freeze([...model.supportedEffortLevels]);
+  }
+  return Object.freeze([]);
 }
 
 export function parseMarkdownBlocks(content: string): readonly MarkdownBlock[] {
@@ -265,6 +311,23 @@ export function summarizeTurnFailure(error: string | undefined): string {
   return message.length <= MAX_TURN_FAILURE_MESSAGE_LENGTH
     ? message
     : `${message.slice(0, MAX_TURN_FAILURE_MESSAGE_LENGTH - 1).trimEnd()}…`;
+}
+
+/** Format a turn duration only from valid, non-negative persisted timestamps. */
+export function formatTurnDuration(startedAt: string, completedAt: string): string | undefined {
+  const startedMs = Date.parse(startedAt);
+  const completedMs = Date.parse(completedAt);
+  if (
+    !Number.isFinite(startedMs)
+    || !Number.isFinite(completedMs)
+    || startedMs < 0
+    || completedMs < 0
+    || completedMs < startedMs
+  ) {
+    return undefined;
+  }
+  const elapsedSeconds = Math.floor((completedMs - startedMs) / 1000);
+  return `用时${Math.floor(elapsedSeconds / 60)}分${String(elapsedSeconds % 60).padStart(2, '0')}秒`;
 }
 
 function projectPart(part: HostPart): ChatPartViewModel {

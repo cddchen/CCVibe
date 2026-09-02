@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isAbsolute } from 'node:path';
 
 import type { CommandReceipt } from '../chat/commandDeduper.js';
 import {
@@ -31,6 +32,7 @@ import {
   MAX_PROTOCOL_VERSIONS,
   MAX_RESOURCE_URI_BYTES,
   MAX_SUBSCRIPTIONS,
+  MAX_WORKSPACE_PATH_BYTES,
   PROTOCOL_VERSION,
   utf8ByteLength,
 } from './limits.js';
@@ -45,6 +47,7 @@ export {
   MAX_PROTOCOL_VERSIONS,
   MAX_RESOURCE_URI_BYTES,
   MAX_SUBSCRIPTIONS,
+  MAX_WORKSPACE_PATH_BYTES,
   PROTOCOL_VERSION,
 };
 
@@ -250,6 +253,19 @@ export const reconnectParamsSchema = z
   })
   .strict();
 
+/** Client input is shape-checked here; filesystem existence is host-owned. */
+export const workspacePathSchema = boundedString('workspace path', MAX_WORKSPACE_PATH_BYTES)
+  .refine((value) => !value.includes('\0') && isAbsolute(value), {
+    message: 'workspace path must be an absolute path',
+  });
+
+export const resolveWorkspaceParamsSchema = z
+  .object({
+    channel: rootUriSchema,
+    path: workspacePathSchema,
+  })
+  .strict();
+
 export const dispatchActionParamsSchema = z
   .object({
     channel: chatUriSchema,
@@ -276,6 +292,7 @@ const modelIdSchema = parsedString(
 );
 
 export const effortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+export const permissionModeSchema = z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']);
 
 /** Create only a provisional chat backing; the first chat/send materializes it. */
 export const catalogCreateChatParamsSchema = z
@@ -284,17 +301,31 @@ export const catalogCreateChatParamsSchema = z
     workspaceId: workspaceIdSchema,
     modelId: modelIdSchema,
     effort: effortLevelSchema.optional(),
+    permissionMode: permissionModeSchema.optional(),
     initialPrompt: promptSchema.optional(),
     clientSeq: z.number().int().safe().positive(),
     commandId: commandIdSchema,
   })
   .strict();
 
+export const configureChatParamsSchema = z
+  .object({
+    channel: chatUriSchema,
+    modelId: modelIdSchema.optional(),
+    effort: effortLevelSchema.optional(),
+    permissionMode: permissionModeSchema.optional(),
+  })
+  .strict()
+  .refine((value) => value.modelId !== undefined || value.effort !== undefined || value.permissionMode !== undefined, {
+    message: 'at least one configuration field is required',
+  });
+
 /** Short aliases for consumers that name schemas after their RPC method. */
 export const initializeSchema = initializeParamsSchema;
 export const subscribeSchema = subscribeParamsSchema;
 export const unsubscribeSchema = unsubscribeParamsSchema;
 export const reconnectSchema = reconnectParamsSchema;
+export const resolveWorkspaceSchema = resolveWorkspaceParamsSchema;
 export const dispatchActionSchema = dispatchActionParamsSchema;
 export const catalogCreateChatSchema = catalogCreateChatParamsSchema;
 export const createChatParamsSchema = catalogCreateChatParamsSchema;
@@ -306,9 +337,11 @@ export type InitializeParams = z.infer<typeof initializeParamsSchema>;
 export type SubscribeParams = z.infer<typeof subscribeParamsSchema>;
 export type UnsubscribeParams = z.infer<typeof unsubscribeParamsSchema>;
 export type ReconnectParams = z.infer<typeof reconnectParamsSchema>;
+export type ResolveWorkspaceParams = z.infer<typeof resolveWorkspaceParamsSchema>;
 export type DispatchActionParams = z.infer<typeof dispatchActionParamsSchema>;
 export type SupportedCommandsParams = z.infer<typeof supportedCommandsParamsSchema>;
 export type CatalogCreateChatParams = z.infer<typeof catalogCreateChatParamsSchema>;
+export type ConfigureChatParams = z.infer<typeof configureChatParamsSchema>;
 export type ResolveApprovalParams = z.infer<typeof resolveApprovalParamsSchema>;
 export type ResolveInputParams = z.infer<typeof resolveInputParamsSchema>;
 
@@ -337,6 +370,10 @@ export interface DispatchActionResult {
 
 export interface CatalogCreateChatResult {
   readonly receipt: CommandReceipt<{ readonly chatUri: ChatUri }>;
+}
+
+export interface ResolveWorkspaceResult {
+  readonly workspace: import('../catalog/types.js').CatalogWorkspace;
 }
 
 export interface InteractionResolutionResult {

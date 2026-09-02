@@ -127,7 +127,7 @@ export default function ConnectionScreen(): JSX.Element {
               accessibilityLabel="返回首页"
               accessibilityRole="button"
               hitSlop={8}
-              onPress={() => router.replace('/')}
+              onPress={() => router.back()}
               style={({ pressed }) => [styles.headerIcon, pressed && styles.pressed]}
               testID="connection-back"
             >

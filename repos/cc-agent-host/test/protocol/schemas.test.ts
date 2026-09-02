@@ -13,6 +13,7 @@ import {
   MAX_OPAQUE_ID_BYTES,
   MAX_PROMPT_BYTES,
   MAX_SUBSCRIPTIONS,
+  MAX_WORKSPACE_PATH_BYTES,
   type ClientAction,
   type DispatchActionParams,
   type InitializeParams,
@@ -26,6 +27,7 @@ import {
   dispatchActionParamsSchema,
   initializeParamsSchema,
   reconnectParamsSchema,
+  resolveWorkspaceParamsSchema,
   rootUriSchema,
   subscribeParamsSchema,
   toSafeValidationIssues,
@@ -217,6 +219,9 @@ describe('Phase 1 protocol schemas', () => {
       subscriptions: [],
     }).success).toBe(false);
     expect(subscribeParamsSchema.safeParse({ channel: chat }).success).toBe(true);
+    expect(resolveWorkspaceParamsSchema.safeParse({ channel: root, path: '/tmp/project' }).success).toBe(true);
+    expect(resolveWorkspaceParamsSchema.safeParse({ channel: root, path: 'relative/project' }).success).toBe(false);
+    expect(resolveWorkspaceParamsSchema.safeParse({ channel: root, path: `/tmp/${'x'.repeat(MAX_WORKSPACE_PATH_BYTES)}` }).success).toBe(false);
   });
 
   it('rejects malformed URI/ID syntax and returns only safe validation metadata', () => {

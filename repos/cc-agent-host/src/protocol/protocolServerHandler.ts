@@ -10,6 +10,11 @@ import type {
   ChatCommandReceipt,
   CatalogCreateChatReceipt,
 } from '../chat/chatCommandActor.js';
+import type { CatalogWorkspace } from '../catalog/types.js';
+import {
+  WORKSPACE_RESOLVE_ERROR_CODES,
+  WorkspaceResolverError,
+} from '../catalog/workspaceResolver.js';
 import {
   authorizeResource,
   type AccessControlList,
@@ -45,21 +50,25 @@ import {
 import {
   dispatchActionParamsSchema,
   catalogCreateChatParamsSchema,
+  configureChatParamsSchema,
   initializeParamsSchema,
   reconnectParamsSchema,
   resolveApprovalParamsSchema,
   resolveInputParamsSchema,
+  resolveWorkspaceParamsSchema,
   subscribeParamsSchema,
   supportedCommandsParamsSchema,
   toSafeValidationIssues,
   unsubscribeParamsSchema,
   type DispatchActionParams,
   type CatalogCreateChatParams,
+  type ConfigureChatParams,
   type InitializeParams,
   type InitializeResult,
   type ReconnectParams,
   type ResolveApprovalParams,
   type ResolveInputParams,
+  type ResolveWorkspaceParams,
   type SubscribeParams,
   type SupportedCommandsParams,
   type SubscribeResult,
@@ -114,6 +123,12 @@ export type ProtocolPrincipalResolver = (
   connection: ProtocolConnection<unknown>,
 ) => Principal | undefined;
 
+/** Host-owned workspace path resolution; the protocol handler performs no I/O. */
+export type ProtocolWorkspaceResolver = (
+  channel: import('../domain/ids.js').RootUri,
+  path: string,
+) => CatalogWorkspace | PromiseLike<CatalogWorkspace>;
+
 /** Pure policy inputs consumed by the protocol authorization boundary. */
 export interface ProtocolAuthorizationOptions {
   /** One immutable policy value for all resources. */
@@ -152,6 +167,12 @@ export interface ProtocolServerHandlerOptions {
     readonly argumentHint: string;
     readonly aliases?: readonly string[];
   }[]>;
+  readonly chatConfigurator?: (
+    channel: import('../domain/ids.js').ChatUri,
+    patch: Omit<ConfigureChatParams, 'channel'>,
+  ) => Promise<Readonly<{ modelId?: string; effort?: string; permissionMode: string }>>;
+  /** Filesystem/host composition resolves and publishes a canonical workspace. */
+  readonly workspaceResolver?: ProtocolWorkspaceResolver;
   readonly supportedResources?: ReadonlySet<AgentResource>;
   /** Transport-neutral authentication and resource policy boundary. */
   readonly authorization?: ProtocolAuthorizationOptions;
@@ -215,7 +236,9 @@ const METHODS = new Set([
   'reconnect',
   'dispatchAction',
   'catalog/createChat',
+  'catalog/resolveWorkspace',
   'chat/supportedCommands',
+  'chat/configure',
   'chat/resolveApproval',
   'chat/resolveInput',
 ]);
@@ -235,6 +258,8 @@ export class ProtocolServerHandler {
   private readonly chatActor: ChatCommandActor;
   private readonly catalogChatCreator: Pick<ChatCommandActor, 'createChat'>;
   private readonly supportedCommandsProvider: ProtocolServerHandlerOptions['supportedCommandsProvider'];
+  private readonly chatConfigurator: ProtocolServerHandlerOptions['chatConfigurator'];
+  private readonly workspaceResolver: ProtocolServerHandlerOptions['workspaceResolver'];
   private readonly supportedResources: ReadonlySet<AgentResource> | undefined;
   private readonly acl: AccessControlList | ResourceAcl | undefined;
   private readonly principal: Principal | undefined;
@@ -267,6 +292,8 @@ export class ProtocolServerHandler {
     this.chatActor = chatActor;
     this.catalogChatCreator = options.catalogChatCreator ?? chatActor;
     this.supportedCommandsProvider = options.supportedCommandsProvider;
+    this.chatConfigurator = options.chatConfigurator;
+    this.workspaceResolver = options.workspaceResolver;
     this.supportedResources = options.supportedResources === undefined
       ? undefined
       : new Set(options.supportedResources);
@@ -447,8 +474,14 @@ export class ProtocolServerHandler {
         case 'catalog/createChat':
           await this.handleCreateChat(context, request.id, this.parseParams(request, catalogCreateChatParamsSchema));
           return;
+        case 'catalog/resolveWorkspace':
+          await this.handleResolveWorkspace(context, request.id, this.parseWorkspaceParams(request));
+          return;
         case 'chat/supportedCommands':
           await this.handleSupportedCommands(context, request.id, this.parseParams(request, supportedCommandsParamsSchema));
+          return;
+        case 'chat/configure':
+          await this.handleConfigureChat(context, request.id, this.parseParams(request, configureChatParamsSchema));
           return;
         case 'chat/resolveApproval':
           await this.handleResolveApproval(context, request.id, this.parseParams(request, resolveApprovalParamsSchema));
@@ -475,6 +508,19 @@ export class ProtocolServerHandler {
       });
     }
     return result.data;
+  }
+
+  private parseWorkspaceParams(request: JsonRpcRequest<unknown>): ResolveWorkspaceParams {
+    const result = resolveWorkspaceParamsSchema.safeParse(request.params);
+    if (result.success) {
+      return result.data;
+    }
+
+    const issues = toSafeValidationIssues(result.error);
+    const hasPathIssue = issues.some((issue) => issue.path[0] === 'path');
+    throw new ProtocolRequestError(JSON_RPC_ERRORS.InvalidParams, hasPathIssue
+      ? { code: WORKSPACE_RESOLVE_ERROR_CODES.invalidPath }
+      : { issues });
   }
 
   private async handleInitialize(
@@ -874,6 +920,7 @@ export class ProtocolServerHandler {
             workspaceId: params.workspaceId,
             modelId: params.modelId,
             ...(params.effort === undefined ? {} : { effort: params.effort }),
+            ...(params.permissionMode === undefined ? {} : { permissionMode: params.permissionMode }),
             ...(params.initialPrompt === undefined ? {} : { initialPrompt: params.initialPrompt }),
           },
         );
@@ -881,6 +928,22 @@ export class ProtocolServerHandler {
       this.clientRegistry.recordProcessedClientSeq(clientId, params.clientSeq);
     }
     await this.trySendResponse(context, id, { receipt });
+  }
+
+  private async handleResolveWorkspace(
+    context: ConnectionContext,
+    id: JsonRpcId,
+    params: ResolveWorkspaceParams,
+  ): Promise<void> {
+    this.requireCurrentClient(context);
+    this.requireAuthorized(context, 'configure', params.channel);
+    this.requireSubscribedChannel(context, params.channel);
+    if (this.workspaceResolver === undefined) {
+      throw new ProtocolRequestError(JSON_RPC_ERRORS.MethodNotFound);
+    }
+
+    const workspace = await this.workspaceResolver(params.channel, params.path);
+    await this.trySendResponse(context, id, { workspace });
   }
 
   private async handleSupportedCommands(
@@ -895,6 +958,22 @@ export class ProtocolServerHandler {
       ? []
       : await this.supportedCommandsProvider(params.channel);
     await this.trySendResponse(context, id, { commands });
+  }
+
+  private async handleConfigureChat(
+    context: ConnectionContext,
+    id: JsonRpcId,
+    params: ConfigureChatParams,
+  ): Promise<void> {
+    this.requireCurrentClient(context);
+    this.requireAuthorized(context, 'configure', params.channel);
+    this.requireSubscribedChannel(context, params.channel);
+    if (this.chatConfigurator === undefined) {
+      throw new ProtocolRequestError(JSON_RPC_ERRORS.MethodNotFound);
+    }
+    const { channel, ...patch } = params;
+    const config = await this.chatConfigurator(channel, patch);
+    await this.trySendResponse(context, id, { config });
   }
 
   private async handleResolveApproval(
@@ -1368,6 +1447,14 @@ function assertProtocolVersions(value: unknown): asserts value is readonly strin
 function mapProtocolError(error: unknown): ProtocolRequestError {
   if (error instanceof ProtocolRequestError) {
     return error;
+  }
+  if (error instanceof WorkspaceResolverError) {
+    const descriptor = error.code === WORKSPACE_RESOLVE_ERROR_CODES.invalidPath
+      ? JSON_RPC_ERRORS.InvalidParams
+      : error.code === WORKSPACE_RESOLVE_ERROR_CODES.notFound
+        ? JSON_RPC_ERRORS.ResourceNotFound
+        : JSON_RPC_ERRORS.CommandRejected;
+    return new ProtocolRequestError(descriptor, { code: error.code });
   }
   return new ProtocolRequestError(JSON_RPC_ERRORS.InternalError);
 }

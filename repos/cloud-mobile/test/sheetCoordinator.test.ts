@@ -1,0 +1,2 @@
+import { expect, it } from 'vitest'; import { nextRequestSheet } from '../src/features/chat/sheetCoordinator';
+it('serializes approval and input replacements', () => { expect(nextRequestSheet(undefined, 'approval').show).toBe('approval'); expect(nextRequestSheet('approval', 'input').dismissCurrent).toBe(true); expect(nextRequestSheet('input', 'approval').dismissCurrent).toBe(true); expect(nextRequestSheet(undefined, undefined).show).toBeUndefined(); });

@@ -20,6 +20,8 @@ export interface SessionViewModel {
   readonly updatedAt: string;
   readonly status: SessionViewStatus;
   readonly archived: boolean;
+  readonly modelId?: string;
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 export interface ModelViewModel {
@@ -73,6 +75,8 @@ export function projectRootCatalog(state: HostRootCatalogState, lastServerSeq: n
       updatedAt: session.updatedAt,
       status: projectSessionStatus(session.status),
       archived: session.archived,
+      ...(session.modelId === undefined ? {} : { modelId: session.modelId }),
+      ...(session.effort === undefined ? {} : { effort: session.effort }),
     }))),
     models: Object.freeze(state.models.map((model) => Object.freeze({
       id: model.id,

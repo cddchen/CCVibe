@@ -3,10 +3,10 @@ import { useRouter } from 'expo-router';
 import { memo, useCallback, useState, type ComponentProps, type JSX, type ReactNode } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   TextInput,
   View,
@@ -15,17 +15,34 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Menu, Text, useTheme, type MD3Theme } from 'react-native-paper';
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated';
+import { Text, useTheme, type MD3Theme } from 'react-native-paper';
+import Animated, {
+  Extrapolation,
+  interpolate,
+  measure,
+  useAnimatedRef,
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { useReanimatedKeyboardAnimation, useWindowDimensions } from 'react-native-keyboard-controller';
 
 import { GlassSurface } from '../../ui/glass/GlassSurface';
+import { BottomSheetFrame } from '../../ui/motion/BottomSheetMotion';
 import { useCloudActions, useCloudSelector } from '../runtime/CloudRuntimeProvider';
-import { selectHomeView, type CloudRuntimeActions, type PendingSend } from '../runtime/runtimeStore';
-import type { HomeModelItem, HomeSessionGroup, HomeSessionItem, HomeViewModel } from './homeSelectors';
+import { selectHomeView, type CloudRuntimeActions, type PendingSend, type WorkspaceResolutionResult } from '../runtime/runtimeStore';
+import type { HostPermissionMode } from '../../protocol/hostWire';
+import type { HomeSessionGroup, HomeSessionItem, HomeViewModel } from './homeSelectors';
+import { composerKeyboardTranslation } from './homeKeyboard';
+import { HOME_TITLE_REVEAL_END, HOME_TITLE_REVEAL_START } from './homeScroll';
 
 const PRESS_SCALE = 0.97;
 const PRESS_DURATION = 120;
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+type HomePicker = 'workspace' | 'permission' | 'model' | 'effort' | undefined;
+interface HomePickerOption { readonly description?: string; readonly disabled?: boolean; readonly id: string; readonly title: string }
 
 export default function HomeScreen(): JSX.Element {
   const router = useRouter();
@@ -34,7 +51,29 @@ export default function HomeScreen(): JSX.Element {
   const view = useCloudSelector(selectHomeView);
   const pendingSend = useCloudSelector((state) => state.pendingSend);
   const selectedEffort = useCloudSelector((state) => state.selection.effort);
+  const selectedPermissionMode = useCloudSelector((state) => state.selection.permissionMode);
   const actions = useCloudActions();
+  const reduceMotion = useReducedMotion();
+  const scrollY = useSharedValue(0);
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollY.set(event.contentOffset.y);
+    },
+  });
+  const compactHeaderStyle = useAnimatedStyle(() => {
+    const progress = interpolate(
+      scrollY.get(),
+      [HOME_TITLE_REVEAL_START, HOME_TITLE_REVEAL_END],
+      [0, 1],
+      Extrapolation.CLAMP,
+    );
+
+    return {
+      opacity: progress,
+      transform: [{ translateY: reduceMotion ? 0 : interpolate(progress, [0, 1], [5, 0], Extrapolation.CLAMP) }],
+    };
+  }, [reduceMotion]);
 
   const openConnection = useCallback(() => router.push('/connection'), [router]);
   const openChat = useCallback((chatUri: HomeSessionItem['chatUri']) => {
@@ -45,55 +84,96 @@ export default function HomeScreen(): JSX.Element {
   ), [openChat]);
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
-        <FlatList
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: Math.max(insets.bottom + 16, 28) },
-            view.groups.length === 0 ? styles.emptyListContent : null,
-          ]}
-          data={view.groups}
-          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-          keyboardShouldPersistTaps="handled"
-          keyExtractor={(item) => item.workspaceId}
-          ListEmptyComponent={<SessionEmpty mode={view.mode} onOpenConnection={openConnection} />}
-          ListHeaderComponent={(
-            <HomeHeader
-              actions={actions}
-              onOpenChat={openChat}
-              onOpenConnection={openConnection}
-              pendingSend={pendingSend}
-              selectedEffort={selectedEffort}
-              view={view}
-            />
-          )}
-          renderItem={renderGroup}
-          showsVerticalScrollIndicator={false}
+    <View style={[styles.screen, { backgroundColor: theme.colors.background }]}>
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.flex}>
+          <Animated.FlatList<HomeSessionGroup>
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingBottom: Math.max(insets.bottom + 16, 28) },
+              view.groups.length === 0 ? styles.emptyListContent : null,
+            ]}
+            data={view.groups}
+            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+            keyboardShouldPersistTaps="handled"
+            keyExtractor={(item) => item.workspaceId}
+            ListEmptyComponent={<SessionEmpty mode={view.mode} onOpenConnection={openConnection} />}
+            ListHeaderComponent={(
+              <HomeHeader
+                actions={actions}
+                onOpenChat={openChat}
+                onOpenConnection={openConnection}
+                pendingSend={pendingSend}
+                selectedEffort={selectedEffort}
+                selectedPermissionMode={selectedPermissionMode}
+                view={view}
+              />
+            )}
+            onScroll={onScroll}
+            renderItem={renderGroup}
+            scrollEventThrottle={16}
+            showsVerticalScrollIndicator={false}
+          />
+        </View>
+      </SafeAreaView>
+
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.compactHeader, { height: insets.top + COMPACT_HEADER_CONTENT_HEIGHT }, compactHeaderStyle]}
+        testID="home-compact-header"
+      >
+        <GlassSurface
+          blurIntensity={48}
+          glassEffectStyle="regular"
+          materialElevation={1}
+          materialShape="none"
+          materialTone="surfaceContainerLow"
+          style={styles.compactHeaderMaterial}
         />
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        <View style={[styles.compactHeaderContent, { paddingTop: insets.top }]}>
+          <Text
+            allowFontScaling
+            maxFontSizeMultiplier={1.2}
+            style={[styles.compactHeaderTitle, { color: theme.colors.onBackground }]}
+          >
+            Cloud
+          </Text>
+        </View>
+        <View style={[styles.compactHeaderEdge, { backgroundColor: theme.colors.outlineVariant }]} />
+      </Animated.View>
+    </View>
   );
 }
+
+const COMPACT_HEADER_CONTENT_HEIGHT = 58;
 
 interface HomeHeaderProps {
   readonly actions: CloudRuntimeActions;
   readonly onOpenChat: (chatUri: HomeSessionItem['chatUri']) => void;
   readonly onOpenConnection: () => void;
   readonly pendingSend: PendingSend | undefined;
-  readonly selectedEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly selectedEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined;
+  readonly selectedPermissionMode: HostPermissionMode | undefined;
   readonly view: HomeViewModel;
 }
 
 const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element {
   const theme = useTheme<MD3Theme>();
-  const [directoryOpen, setDirectoryOpen] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
-  const [effortOpen, setEffortOpen] = useState(false);
+  const { height: windowHeight } = useWindowDimensions();
+  const { height: keyboardHeight } = useReanimatedKeyboardAnimation();
+  const composerFrameRef = useAnimatedRef<View>();
+  const composerKeyboardStyle = useAnimatedStyle(() => {
+    const frame = measure(composerFrameRef);
+    return { transform: [{ translateY: composerKeyboardTranslation(frame, windowHeight, keyboardHeight.get()) }] };
+  }, [keyboardHeight, windowHeight]);
+  const [picker, setPicker] = useState<HomePicker>();
   const [prompt, setPrompt] = useState('');
   const [promptError, setPromptError] = useState<string | undefined>();
   const [sending, setSending] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState('');
+  const [workspaceResolving, setWorkspaceResolving] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | undefined>();
 
   const submit = async (): Promise<void> => {
     const trimmedPrompt = prompt.trim();
@@ -111,6 +191,7 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
         workspaceId: props.view.selectedWorkspaceId,
         modelId: props.view.selectedModelId,
         effort: props.selectedEffort,
+        permissionMode: props.selectedPermissionMode ?? props.view.defaultPermissionMode,
       });
       if (result.status === 'accepted') {
         setPrompt('');
@@ -132,13 +213,63 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
   };
 
   const canCompose = props.view.mode === 'ready' && !sending;
+  const canChooseWorkspace = props.view.mode !== 'loading' && props.view.mode !== 'disconnected' && !sending;
   const selectedWorkspace = props.view.workspaces.find((workspace) => workspace.id === props.view.selectedWorkspaceId);
   const workspaceLabel = compactWorkspacePath(selectedWorkspace?.path ?? props.view.selectedWorkspaceName ?? '选择工作区');
   const modelLabel = props.view.selectedModelName ?? '选择模型';
+  const selectedModel = props.view.models.find((model) => model.id === props.view.selectedModelId);
+  const supportedEfforts = selectedModel?.supportedEffortLevels ?? [];
+  const permissionMode = props.selectedPermissionMode ?? props.view.defaultPermissionMode;
+  const permissionLabel = props.view.permissionModes.find((mode) => mode.id === permissionMode)?.displayName ?? '权限';
   const sendDisabled = !canCompose
     || prompt.trim().length === 0
     || props.view.selectedWorkspaceId === undefined
     || props.view.selectedModelId === undefined;
+  const pickerOptions: readonly HomePickerOption[] = picker === 'workspace'
+    ? props.view.workspaces.map((workspace) => ({ id: workspace.id, title: workspace.name, description: workspace.path, disabled: !workspace.available }))
+    : picker === 'permission'
+      ? props.view.permissionModes.map((mode) => ({ id: mode.id, title: mode.displayName, description: mode.description }))
+      : picker === 'model'
+        ? props.view.models.map((model) => ({ id: model.id, title: model.displayName, ...(model.description === undefined ? {} : { description: model.description }) }))
+        : picker === 'effort'
+          ? supportedEfforts.map((effort) => ({ id: effort, title: effortLabel(effort) }))
+          : [];
+  const pickerTitle = picker === 'workspace' ? '选择工作区' : picker === 'permission' ? '权限设置' : picker === 'model' ? '选择模型' : '选择思考强度';
+  const pickerValue = picker === 'workspace' ? props.view.selectedWorkspaceId : picker === 'permission' ? permissionMode : picker === 'model' ? props.view.selectedModelId : props.selectedEffort;
+  const selectPickerOption = (id: string): void => {
+    if (picker === 'workspace') {
+      props.actions.setWorkspace(id);
+      setWorkspaceError(undefined);
+      setWorkspacePath('');
+    }
+    if (picker === 'permission') props.actions.setPermissionMode(id as NonNullable<HomeHeaderProps['selectedPermissionMode']>);
+    if (picker === 'model') {
+      props.actions.setModel(id);
+      props.actions.setEffort(undefined);
+    }
+    if (picker === 'effort') props.actions.setEffort(id as NonNullable<HomeHeaderProps['selectedEffort']>);
+    setPicker(undefined);
+  };
+  const openPicker = (next: HomePicker): void => { Keyboard.dismiss(); setPicker(next); };
+  const resolveWorkspace = async (path: string): Promise<void> => {
+    if (path.trim().length === 0) {
+      setWorkspaceError('请输入工作区绝对路径');
+      return;
+    }
+    setWorkspaceError(undefined);
+    setWorkspaceResolving(true);
+    try {
+      const result: WorkspaceResolutionResult = await props.actions.resolveWorkspace(path);
+      if (result.status === 'accepted') {
+        setWorkspacePath('');
+        setPicker(undefined);
+      } else {
+        setWorkspaceError(result.message ?? 'Host 未能校验这个工作区路径');
+      }
+    } finally {
+      setWorkspaceResolving(false);
+    }
+  };
 
   return (
     <View style={styles.headerContent}>
@@ -195,7 +326,7 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
         >
           <MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-outline" size={22} />
           <Text style={[styles.operationErrorText, { color: theme.colors.onErrorContainer }]}>
-            {operationErrorLabel(props.view.operationError.code, props.view.operationError.operation)}
+            {operationErrorLabel(props.view.operationError.code, props.view.operationError.operation, props.view.operationError.message)}
           </Text>
           {props.pendingSend !== undefined ? (
             <GlassPressable accessibilityLabel="重试发送" disabled={retrying} onPress={() => void retry()} style={styles.retryButton}>
@@ -205,15 +336,17 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
         </GlassSurface>
       ) : null}
 
-      <GlassSurface
-        blurIntensity={64}
-        glassEffectStyle="regular"
-        materialElevation={2}
-        materialShape="extraLarge"
-        materialTone="surfaceContainer"
-        style={styles.composerSurface}
-        testID="home-composer-card"
-      >
+      <Animated.View collapsable={false} ref={composerFrameRef}>
+        <Animated.View style={composerKeyboardStyle}>
+          <GlassSurface
+            blurIntensity={64}
+            glassEffectStyle="regular"
+            materialElevation={2}
+            materialShape="extraLarge"
+            materialTone="surfaceContainer"
+            style={styles.composerSurface}
+            testID="home-composer-card"
+          >
         <TextInput
           accessibilityLabel="新会话输入"
           allowFontScaling
@@ -238,92 +371,24 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
 
         <View style={styles.composerToolbar}>
           <View style={styles.workspaceMenuAnchor}>
-            <Menu
-              visible={directoryOpen}
-              onDismiss={() => setDirectoryOpen(false)}
-              anchor={(
-                <GlassPressable
-                  accessibilityLabel="选择工作区目录"
-                  disabled={props.view.workspaces.length === 0 || !canCompose}
-                  onPress={() => setDirectoryOpen(true)}
-                  style={styles.workspaceButton}
-                >
-                  <MaterialCommunityIcons color={theme.colors.onSurface} name="folder-outline" size={21} />
-                  <Text ellipsizeMode="middle" numberOfLines={1} style={[styles.workspaceLabel, { color: theme.colors.onSurfaceVariant }]}>{workspaceLabel}</Text>
-                  <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={18} />
-                </GlassPressable>
-              )}
-              anchorPosition="top"
-              contentStyle={styles.menuContent}
-            >
-              {props.view.workspaces.length === 0 ? (
-                <Menu.Item disabled onPress={() => undefined} title="暂无工作目录" />
-              ) : props.view.workspaces.map((workspace) => (
-                <Menu.Item
-                  key={workspace.id}
-                  disabled={!workspace.available}
-                  leadingIcon={() => <MaterialCommunityIcons name={workspace.available ? 'folder-outline' : 'folder-remove-outline'} size={21} />}
-                  onPress={() => {
-                    if (workspace.available) props.actions.setWorkspace(workspace.id);
-                    setDirectoryOpen(false);
-                  }}
-                  title={workspace.path || workspace.name}
-                />
-              ))}
-            </Menu>
+            <GlassPressable accessibilityLabel="选择工作区目录" disabled={!canChooseWorkspace} onPress={() => { setWorkspaceError(undefined); openPicker('workspace'); }} style={styles.workspaceButton}>
+              <MaterialCommunityIcons color={theme.colors.onSurface} name="folder-outline" size={21} />
+              <Text ellipsizeMode="middle" numberOfLines={1} style={[styles.workspaceLabel, { color: theme.colors.onSurfaceVariant }]}>{workspaceLabel}</Text>
+              <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={18} />
+            </GlassPressable>
           </View>
-
-          <View style={styles.modelMenuAnchor}>
-            <Menu
-              visible={modelOpen}
-              onDismiss={() => setModelOpen(false)}
-              anchor={(
-                <GlassPressable
-                  accessibilityLabel="选择模型"
-                  disabled={props.view.models.length === 0 || !canCompose}
-                  onPress={() => setModelOpen(true)}
-                  style={styles.modelButton}
-                >
-                  <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{modelLabel}</Text>
-                  <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={17} />
-                </GlassPressable>
-              )}
-              anchorPosition="top"
-              contentStyle={styles.menuContent}
-            >
-              {props.view.models.length === 0 ? (
-                <Menu.Item disabled onPress={() => undefined} title="暂无模型" />
-              ) : props.view.models.map((model) => (
-                <ModelMenuItem key={model.id} model={model} onSelect={() => { props.actions.setModel(model.id); setModelOpen(false); }} />
-              ))}
-            </Menu>
-          </View>
-
-          <Menu
-            visible={effortOpen}
-            onDismiss={() => setEffortOpen(false)}
-            anchor={(
-              <GlassPressable
-                accessibilityLabel="选择思考强度"
-                disabled={!canCompose}
-                onPress={() => setEffortOpen(true)}
-                style={styles.thinkingButton}
-              >
-                <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{effortLabel(props.selectedEffort)}</Text>
-                <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={17} />
-              </GlassPressable>
-            )}
-            anchorPosition="top"
-            contentStyle={styles.menuContent}
-          >
-            {(['low', 'medium', 'high', 'xhigh', 'max'] as const).map((effort) => (
-              <Menu.Item
-                key={effort}
-                onPress={() => { props.actions.setEffort(effort); setEffortOpen(false); }}
-                title={effortLabel(effort)}
-              />
-            ))}
-          </Menu>
+          <GlassPressable accessibilityLabel="选择权限模式" disabled={!canCompose || props.view.permissionModes.length === 0} onPress={() => openPicker('permission')} style={styles.permissionButton}>
+            <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="shield-check-outline" size={17} />
+            <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{permissionLabel}</Text>
+          </GlassPressable>
+          <GlassPressable accessibilityLabel="选择模型" disabled={props.view.models.length === 0 || !canCompose} onPress={() => openPicker('model')} style={styles.modelButton}>
+            <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{modelLabel}</Text>
+            <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={17} />
+          </GlassPressable>
+          <GlassPressable accessibilityLabel="选择思考强度" disabled={!canCompose || supportedEfforts.length === 0} onPress={() => openPicker('effort')} style={styles.thinkingButton}>
+            <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{effortLabel(props.selectedEffort)}</Text>
+            <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={17} />
+          </GlassPressable>
           <View style={styles.toolbarSpacer} />
           <GlassPressable
             accessibilityLabel="发送消息"
@@ -334,14 +399,95 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
             {sending ? <ActivityIndicator color={theme.colors.onPrimary} size="small" /> : <MaterialCommunityIcons color={sendDisabled ? theme.colors.onSurfaceVariant : theme.colors.onPrimary} name="arrow-up" size={23} />}
           </GlassPressable>
         </View>
-      </GlassSurface>
+          </GlassSurface>
+        </Animated.View>
+      </Animated.View>
 
       <View style={styles.sectionHeading}>
         <Text allowFontScaling style={[styles.sectionTitle, { color: theme.colors.onBackground }]}>最近会话</Text>
       </View>
+      <HomeChoiceSheet
+        currentValue={pickerValue}
+        onClose={() => setPicker(undefined)}
+        onResolveWorkspace={resolveWorkspace}
+        onSelect={selectPickerOption}
+        onWorkspacePathChange={(path) => { setWorkspacePath(path); setWorkspaceError(undefined); }}
+        options={pickerOptions}
+        title={pickerTitle}
+        visible={picker !== undefined}
+        workspaceError={workspaceError}
+        workspacePath={workspacePath}
+        workspaceResolving={workspaceResolving}
+      />
     </View>
   );
 });
+
+function HomeChoiceSheet(props: {
+  readonly currentValue?: string;
+  readonly onClose: () => void;
+  readonly onResolveWorkspace: (path: string) => Promise<void>;
+  readonly onSelect: (id: string) => void;
+  readonly onWorkspacePathChange: (path: string) => void;
+  readonly options: readonly HomePickerOption[];
+  readonly title: string;
+  readonly visible: boolean;
+  readonly workspaceError?: string;
+  readonly workspacePath: string;
+  readonly workspaceResolving: boolean;
+}): JSX.Element {
+  const theme = useTheme<MD3Theme>();
+  const reduceMotion = useReducedMotion();
+  return (
+    <BottomSheetFrame onClose={props.onClose} panelStyle={styles.pickerMotion} reduceMotion={reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}>
+          <GlassSurface blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" materialTone="surfaceContainer" style={styles.pickerSheet}>
+            <View style={[styles.pickerHandle, { backgroundColor: theme.colors.outline }]} />
+            <Text style={[styles.pickerTitle, { color: theme.colors.onSurface }]}>{props.title}</Text>
+            <ScrollView bounces={false} contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.pickerScroll}>
+            {props.title === '选择工作区' ? (
+              <View style={styles.workspaceResolver}>
+                <TextInput
+                  accessibilityLabel="手动输入工作区绝对路径"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={!props.workspaceResolving}
+                  onChangeText={props.onWorkspacePathChange}
+                  onSubmitEditing={() => void props.onResolveWorkspace(props.workspacePath)}
+                  placeholder="输入绝对路径，由 Host 校验"
+                  placeholderTextColor={theme.colors.onSurfaceVariant}
+                  returnKeyType="done"
+                  style={[styles.workspacePathInput, { borderColor: theme.colors.outlineVariant, color: theme.colors.onSurface }]}
+                  value={props.workspacePath}
+                />
+                <GlassPressable
+                  accessibilityLabel="校验并选择工作区路径"
+                  disabled={props.workspaceResolving || props.workspacePath.trim().length === 0}
+                  onPress={() => void props.onResolveWorkspace(props.workspacePath)}
+                  style={[styles.workspaceResolveButton, { backgroundColor: props.workspaceResolving ? theme.colors.surfaceVariant : theme.colors.primary }]}
+                >
+                  {props.workspaceResolving ? <ActivityIndicator color={theme.colors.onSurfaceVariant} size="small" /> : <Text style={{ color: theme.colors.onPrimary }}>校验并选择</Text>}
+                </GlassPressable>
+                {props.workspaceError === undefined ? null : <Text accessibilityRole="alert" style={[styles.workspaceResolverError, { color: theme.colors.error }]}>{props.workspaceError}</Text>}
+              </View>
+            ) : null}
+              {props.options.length === 0 ? <Text style={[styles.pickerEmpty, { color: theme.colors.onSurfaceVariant }]}>Host 未下发可用选项</Text> : null}
+              {props.options.map((option) => {
+                const selected = option.id === props.currentValue;
+                return (
+                  <Pressable key={option.id} accessibilityRole="radio" accessibilityState={{ checked: selected, disabled: option.disabled }} disabled={option.disabled} onPress={() => props.onSelect(option.id)} style={({ pressed }) => [styles.pickerRow, { borderColor: selected ? theme.colors.primary : theme.colors.outlineVariant, backgroundColor: selected ? theme.colors.primaryContainer : theme.colors.surface }, option.disabled ? styles.pickerDisabled : null, pressed ? styles.pickerPressed : null]}>
+                    <View style={styles.pickerCopy}>
+                      <Text numberOfLines={1} style={[styles.pickerOptionTitle, { color: theme.colors.onSurface }]}>{option.title}</Text>
+                      {option.description === undefined ? null : <Text ellipsizeMode="tail" numberOfLines={2} style={[styles.pickerDescription, { color: theme.colors.onSurfaceVariant }]}>{option.description}</Text>}
+                    </View>
+                    {selected ? <MaterialCommunityIcons color={theme.colors.primary} name="check" size={21} /> : null}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </GlassSurface>
+    </BottomSheetFrame>
+  );
+}
 
 interface GlassPressableProps {
   readonly accessibilityHint?: string;
@@ -376,12 +522,6 @@ function GlassPressable(props: GlassPressableProps): JSX.Element {
     </AnimatedPressable>
   );
 }
-
-interface ModelMenuItemProps { readonly model: HomeModelItem; readonly onSelect: () => void; }
-
-const ModelMenuItem = memo(function ModelMenuItem(props: ModelMenuItemProps): JSX.Element {
-  return <Menu.Item leadingIcon={() => <MaterialCommunityIcons name="cube-outline" size={21} />} onPress={props.onSelect} title={props.model.displayName} />;
-});
 
 interface SessionGroupProps {
   readonly group: HomeSessionGroup;
@@ -504,8 +644,9 @@ function compactWorkspacePath(path: string): string {
   return name.length > 0 ? `…/${name}` : path;
 }
 
-function effortLabel(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'): string {
+function effortLabel(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined): string {
   switch (effort) {
+    case undefined: return '默认';
     case 'low': return '低';
     case 'medium': return '中';
     case 'high': return '高';
@@ -514,7 +655,8 @@ function effortLabel(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'): strin
   }
 }
 
-function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | 'send' | undefined): string {
+function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | 'send' | 'workspace' | undefined, message?: string): string {
+  if (operation === 'workspace') return message ?? '工作区路径校验失败，请重试';
   if (operation === 'send') {
     switch (code) {
       case 'CHAT_BUSY': return '消息暂未发送，当前对话仍可重试';
@@ -528,6 +670,7 @@ function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | '
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
   safe: { flex: 1 },
   flex: { flex: 1 },
   listContent: { paddingHorizontal: 20, paddingTop: 4, gap: 14 },
@@ -556,15 +699,38 @@ const styles = StyleSheet.create({
   workspaceMenuAnchor: { flex: 1, minWidth: 44 },
   workspaceButton: { alignItems: 'center', borderRadius: 14, flexDirection: 'row', gap: 6, justifyContent: 'flex-start', minHeight: 44, overflow: 'hidden', paddingHorizontal: 5, width: '100%' },
   workspaceLabel: { flexShrink: 1, fontSize: 13, minWidth: 0 },
-  modelMenuAnchor: { maxWidth: 90, minWidth: 62, width: 90 },
-  modelButton: { alignItems: 'center', borderRadius: 14, flexDirection: 'row', gap: 2, justifyContent: 'center', minHeight: 44, paddingHorizontal: 4, width: '100%' },
+  permissionButton: { alignItems: 'center', borderRadius: 14, flexDirection: 'row', gap: 3, justifyContent: 'center', maxWidth: 76, minHeight: 44, minWidth: 48, paddingHorizontal: 4 },
+  modelButton: { alignItems: 'center', borderRadius: 14, flexDirection: 'row', gap: 2, justifyContent: 'center', maxWidth: 86, minHeight: 44, minWidth: 54, paddingHorizontal: 4 },
   thinkingButton: { alignItems: 'center', borderRadius: 14, flexDirection: 'row', justifyContent: 'center', maxWidth: 70, minHeight: 44, minWidth: 56, paddingHorizontal: 4 },
   toolbarLabel: { flexShrink: 1, fontSize: 13 },
   toolbarSpacer: { flex: 0.2, minWidth: 1 },
   sendButton: { alignItems: 'center', borderRadius: 24, height: 48, justifyContent: 'center', minWidth: 48, padding: 0, width: 48 },
-  menuContent: { maxHeight: 360 },
+  pickerBackdrop: { flex: 1, justifyContent: 'flex-end' },
+  modalScrim: { backgroundColor: 'rgba(20,26,38,0.22)' },
+  pickerMotion: { maxHeight: '72%', width: '100%' },
+  pickerSheet: { borderTopLeftRadius: 28, borderTopRightRadius: 28, flexShrink: 1, gap: 11, maxHeight: '100%', minHeight: 0, overflow: 'hidden', paddingBottom: 24, paddingHorizontal: 18, paddingTop: 12 },
+  pickerScroll: { flexShrink: 1, minHeight: 0 },
+  pickerHandle: { alignSelf: 'center', borderRadius: 3, height: 5, marginBottom: 4, width: 42 },
+  pickerTitle: { fontSize: 24, fontWeight: '800', lineHeight: 31, marginBottom: 7 },
+  pickerList: { gap: 8, paddingBottom: 4 },
+  pickerRow: { alignItems: 'center', borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, flexDirection: 'row', gap: 12, minHeight: 58, paddingHorizontal: 13, paddingVertical: 10 },
+  pickerCopy: { flex: 1, minWidth: 0 },
+  pickerOptionTitle: { fontSize: 16, fontWeight: '600', lineHeight: 22 },
+  pickerDescription: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  pickerDisabled: { opacity: 0.45 },
+  pickerPressed: { opacity: 0.72 },
+  pickerEmpty: { fontSize: 14, lineHeight: 21, padding: 16, textAlign: 'center' },
+  workspaceResolver: { gap: 8 },
+  workspacePathInput: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, fontSize: 16, minHeight: 48, paddingHorizontal: 14, paddingVertical: 10 },
+  workspaceResolveButton: { alignItems: 'center', borderRadius: 14, justifyContent: 'center', minHeight: 48, paddingHorizontal: 14 },
+  workspaceResolverError: { fontSize: 13, lineHeight: 19 },
   sectionHeading: { alignItems: 'center', minHeight: 52, paddingHorizontal: 2, paddingTop: 8 },
   sectionTitle: { fontSize: 28, fontWeight: '800', letterSpacing: -0.6, lineHeight: 36, width: '100%' },
+  compactHeader: { left: 0, position: 'absolute', right: 0, top: 0, zIndex: 10 },
+  compactHeaderMaterial: { ...StyleSheet.absoluteFillObject },
+  compactHeaderContent: { flex: 1, justifyContent: 'center', paddingHorizontal: 20 },
+  compactHeaderTitle: { fontSize: 22, fontWeight: '800', letterSpacing: -0.5, lineHeight: 28 },
+  compactHeaderEdge: { bottom: 0, height: StyleSheet.hairlineWidth, left: 0, position: 'absolute', right: 0 },
   groupBlock: { gap: 8 },
   groupHeading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 28, paddingHorizontal: 4 },
   groupName: { flex: 1, fontSize: 15, fontWeight: '600' },

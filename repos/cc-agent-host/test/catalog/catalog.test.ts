@@ -94,4 +94,82 @@ describe('root catalog domain', () => {
     expect(same).toBe(initial);
     expect(removed.sessions).toEqual([]);
   });
+
+  it('treats session model and effort changes as catalog updates', () => {
+    const initialSession = session('chat-config');
+    const initial = createRootCatalogState({
+      host: { id: 'host-a', displayName: 'Host A' },
+      modifiedAt: 't0',
+      sessions: [initialSession],
+    });
+    const updated = catalogReducer(initial, {
+      type: CATALOG_ACTION_TYPES.chatUpdated,
+      session: createCatalogSession({
+        ...initialSession,
+        modelId,
+        effort: 'xhigh',
+      }),
+      timestamp: 't1',
+    });
+
+    expect(updated).not.toBe(initial);
+    expect(updated.sessions[0]).toMatchObject({ modelId, effort: 'xhigh' });
+  });
+
+  it('upserts one workspace without replacing other catalog entries', () => {
+    const otherWorkspace = createWorkspace({
+      id: createWorkspaceId('workspace-b'),
+      path: '/tmp/workspace-b',
+      displayName: 'Workspace B',
+    });
+    const initial = createRootCatalogState({
+      resource: root,
+      host: { id: 'host-a', displayName: 'Host A' },
+      workspaces: [workspace, otherWorkspace],
+      modifiedAt: 't0',
+    });
+    const updatedWorkspace = createWorkspace({
+      ...workspace,
+      displayName: 'Renamed Workspace A',
+    });
+    const updated = catalogReducer(initial, {
+      type: CATALOG_ACTION_TYPES.workspaceUpserted,
+      workspace: updatedWorkspace,
+      timestamp: 't1',
+    });
+
+    expect(updated.workspaces).toEqual([updatedWorkspace, otherWorkspace]);
+    expect(updated.workspaces).toHaveLength(2);
+  });
+
+  it('normalizes published sessions to the real catalog model and effort levels', () => {
+    const firstModel = createModel({
+      id: createModelId('first-model'),
+      displayName: 'First Model',
+      supportedEffortLevels: ['low', 'medium'],
+    });
+    const defaultModel = createModel({
+      id: createModelId('default-model'),
+      displayName: 'Default Model',
+      supportedEffortLevels: ['low', 'medium', 'high'],
+    });
+    const initial = catalogReducer(createRootCatalogState({
+      host: { id: 'host-a', displayName: 'Host A' },
+      workspaces: [workspace],
+      models: [firstModel, defaultModel],
+      defaultModelId: defaultModel.id,
+      modifiedAt: 't0',
+    }), {
+      type: CATALOG_ACTION_TYPES.chatCreated,
+      session: createCatalogSession({
+        ...session('chat-normalize'),
+        modelId: createModelId('provider-model-not-in-catalog'),
+        effort: 'high',
+      }),
+      timestamp: 't1',
+    });
+
+    expect(initial.sessions[0]).toMatchObject({ modelId: defaultModel.id });
+    expect(initial.sessions[0]).not.toHaveProperty('effort');
+  });
 });

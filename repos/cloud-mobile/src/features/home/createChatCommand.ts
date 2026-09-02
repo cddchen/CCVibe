@@ -7,12 +7,14 @@ import {
 import type {
   HostCreateChatParams,
   HostDispatchActionParams,
+  HostPermissionMode,
 } from '../../protocol/hostWire';
 
 export interface CreateChatCommandInput {
   readonly workspaceId: string;
   readonly modelId: string;
   readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly permissionMode?: HostPermissionMode;
   readonly prompt: string;
   readonly clientSeq: number;
   readonly commandId: string;
@@ -48,6 +50,7 @@ export function buildCreateChatCommand(input: CreateChatCommandInput): CreateCha
       workspaceId: input.workspaceId,
       modelId: input.modelId,
       ...(input.effort === undefined ? {} : { effort: input.effort }),
+      ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       initialPrompt: prompt,
       clientSeq: input.clientSeq,
       commandId: input.commandId,

@@ -68,6 +68,7 @@ type TestQuery = Pick<
 > & AsyncGenerator<SDKMessage, void>;
 
 class FakeQuery implements TestQuery {
+  public readonly configCalls: Array<readonly [string, unknown]> = [];
   public returnCalls = 0;
   private readonly messages: SDKMessage[] = [];
   private readonly waitingNext: Array<Deferred<IteratorResult<SDKMessage, void>>> = [];
@@ -104,15 +105,21 @@ class FakeQuery implements TestQuery {
     return Promise.resolve(undefined);
   }
 
-  public async setModel(_model?: string): Promise<void> {}
+  public async setModel(model?: string): Promise<void> {
+    this.configCalls.push(['setModel', model]);
+  }
 
   public async setPermissionMode(
-    _mode: Parameters<Query['setPermissionMode']>[0],
-  ): Promise<void> {}
+    mode: Parameters<Query['setPermissionMode']>[0],
+  ): Promise<void> {
+    this.configCalls.push(['setPermissionMode', mode]);
+  }
 
   public async applyFlagSettings(
-    _settings: Parameters<Query['applyFlagSettings']>[0],
-  ): Promise<void> {}
+    settings: Parameters<Query['applyFlagSettings']>[0],
+  ): Promise<void> {
+    this.configCalls.push(['applyFlagSettings', settings]);
+  }
 
   public close(): void {
     this.end();
@@ -664,6 +671,123 @@ describe('createClaudeAgentHost', () => {
     }
   });
 
+  it('restores history with a catalog model fallback and no unsupported effort', async () => {
+    const firstModel = createModel({
+      id: createModelId('first-model'),
+      displayName: 'First Model',
+      supportedEffortLevels: ['low', 'medium'],
+    });
+    const defaultModel = createModel({
+      id: createModelId('default-model'),
+      displayName: 'Default Model',
+      supportedEffortLevels: ['low', 'medium', 'high'],
+    });
+    const workspace = createWorkspace({
+      id: createWorkspaceId('workspace-history-fallback'),
+      path: '/tmp/history-fallback-project',
+      displayName: 'History Fallback Project',
+    });
+    const harness = serviceHarness([{
+      type: 'assistant',
+      uuid: 'history-fallback-assistant',
+      session_id: 'sdk-session-history-fallback',
+      message: {
+        role: 'assistant',
+        model: 'provider-model-not-in-catalog',
+        effort: 'xhigh',
+        content: [],
+      },
+      parent_tool_use_id: null,
+      parent_agent_id: null,
+    } as SessionMessage]);
+    const catalogSource: CatalogSource = {
+      load: () => ({
+        workspaces: [workspace],
+        models: [firstModel, defaultModel],
+        defaultModelId: defaultModel.id,
+      }),
+      listSessions: () => [{
+        sessionId: 'sdk-session-history-fallback',
+        summary: 'History fallback',
+        lastModified: 1_700_000_000_000,
+        cwd: workspace.path,
+      }],
+    };
+    const host = await createClaudeAgentHost({
+      ...baseOptions(harness.service),
+      catalogSource,
+    });
+
+    try {
+      const state = await host.refreshCatalog();
+      expect(state.sessions).toMatchObject([{
+        modelId: defaultModel.id,
+      }]);
+      expect(state.sessions[0]).not.toHaveProperty('effort');
+      expect(host.registry.getBacking(parseChatUri('agent-chat://epoch-1/sdk-session-history-fallback')))
+        .toMatchObject({ desiredConfig: { model: defaultModel.id } });
+      expect(host.registry.getBacking(parseChatUri('agent-chat://epoch-1/sdk-session-history-fallback'))?.desiredConfig)
+        .not.toHaveProperty('effort');
+    } finally {
+      await host.shutdown();
+    }
+  });
+
+  it('resolves a real host workspace path and publishes an incremental catalog action', async () => {
+    const harness = serviceHarness();
+    const calls: string[] = [];
+    const existingWorkspace = createWorkspace({
+      id: createWorkspaceId('workspace-existing'),
+      path: '/tmp/existing-project',
+      displayName: 'Existing Project',
+    });
+    const host = await createClaudeAgentHost({
+      ...baseOptions(harness.service),
+      workspaceFilesystem: {
+        realpath: async (path: string): Promise<string> => {
+          calls.push(`realpath:${path}`);
+          return '/tmp/canonical-project';
+        },
+        stat: async (path: string) => {
+          calls.push(`stat:${path}`);
+          return { isDirectory: () => true };
+        },
+      },
+    });
+    host.hostStateManager.dispatchCatalog(root, {
+      type: 'catalog/workspacesReplaced',
+      workspaces: [existingWorkspace],
+      timestamp: 'catalog-existing',
+    });
+    const client = await openClient(await listen(host));
+
+    try {
+      await call(client, 'initialize', 'initialize', {
+        ...initializeParams(),
+        initialSubscriptions: [root],
+      });
+      const response = await call(client, 'resolve-workspace', 'catalog/resolveWorkspace', {
+        channel: root,
+        path: '/tmp/requested-project/..',
+      });
+
+      const returnedWorkspace = (response.result as { readonly workspace: { readonly path: string; readonly id: string } }).workspace;
+      expect(calls).toEqual([
+        'realpath:/tmp/requested-project/..',
+        'stat:/tmp/canonical-project',
+      ]);
+      expect(returnedWorkspace).toMatchObject({
+        path: '/tmp/canonical-project',
+        displayName: 'canonical-project',
+      });
+      expect(host.hostStateManager.getCatalogState(root)?.workspaces).toHaveLength(2);
+      expect(host.hostStateManager.getCatalogState(root)?.workspaces).toContainEqual(returnedWorkspace);
+    } finally {
+      await closeClient(client);
+      await host.shutdown();
+    }
+  });
+
   it('keeps the last known good catalog when refresh fails', async () => {
     const harness = serviceHarness();
     const workspace = createWorkspace({
@@ -718,7 +842,12 @@ describe('createClaudeAgentHost', () => {
     });
     host.hostStateManager.dispatchCatalog(root, {
       type: 'catalog/modelsReplaced',
-      models: [createModel({ id: createModelId('model-a'), displayName: 'Model A' })],
+      models: [createModel({
+        id: createModelId('model-a'),
+        displayName: 'Model A',
+        capabilities: ['effort'],
+        supportedEffortLevels: ['low', 'medium', 'high'],
+      })],
       defaultModelId: createModelId('model-a'),
       timestamp: 'catalog-model',
     });
@@ -754,7 +883,15 @@ describe('createClaudeAgentHost', () => {
         message.method === 'state/action'
         && (message.params as { readonly action?: { readonly type?: unknown } } | undefined)?.action?.type === 'catalog/chatCreated'
       ));
-      expect(catalogAction).toMatchObject({ params: { channel: root, action: { type: 'catalog/chatCreated' } } });
+      expect(catalogAction).toMatchObject({
+        params: {
+          channel: root,
+          action: {
+            type: 'catalog/chatCreated',
+            session: { modelId: 'model-a', effort: 'high' },
+          },
+        },
+      });
 
       const retry = await call(client, 'create-2', 'catalog/createChat', {
         channel: root,
@@ -783,6 +920,80 @@ describe('createClaudeAgentHost', () => {
       await client.next((message) => message.id === 'send-created');
       expect(harness.startupOptions).toHaveLength(1);
       expect(host.registry.getBacking(firstChatUri)?.lifecycle).toBe('materialized');
+
+      const configured = await call(client, 'configure-created', 'chat/configure', {
+        channel: firstChat,
+        permissionMode: 'plan',
+      });
+      expect(configured).toMatchObject({
+        result: { config: { modelId: 'model-a', effort: 'high', permissionMode: 'plan' } },
+      });
+      expect(host.registry.getBacking(firstChatUri)?.desiredConfig).toMatchObject({
+        model: 'model-a',
+        effort: 'high',
+        permissionMode: 'plan',
+      });
+      expect(harness.query.configCalls).toContainEqual(['setPermissionMode', 'plan']);
+      const configuredAction = await client.next((message) => (
+        message.method === 'state/action'
+        && (message.params as { readonly action?: { readonly type?: unknown; readonly session?: { readonly permissionMode?: unknown } } } | undefined)?.action?.type === 'catalog/chatUpdated'
+        && (message.params as { readonly action?: { readonly session?: { readonly permissionMode?: unknown } } } | undefined)?.action?.session?.permissionMode === 'plan'
+      ));
+      expect(configuredAction).toMatchObject({ params: { action: { session: { permissionMode: 'plan' } } } });
+    } finally {
+      await closeClient(client);
+      await host.shutdown();
+    }
+  });
+
+  it('drops unsupported createChat effort before backing and catalog publication', async () => {
+    const harness = serviceHarness();
+    const host = await createClaudeAgentHost(baseOptions(harness.service));
+    host.hostStateManager.dispatchCatalog(root, {
+      type: 'catalog/workspacesReplaced',
+      workspaces: [createWorkspace({
+        id: createWorkspaceId('workspace-create-effort'),
+        path: '/tmp/create-effort-project',
+        displayName: 'Create Effort Project',
+      })],
+      timestamp: 'catalog-workspace-create-effort',
+    });
+    host.hostStateManager.dispatchCatalog(root, {
+      type: 'catalog/modelsReplaced',
+      models: [createModel({
+        id: createModelId('model-create-effort'),
+        displayName: 'Create Effort Model',
+        capabilities: ['effort'],
+        supportedEffortLevels: ['low', 'medium'],
+      })],
+      defaultModelId: createModelId('model-create-effort'),
+      timestamp: 'catalog-model-create-effort',
+    });
+    const client = await openClient(await listen(host));
+
+    try {
+      await call(client, 'initialize', 'initialize', {
+        ...initializeParams(),
+        initialSubscriptions: [root],
+      });
+      const response = await call(client, 'create-unsupported-effort', 'catalog/createChat', {
+        channel: root,
+        workspaceId: createWorkspaceId('workspace-create-effort'),
+        modelId: createModelId('model-create-effort'),
+        effort: 'high',
+        clientSeq: 1,
+        commandId: createCommandId('create-unsupported-effort'),
+      });
+      expect(response).toMatchObject({ result: { receipt: { status: 'accepted' } } });
+      const action = await client.next((message) => (
+        message.method === 'state/action'
+        && (message.params as { readonly action?: { readonly type?: unknown } } | undefined)?.action?.type === 'catalog/chatCreated'
+      ));
+      const session = (action.params as { readonly action: { readonly session: { readonly effort?: unknown; readonly modelId?: unknown } } }).action.session;
+      expect(session).toMatchObject({ modelId: 'model-create-effort' });
+      expect(session).not.toHaveProperty('effort');
+      const backing = host.registry.listBackings()[0];
+      expect(backing?.desiredConfig).not.toHaveProperty('effort');
     } finally {
       await closeClient(client);
       await host.shutdown();
@@ -1098,7 +1309,7 @@ describe('createClaudeAgentHost', () => {
       chatUri: chat,
       sdkSessionId: 'persisted-sdk-session',
       cwd: '/tmp/project',
-      desiredConfig: { permissionMode: 'default' },
+      desiredConfig: { permissionMode: 'default', model: 'sonnet', effort: 'high' },
       title: 'Persisted chat',
       archived: true,
     });
@@ -1111,8 +1322,23 @@ describe('createClaudeAgentHost', () => {
     await firstHost.shutdown();
 
     const secondSessions: ClaudeAgentHostRuntimeSession[] = [];
+    const secondService: ClaudeAgentHostSdkService = {
+      ...harness.service,
+      listSessions: () => [{
+        sessionId: 'persisted-sdk-session',
+        summary: 'SDK title should not replace overlay metadata',
+        lastModified: 1_700_000_000_000,
+        cwd: '/tmp/project',
+      }],
+      listSupportedModels: () => [{
+        value: 'sonnet',
+        displayName: 'Claude Sonnet',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high'],
+      } as CatalogSdkModelInfo],
+    };
     const secondHost = await createClaudeAgentHost(
-      persistedHostOptions(harness.service, repository, secondSessions),
+      persistedHostOptions(secondService, repository, secondSessions),
     );
     const restored = await secondHost.loadPersistedChats();
     expect(restored).toHaveLength(1);
@@ -1121,6 +1347,15 @@ describe('createClaudeAgentHost', () => {
       sdkSessionId: 'persisted-sdk-session',
       lifecycle: 'materialized',
     });
+    const refreshed = await secondHost.refreshCatalog();
+    expect(refreshed.sessions).toMatchObject([{
+      chatUri: chat,
+      sdkSessionRef: 'persisted-sdk-session',
+      title: 'Persisted chat',
+      archived: true,
+      modelId: 'sonnet',
+      effort: 'high',
+    }]);
     await secondHost.registry.send(chat, createTurnId('restart-turn'), 'resume');
     expect(secondSessions).toEqual([{
       kind: 'resume',

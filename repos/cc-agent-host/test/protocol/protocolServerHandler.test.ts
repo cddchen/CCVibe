@@ -27,6 +27,7 @@ import {
   MAX_PROTOCOL_VERSIONS,
   ProtocolServerHandler,
   SequencerByKey,
+  WorkspaceResolverError,
   type AgentResource,
   type AccessControlList,
   type CatalogChatCreator,
@@ -291,6 +292,113 @@ describe('ProtocolServerHandler', () => {
     expect(connection.lastResponse()).toMatchObject({
       id: 'create',
       result: { receipt: { status: 'accepted', value: { chatUri: createdChat } } },
+    });
+  });
+
+  it('resolves a workspace through the injected host resolver and returns its catalog projection', async () => {
+    const host = new HostStateManager({ now: () => 'server-time', replayCapacity: 8 });
+    host.registerCatalog(root, createRootCatalogState({
+      resource: root,
+      host: { id: 'host-a', displayName: 'Host A' },
+      modifiedAt: 'catalog-0',
+    }));
+    const provider = new HostStateProvider(host, 'epoch-1');
+    const registry = new LogicalClientRegistry();
+    const actor = new FakeChatActor({
+      hostStateManager: host,
+      sequencer: new SequencerByKey(),
+      commandDeduper: new CommandDeduper({ capacity: 8 }),
+      nowAction: () => 'action-time',
+      allocateTurnId: () => createTurnId('unused-resolve-turn'),
+    });
+    const workspace = createWorkspace({
+      id: createWorkspaceId('workspace-resolved'),
+      path: '/tmp/resolved-workspace',
+      displayName: 'Resolved Workspace',
+    });
+    const handler = new ProtocolServerHandler({
+      hostEpoch: 'epoch-1',
+      stateProvider: provider,
+      clientRegistry: registry,
+      chatActor: actor,
+      workspaceResolver: async (channel, path) => {
+        expect(channel).toBe(root);
+        expect(path).toBe('/tmp/input-workspace');
+        host.dispatchCatalog(channel, {
+          type: CATALOG_ACTION_TYPES.workspaceUpserted,
+          workspace,
+          timestamp: 'catalog-workspace',
+        });
+        return workspace;
+      },
+    });
+    const connection = new MemoryConnection();
+
+    await initialize(handler, connection, clientA, [root]);
+    connection.sent.length = 0;
+    await handler.handle(connection, request('resolve', 'catalog/resolveWorkspace', {
+      channel: root,
+      path: '/tmp/input-workspace',
+    }));
+
+    expect(connection.lastResponse()).toEqual({
+      jsonrpc: '2.0',
+      id: 'resolve',
+      result: { workspace },
+    });
+    expect(host.getCatalogState(root)?.workspaces).toEqual([workspace]);
+    expect(actionMessage(connection)).toMatchObject({
+      params: { action: { type: 'catalog/workspaceUpserted', workspace } },
+    });
+  });
+
+  it('exposes stable workspace resolver failures without leaking filesystem details', async () => {
+    const { host } = createRootHarness();
+    const provider = new HostStateProvider(host, 'epoch-1');
+    const registry = new LogicalClientRegistry();
+    const actor = new FakeChatActor({
+      hostStateManager: host,
+      sequencer: new SequencerByKey(),
+      commandDeduper: new CommandDeduper({ capacity: 8 }),
+      nowAction: () => 'action-time',
+      allocateTurnId: () => createTurnId('unused-error-turn'),
+    });
+    const secret = '/private/secret/path';
+    const handler = new ProtocolServerHandler({
+      hostEpoch: 'epoch-1',
+      stateProvider: provider,
+      clientRegistry: registry,
+      chatActor: actor,
+      workspaceResolver: async () => {
+        throw new WorkspaceResolverError('WORKSPACE_NOT_FOUND');
+      },
+    });
+    const connection = new MemoryConnection();
+    await initialize(handler, connection, clientA, [root]);
+    await handler.handle(connection, request('resolve-error', 'catalog/resolveWorkspace', {
+      channel: root,
+      path: secret,
+    }));
+
+    const response = connection.lastResponse();
+    expect(response.error).toEqual({ code: -32004, message: 'Resource not found', data: { code: 'WORKSPACE_NOT_FOUND' } });
+    expect(JSON.stringify(response)).not.toContain(secret);
+  });
+
+  it('returns a stable workspace path code for protocol-level absolute-path violations', async () => {
+    const { handler } = createRootHarness();
+    const connection = new MemoryConnection();
+    await initialize(handler, connection, clientA, [root]);
+
+    await handler.handle(connection, request('resolve-invalid', 'catalog/resolveWorkspace', {
+      channel: root,
+      path: 'relative/path',
+    }));
+
+    expect(connection.lastResponse().error).toEqual({
+      code: -32602,
+      message: 'Invalid params',
+      data: { code: 'WORKSPACE_PATH_INVALID' },
     });
   });
 

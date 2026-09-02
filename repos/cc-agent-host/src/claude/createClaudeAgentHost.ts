@@ -73,18 +73,27 @@ import {
   createModel,
   createRootCatalogState,
   createWorkspace,
+  normalizeCatalogSessionConfiguration,
+  type CatalogModel,
+  type CatalogSession,
   type RootCatalogState,
 } from '../catalog/types.js';
 import type { ActionOrigin, ChatActionEnvelope } from '../protocol/types.js';
 import {
   projectCatalogSessions,
   projectCatalogModels,
+  projectSessionConfiguration,
   projectCatalogWorkspaces,
   type CatalogListSessionsResult,
+  type CatalogSessionConfiguration,
   type CatalogSdkModelInfo,
   type CatalogSource,
   type CatalogSourceSnapshot,
 } from './catalogSource.js';
+import {
+  createFilesystemWorkspaceResolver,
+  type WorkspaceFilesystem,
+} from './workspaceResolver.js';
 import {
   ProtocolServerHandler,
   type ProtocolAuthorizationOptions,
@@ -245,7 +254,12 @@ export interface ClaudeAgentHostOverlayRepository {
   getChatBacking?(chatUri: string): Promise<PersistedChatBacking | undefined>;
   updateChatBacking?(
     chatUri: string,
-    patch: Readonly<{ readonly lifecycle: 'provisional' | 'materialized' }>,
+    patch: Readonly<{
+      readonly lifecycle?: 'provisional' | 'materialized';
+      readonly model?: string;
+      readonly effort?: string;
+      readonly permissionMode?: string;
+    }>,
   ): Promise<PersistedChatBacking | undefined>;
   close?(): void | PromiseLike<void>;
 }
@@ -262,6 +276,8 @@ export interface ClaudeAgentHostOptions {
   readonly catalog?: CatalogSourceSnapshot;
   /** Explicit source for workspace/model values and optional session listing. */
   readonly catalogSource?: CatalogSource;
+  /** Optional filesystem port for host-level tests; production defaults to fs. */
+  readonly workspaceFilesystem?: WorkspaceFilesystem;
   readonly replayCapacity?: number;
   readonly commandReceiptCapacity?: number;
   readonly canUseTool?: CanUseTool;
@@ -389,6 +405,7 @@ export async function createClaudeAgentHost(
     modifiedAt: options.nowAction(),
   });
   hostStateManager.registerCatalog(rootCatalog.resource, rootCatalog);
+  const filesystemWorkspaceResolver = createFilesystemWorkspaceResolver(options.workspaceFilesystem);
   const interactionRegistry = new PendingInteractionRegistry({
     dispatch: (chat, action) => dispatchInteractionAction(hostStateManager, chat, action),
     now: options.nowAction,
@@ -445,6 +462,28 @@ export async function createClaudeAgentHost(
     }),
     onSignal: (chatUri, signal) => {
       runtimeActionBridge.handle(chatUri, signal);
+      if (signal.type === 'runtime/init') {
+        const catalog = hostStateManager.getCatalogState(rootCatalog.resource);
+        const session = catalog?.sessions.find((candidate) => candidate.chatUri === chatUri);
+        if (catalog !== undefined && session !== undefined) {
+          const configuration = normalizeCatalogSessionConfiguration(
+            { modelId: signal.model },
+            catalog.models,
+            catalog.defaultModelId,
+          );
+          const timestamp = options.nowAction();
+          hostStateManager.dispatchCatalog(rootCatalog.resource, {
+            type: CATALOG_ACTION_TYPES.chatUpdated,
+            session: createCatalogSession({
+              ...withoutSessionConfiguration(session),
+              ...configuration,
+              permissionMode: signal.permissionMode,
+              updatedAt: timestamp,
+            }),
+            timestamp,
+          });
+        }
+      }
       if (signal.type === 'runtime/terminal') {
         interactionRegistry.cancelChat(chatUri, 'Claude runtime closed');
       }
@@ -483,6 +522,15 @@ export async function createClaudeAgentHost(
     if (model === undefined) {
       throw new ClaudeChatActorError('MODEL_NOT_SUPPORTED');
     }
+    // Resolve the complete configuration before any backing, session, or
+    // catalog action is constructed. This keeps an unsupported effort from
+    // being persisted or emitted; omission deliberately delegates to the SDK
+    // default semantics.
+    const configuration = normalizeCatalogSessionConfiguration(
+      { modelId: model.id, effort: input.effort },
+      catalog.models,
+      catalog.defaultModelId,
+    );
 
     let timestamp: string;
     try {
@@ -499,9 +547,9 @@ export async function createClaudeAgentHost(
       sdkSessionId: createSdkSessionId(),
       cwd: workspace.path,
       desiredConfig: {
-        permissionMode: 'default',
-        model: model.id,
-        ...(input.effort === undefined ? {} : { effort: input.effort }),
+        permissionMode: input.permissionMode ?? catalog.defaultPermissionMode,
+        ...(configuration.modelId === undefined ? {} : { model: configuration.modelId }),
+        ...(configuration.effort === undefined ? {} : { effort: configuration.effort }),
       },
     });
     let registered = false;
@@ -516,6 +564,9 @@ export async function createClaudeAgentHost(
         updatedAt: timestamp,
         status: 'idle',
         archived: false,
+        ...(configuration.modelId === undefined ? {} : { modelId: configuration.modelId }),
+        ...(configuration.effort === undefined ? {} : { effort: configuration.effort }),
+        permissionMode: backing.desiredConfig.permissionMode,
       });
       const envelope = hostStateManager.dispatchCatalog(channel, {
         type: CATALOG_ACTION_TYPES.chatCreated,
@@ -547,6 +598,95 @@ export async function createClaudeAgentHost(
     interactionResolver,
     createChat: createChatFromCatalog,
   });
+  const configureChat = async (
+    chatUri: ChatUri,
+    patch: Readonly<{
+      readonly modelId?: import('../domain/ids.js').ModelId | undefined;
+      readonly effort?: import('../catalog/types.js').CatalogEffortLevel | undefined;
+      readonly permissionMode?: import('../catalog/types.js').CatalogPermissionMode | undefined;
+    }>,
+  ): Promise<Readonly<{ modelId?: string; effort?: string; permissionMode: string }>> => {
+    const backing = registry.getBacking(chatUri);
+    if (backing === undefined) throw new Error('chat backing was not found');
+    const catalog = hostStateManager.getCatalogState(rootCatalog.resource);
+    if (catalog === undefined) throw new Error('catalog resource was not found');
+    const modelId = patch.modelId ?? (backing.desiredConfig.model === undefined
+      ? undefined
+      : parseModelId(backing.desiredConfig.model));
+    const model = modelId === undefined
+      ? undefined
+      : catalog.models.find((candidate) => candidate.id === modelId);
+    if (modelId !== undefined && model === undefined) throw new Error('model is not supported');
+    const effort = patch.effort ?? backing.desiredConfig.effort;
+    if (effort !== undefined && model !== undefined && (patch.effort !== undefined || patch.modelId !== undefined)) {
+      if (!model.capabilities.includes('effort')) throw new Error('model does not support effort');
+      if (model.supportedEffortLevels !== undefined && !model.supportedEffortLevels.includes(effort)) {
+        throw new Error('effort is not supported by the selected model');
+      }
+    }
+    const permissionMode = patch.permissionMode ?? backing.desiredConfig.permissionMode;
+    const nextConfig: ClaudeRuntimeConfig = {
+      permissionMode,
+      ...(modelId === undefined ? {} : { model: modelId }),
+      ...(effort === undefined ? {} : { effort }),
+    };
+
+    if (overlayRepository !== undefined && persistedChatUris.has(chatUri)) {
+      await enqueuePersistence(async () => {
+        if (overlayRepository.updateChatBacking !== undefined) {
+          const updated = await overlayRepository.updateChatBacking(chatUri, {
+            ...(modelId === undefined ? {} : { model: modelId }),
+            ...(effort === undefined ? {} : { effort }),
+            permissionMode,
+          });
+          if (updated === undefined) throw new Error('persisted chat backing was not found');
+        } else {
+          const metadata = persistedChatMetadata.get(chatUri);
+          await overlayRepository.saveChatBacking({
+            backing: { ...backing, desiredConfig: nextConfig },
+            ...(metadata?.title === undefined ? {} : { title: metadata.title }),
+            ...(metadata === undefined ? {} : { archived: metadata.archived }),
+          });
+        }
+      });
+    }
+
+    await registry.setRuntimeConfig(chatUri, nextConfig);
+    const currentCatalog = hostStateManager.getCatalogState(rootCatalog.resource);
+    const session = currentCatalog?.sessions.find((candidate) => candidate.chatUri === chatUri);
+    if (session !== undefined) {
+      const timestamp = options.nowAction();
+      hostStateManager.dispatchCatalog(rootCatalog.resource, {
+        type: CATALOG_ACTION_TYPES.chatUpdated,
+        session: createCatalogSession({
+          ...session,
+          updatedAt: timestamp,
+          ...(modelId === undefined ? {} : { modelId }),
+          ...(effort === undefined ? {} : { effort }),
+          permissionMode,
+        }),
+        timestamp,
+      });
+    }
+    return Object.freeze({
+      ...(modelId === undefined ? {} : { modelId }),
+      ...(effort === undefined ? {} : { effort }),
+      permissionMode,
+    });
+  };
+  const resolveWorkspace = async (channel: RootUri, path: string): Promise<import('../catalog/types.js').CatalogWorkspace> => {
+    const workspace = await filesystemWorkspaceResolver.resolveWorkspace(path);
+    const timestamp = options.nowAction();
+    if (timestamp.length === 0) {
+      throw new Error('catalog action timestamp must be non-empty');
+    }
+    hostStateManager.dispatchCatalog(channel, {
+      type: CATALOG_ACTION_TYPES.workspaceUpserted,
+      workspace,
+      timestamp,
+    });
+    return workspace;
+  };
   const stateProvider = new HostStateProvider(hostStateManager, options.hostEpoch);
   const protocolServerHandler = new ProtocolServerHandler({
     hostEpoch: options.hostEpoch,
@@ -554,6 +694,8 @@ export async function createClaudeAgentHost(
     logicalClientRegistry,
     chatActor: actor,
     supportedCommandsProvider: (chatUri) => registry.supportedCommands(chatUri),
+    chatConfigurator: configureChat,
+    workspaceResolver: resolveWorkspace,
     ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
     ...(options.acl === undefined ? {} : { acl: options.acl }),
     ...(options.accessControlList === undefined ? {} : { accessControlList: options.accessControlList }),
@@ -639,14 +781,40 @@ export async function createClaudeAgentHost(
       && models.some((model) => model.id === requestedDefaultModelId)
       ? requestedDefaultModelId
       : models[0]?.id;
-    const projectedSessions = projectCatalogSessions(sdkSessions, workspaces, options.hostEpoch);
+    const projectedSessions = projectCatalogSessions(
+      sdkSessions,
+      workspaces,
+      options.hostEpoch,
+      undefined,
+      models,
+      defaultModelId,
+    );
     const sessions = [] as typeof projectedSessions[number][];
     const sdkSessionsById = new Map(sdkSessions.map((session) => [session.sessionId, session]));
 
     for (const session of projectedSessions) {
       const existingBacking = registry.getBacking(session.chatUri);
       if (existingBacking !== undefined) {
-        sessions.push(session);
+        sessions.push(withSessionConfiguration(session, existingBacking.desiredConfig, models, defaultModelId));
+        continue;
+      }
+
+      // A persisted overlay may have been created under a product chat URI
+      // that predates the SDK-derived URI. Reconcile by SDK session identity so
+      // the durable chat remains addressable and its selected configuration is
+      // not silently dropped from the root catalog.
+      const backingForSdkSession = registry.listBackings().find(
+        (backing) => backing.sdkSessionId === session.sdkSessionRef,
+      );
+      if (backingForSdkSession !== undefined) {
+        const metadata = persistedChatMetadata.get(backingForSdkSession.chatUri);
+        const reconciledSession = createCatalogSession({
+          ...session,
+          chatUri: backingForSdkSession.chatUri,
+          ...(metadata?.title === undefined ? {} : { title: metadata.title }),
+          ...(metadata === undefined ? {} : { archived: metadata.archived }),
+        });
+        sessions.push(withSessionConfiguration(reconciledSession, backingForSdkSession.desiredConfig, models, defaultModelId));
         continue;
       }
 
@@ -654,9 +822,6 @@ export async function createClaudeAgentHost(
       // protocol can only subscribe to resources registered in both the
       // registry and HostStateManager. Hydrate that bridge during catalog
       // refresh so every advertised session is actually openable.
-      if (registry.listBackings().some((backing) => backing.sdkSessionId === session.sdkSessionRef)) {
-        continue;
-      }
       const sdkSession = sdkSessionsById.get(session.sdkSessionRef);
       const workspace = workspaces.find((candidate) => candidate.id === session.workspaceId);
       if (sdkSession === undefined || workspace === undefined) {
@@ -665,24 +830,28 @@ export async function createClaudeAgentHost(
 
       let restored = false;
       try {
-        registry.restorePersistedBacking({
+        // SDKSessionInfo does not carry model/effort. Read the transcript and
+        // retain only values that are actually observable at this boundary.
+        const messages = await sdkService.getSessionMessages(sdkSession.sessionId, {
+          dir: sdkSession.cwd ?? workspace.path,
+          includeSystemMessages: true,
+        });
+        const observedConfiguration = projectSessionConfiguration(messages, models, defaultModelId);
+        const restoredBacking = registry.restorePersistedBacking({
           chatUri: session.chatUri,
           sdkSessionId: session.sdkSessionRef,
           cwd: sdkSession.cwd ?? workspace.path,
           desiredConfig: {
             permissionMode: 'default',
-            ...(defaultModelId === undefined ? {} : { model: defaultModelId }),
+            ...(observedConfiguration.modelId === undefined ? {} : { model: observedConfiguration.modelId }),
+            ...(observedConfiguration.effort === undefined ? {} : { effort: observedConfiguration.effort }),
           },
           lifecycle: 'materialized',
         });
         restored = true;
         hostStateManager.registerChat(session.chatUri);
-        const messages = await sdkService.getSessionMessages(session.sdkSessionRef, {
-          dir: sdkSession.cwd ?? workspace.path,
-          includeSystemMessages: true,
-        });
         hydrateClaudeHistory(hostStateManager, session.chatUri, messages, options.nowAction());
-        sessions.push(session);
+        sessions.push(withSessionConfiguration(session, restoredBacking.desiredConfig, models, defaultModelId));
       } catch {
         hostStateManager.unregisterChat(session.chatUri);
         if (restored) {
@@ -1255,6 +1424,32 @@ function assertNeverInteractionAction(action: never): never {
   throw new TypeError(`unknown interaction action: ${String(action)}`);
 }
 
+function withSessionConfiguration(
+  session: CatalogSession,
+  configuration: ClaudeRuntimeConfig | CatalogSessionConfiguration,
+  models: readonly CatalogModel[],
+  defaultModelId?: CatalogModel['id'],
+): CatalogSession {
+  const model = 'model' in configuration
+    ? configuration.model
+    : (configuration as CatalogSessionConfiguration).modelId;
+  const normalized = normalizeCatalogSessionConfiguration(
+    { modelId: model, effort: configuration.effort },
+    models,
+    defaultModelId,
+  );
+  return createCatalogSession({
+    ...withoutSessionConfiguration(session),
+    ...normalized,
+    ...('permissionMode' in configuration ? { permissionMode: configuration.permissionMode } : {}),
+  });
+}
+
+function withoutSessionConfiguration(session: CatalogSession): Omit<CatalogSession, 'modelId' | 'effort'> {
+  const { modelId: _modelId, effort: _effort, ...withoutConfiguration } = session;
+  return withoutConfiguration;
+}
+
 function assertChatCanBeRegistered(
   backing: ChatBacking,
   hostStateManager: HostStateManager,
@@ -1526,6 +1721,12 @@ function assertHostOptions(options: ClaudeAgentHostOptions): void {
   }
   if (options.runtimeFactory !== undefined && typeof options.runtimeFactory !== 'function') {
     throw new TypeError('runtimeFactory must be a function when provided');
+  }
+  if (options.workspaceFilesystem !== undefined && (
+    typeof options.workspaceFilesystem.realpath !== 'function'
+    || typeof options.workspaceFilesystem.stat !== 'function'
+  )) {
+    throw new TypeError('workspaceFilesystem must provide realpath and stat');
   }
   if (options.overlayRepository !== undefined) {
     assertOverlayRepository(options.overlayRepository);

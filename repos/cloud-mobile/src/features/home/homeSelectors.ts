@@ -5,7 +5,7 @@ export type HomeMode = 'loading' | 'disconnected' | 'ready' | 'no-workspace' | '
 export interface HomeSelectorError {
   readonly code: string;
   readonly message?: string;
-  readonly operation?: 'create' | 'subscribe' | 'send';
+  readonly operation?: 'create' | 'subscribe' | 'send' | 'workspace';
 }
 
 export interface HomeSelectorInput {
@@ -28,6 +28,13 @@ export interface HomeModelItem {
   readonly id: string;
   readonly displayName: string;
   readonly description?: string;
+  readonly supportedEffortLevels: readonly ('low' | 'medium' | 'high' | 'xhigh' | 'max')[];
+}
+
+export interface HomePermissionModeItem {
+  readonly id: NonNullable<HostRootCatalogState['permissionModes']>[number]['id'];
+  readonly displayName: string;
+  readonly description: string;
 }
 
 export type HomeSessionStatus = 'idle' | 'running' | 'waiting' | 'error';
@@ -57,6 +64,8 @@ export interface HomeViewModel {
   readonly selectedModelId: string | undefined;
   readonly selectedWorkspaceName: string | undefined;
   readonly selectedModelName: string | undefined;
+  readonly permissionModes: readonly HomePermissionModeItem[];
+  readonly defaultPermissionMode: HostRootCatalogState['defaultPermissionMode'] | undefined;
   readonly groups: readonly HomeSessionGroup[];
   readonly operationError: HomeSelectorError | undefined;
 }
@@ -74,6 +83,7 @@ export function selectHomeViewModel(input: HomeSelectorInput): HomeViewModel {
     id: model.id,
     displayName: model.displayName,
     ...(model.description === undefined ? {} : { description: model.description }),
+    supportedEffortLevels: Object.freeze([...(model.supportedEffortLevels ?? [])]),
   })) ?? [];
   const selectedWorkspace = workspaces.find((workspace) => workspace.available && workspace.id === input.selectedWorkspaceId)
     ?? workspaces.find((workspace) => workspace.available);
@@ -93,6 +103,8 @@ export function selectHomeViewModel(input: HomeSelectorInput): HomeViewModel {
     selectedModelId: selectedModel?.id,
     selectedWorkspaceName: selectedWorkspace?.name,
     selectedModelName: selectedModel?.displayName,
+    permissionModes: Object.freeze((catalog?.permissionModes ?? []).map((mode) => Object.freeze({ ...mode }))),
+    defaultPermissionMode: catalog?.defaultPermissionMode,
     groups: groupSessions(catalog),
     operationError: input.operationError,
   });

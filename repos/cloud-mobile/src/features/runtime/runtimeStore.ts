@@ -17,6 +17,8 @@ import { AGENT_ROOT_URI, type ChatUri } from '../../protocol/resourceUri';
 import type {
   HostCreateChatParams,
   HostCreateChatResult,
+  HostResolveWorkspaceParams,
+  HostResolveWorkspaceResult,
   HostDispatchActionParams,
   HostDispatchActionResult,
   HostInteractionResolutionResult,
@@ -26,6 +28,9 @@ import type {
   HostChatState,
   HostSlashCommand,
   HostSupportedCommandsResult,
+  HostConfigureChatParams,
+  HostConfigureChatResult,
+  HostPermissionMode,
 } from '../../protocol/hostWire';
 import {
   createAsyncStorageConnectionPreferencesAdapter,
@@ -51,15 +56,17 @@ import {
   type HomeSelectorInput,
   type HomeViewModel,
 } from '../home/homeSelectors';
-import type { ConnectionMode } from '../../domain/types';
+import type { JsonValue, ConnectionMode } from '../../domain/types';
 import type { HostResourceState } from '../../domain/hostReducer';
+import { TransportRpcError } from '../../sync/transport';
 
 export type RuntimePhase = 'loading' | 'ready' | 'unconfigured' | 'error';
 
 export interface RuntimeSelection {
   readonly workspaceId?: string;
   readonly modelId?: string;
-  readonly effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly permissionMode?: HostPermissionMode;
 }
 
 export interface PendingSend {
@@ -68,12 +75,12 @@ export interface PendingSend {
 }
 
 export interface RuntimeOperationError extends HomeSelectorError {
-  readonly operation: 'create' | 'subscribe' | 'send';
+  readonly operation: 'create' | 'subscribe' | 'send' | 'workspace';
   readonly chatUri?: ChatUri;
 }
 
 export interface ChatOperationError {
-  readonly operation: 'send' | 'interrupt' | 'approval' | 'input';
+  readonly operation: 'send' | 'interrupt' | 'approval' | 'input' | 'configure';
   readonly code: string;
   readonly chatUri: ChatUri;
 }
@@ -95,6 +102,7 @@ export type NewChatResult =
       readonly status: 'error';
       readonly operation: RuntimeOperationError['operation'];
       readonly code: string;
+      readonly message?: string;
       readonly chatUri?: ChatUri;
     };
 
@@ -144,8 +152,10 @@ export interface RuntimeSupervisor {
   createChat(params: HostCreateChatParams): Promise<HostCreateChatResult>;
   dispatchAction(params: HostDispatchActionParams): Promise<HostDispatchActionResult>;
   supportedCommands?(channel: ChatUri): Promise<HostSupportedCommandsResult>;
+  configureChat?(params: HostConfigureChatParams): Promise<HostConfigureChatResult>;
   resolveApproval?(params: HostResolveApprovalParams): Promise<HostInteractionResolutionResult>;
   resolveInput?(params: HostResolveInputParams): Promise<HostInteractionResolutionResult>;
+  resolveWorkspace?(params: HostResolveWorkspaceParams): Promise<HostResolveWorkspaceResult>;
 }
 
 export interface CloudRuntimeDependencies {
@@ -185,7 +195,7 @@ export class CloudRuntime {
       phase: 'loading',
       sync: createSyncState({ subscriptions: [AGENT_ROOT_URI] }),
       tokenAvailable: false,
-      selection: { effort: 'medium' },
+      selection: {},
     });
     this.actionsValue = Object.freeze({
       connect: (values: ConnectionFormValues) => this.connect(values),
@@ -194,12 +204,15 @@ export class CloudRuntime {
       retryConnection: () => this.retryConnection(),
       subscribeChat: (chatUri: ChatUri) => this.subscribeChat(chatUri),
       setWorkspace: (workspaceId: string) => this.setWorkspace(workspaceId),
+      resolveWorkspace: (path: string) => this.resolveWorkspace(path),
       setModel: (modelId: string) => this.setModel(modelId),
       setEffort: (effort: RuntimeSelection['effort']) => this.setEffort(effort),
+      setPermissionMode: (permissionMode: HostPermissionMode) => this.setPermissionMode(permissionMode),
       createChatAndSend: (input: CreateChatAndSendInput) => this.createChatAndSend(input),
       retryPendingSend: () => this.retryPendingSend(),
       sendChat: (input: SendChatInput) => this.sendChat(input),
       supportedCommands: (chatUri: ChatUri) => this.supportedCommands(chatUri),
+      configureChat: (input: HostConfigureChatParams) => this.configureChat(input),
       interruptChat: (input: InterruptChatInput) => this.interruptChat(input),
       allowApproval: (input: ResolveApprovalInput) => this.resolveApproval({ ...input, decision: 'allow' }),
       denyApproval: (input: ResolveApprovalInput) => this.resolveApproval({ ...input, decision: 'deny' }),
@@ -235,7 +248,6 @@ export class CloudRuntime {
         savedConnection: savedConnection ?? undefined,
         tokenAvailable: token !== null,
         selection: {
-          effort: 'medium',
           ...(savedConnection?.lastWorkspaceId === undefined ? {} : { workspaceId: savedConnection.lastWorkspaceId }),
           ...(savedConnection?.lastModelId === undefined ? {} : { modelId: savedConnection.lastModelId }),
         },
@@ -384,6 +396,30 @@ export class CloudRuntime {
     void this.persistSelection({ workspaceId });
   }
 
+  private async resolveWorkspace(path: string): Promise<WorkspaceResolutionResult> {
+    const supervisor = this.requireConnectedSupervisor();
+    if (supervisor?.resolveWorkspace === undefined) {
+      return this.failWorkspace('RESOLVE_WORKSPACE_UNAVAILABLE', 'Host 暂不支持工作区路径校验');
+    }
+
+    try {
+      const result = await supervisor.resolveWorkspace({ channel: AGENT_ROOT_URI, path });
+      const workspace = result.workspace;
+      if (workspace.status !== 'available') {
+        return this.failWorkspace('WORKSPACE_UNAVAILABLE', `Host 返回的工作区不可用：${workspace.displayName}`);
+      }
+      this.setState({
+        selection: { ...this.state.selection, workspaceId: workspace.id },
+        operationError: undefined,
+      });
+      void this.persistSelection({ workspaceId: workspace.id });
+      return { status: 'accepted', workspace };
+    } catch (error) {
+      const details = workspaceOperationErrorDetails(error);
+      return this.failWorkspace(details.code, details.message);
+    }
+  }
+
   private setModel(modelId: string): void {
     this.setState({ selection: { ...this.state.selection, modelId } });
     void this.persistSelection({ modelId });
@@ -391,6 +427,10 @@ export class CloudRuntime {
 
   private setEffort(effort: RuntimeSelection['effort']): void {
     this.setState({ selection: { ...this.state.selection, effort } });
+  }
+
+  private setPermissionMode(permissionMode: HostPermissionMode): void {
+    this.setState({ selection: { ...this.state.selection, permissionMode } });
   }
 
   private async persistSelection(selection: Partial<RuntimeSelection>): Promise<void> {
@@ -418,6 +458,7 @@ export class CloudRuntime {
         workspaceId: input.workspaceId,
         modelId: input.modelId,
         effort: input.effort ?? this.state.selection.effort,
+        permissionMode: input.permissionMode ?? this.state.selection.permissionMode,
         prompt: input.prompt,
         clientSeq: this.nextClientSeq(),
         commandId: this.nextCommandId('create'),
@@ -494,6 +535,19 @@ export class CloudRuntime {
       return (await supervisor.supportedCommands(chatUri)).commands;
     } catch {
       return Object.freeze([]);
+    }
+  }
+
+  private async configureChat(input: HostConfigureChatParams): Promise<ChatActionResult> {
+    const supervisor = this.requireConnectedSupervisor();
+    if (supervisor?.configureChat === undefined) return this.failChatOperation('configure', input.channel, 'NOT_CONNECTED');
+    try {
+      if (!this.state.sync.subscriptions.includes(input.channel)) await supervisor.subscribe(input.channel);
+      await supervisor.configureChat(input);
+      this.setState({ chatOperationError: undefined });
+      return { status: 'accepted', operation: 'configure', chatUri: input.channel };
+    } catch (error) {
+      return this.failChatOperation('configure', input.channel, errorCode(error));
     }
   }
 
@@ -606,11 +660,13 @@ export class CloudRuntime {
     operation: RuntimeOperationError['operation'],
     code: string,
     chatUri?: ChatUri,
+    message?: string,
   ): NewChatResult {
     const error: RuntimeOperationError = {
       operation,
       code,
       ...(chatUri === undefined ? {} : { chatUri }),
+      ...(message === undefined ? {} : { message }),
     };
     this.setState({ operationError: error });
     return {
@@ -618,6 +674,7 @@ export class CloudRuntime {
       operation,
       code,
       ...(chatUri === undefined ? {} : { chatUri }),
+      ...(message === undefined ? {} : { message }),
     };
   }
 
@@ -625,6 +682,11 @@ export class CloudRuntime {
     const supervisor = this.supervisor;
     if (supervisor === undefined || supervisor.getState().status !== 'connected') return undefined;
     return supervisor;
+  }
+
+  private failWorkspace(code: string, message?: string): WorkspaceResolutionResult {
+    this.setState({ operationError: { operation: 'workspace', code, ...(message === undefined ? {} : { message }) } });
+    return { status: 'error', operation: 'workspace', code, ...(message === undefined ? {} : { message }) };
   }
 
   private attachConnection(config: {
@@ -640,7 +702,7 @@ export class CloudRuntime {
       clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
       clientInfo: {
         name: 'Cloud',
-        version: '0.1.0',
+        version: '0.2.0',
         platform: this.dependencies.platform ?? 'unknown',
       },
       store: syncStore,
@@ -687,6 +749,7 @@ export interface CreateChatAndSendInput {
   readonly workspaceId: string;
   readonly modelId: string;
   readonly effort?: RuntimeSelection['effort'];
+  readonly permissionMode?: HostPermissionMode;
 }
 
 export interface CloudRuntimeActions {
@@ -696,12 +759,15 @@ export interface CloudRuntimeActions {
   retryConnection(): void;
   subscribeChat(chatUri: ChatUri): Promise<boolean>;
   setWorkspace(workspaceId: string): void;
+  resolveWorkspace(path: string): Promise<WorkspaceResolutionResult>;
   setModel(modelId: string): void;
   setEffort(effort: RuntimeSelection['effort']): void;
+  setPermissionMode(permissionMode: HostPermissionMode): void;
   createChatAndSend(input: CreateChatAndSendInput): Promise<NewChatResult>;
   retryPendingSend(): Promise<NewChatResult>;
   sendChat(input: SendChatInput): Promise<ChatActionResult>;
   supportedCommands(chatUri: ChatUri): Promise<readonly HostSlashCommand[]>;
+  configureChat(input: HostConfigureChatParams): Promise<ChatActionResult>;
   interruptChat(input: InterruptChatInput): Promise<ChatActionResult>;
   allowApproval(input: ResolveApprovalInput): Promise<ChatActionResult>;
   denyApproval(input: ResolveApprovalInput): Promise<ChatActionResult>;
@@ -709,6 +775,10 @@ export interface CloudRuntimeActions {
   clearOperationError(): void;
   clearChatOperationError(): void;
 }
+
+export type WorkspaceResolutionResult =
+  | { readonly status: 'accepted'; readonly workspace: HostResolveWorkspaceResult['workspace'] }
+  | { readonly status: 'error'; readonly operation: 'workspace'; readonly code: string; readonly message?: string };
 
 export function selectSyncState(state: CloudRuntimeState): SyncState {
   return state.sync;
@@ -747,6 +817,42 @@ function errorCode(error: unknown): string {
   if (error instanceof Error && error.name === 'TransportRpcError') return 'RPC_ERROR';
   if (error instanceof Error && error.name === 'TransportProtocolError') return 'PROTOCOL';
   return 'UNKNOWN';
+}
+
+type WorkspaceResolveErrorCode =
+  | 'WORKSPACE_PATH_INVALID'
+  | 'WORKSPACE_NOT_FOUND'
+  | 'WORKSPACE_NOT_DIRECTORY'
+  | 'WORKSPACE_ACCESS_DENIED'
+  | 'WORKSPACE_RESOLVE_FAILED';
+
+const workspaceResolveErrorMessages: Readonly<Record<WorkspaceResolveErrorCode, string>> = Object.freeze({
+  WORKSPACE_PATH_INVALID: '工作区路径格式无效，请输入绝对路径',
+  WORKSPACE_NOT_FOUND: '找不到这个工作区路径',
+  WORKSPACE_NOT_DIRECTORY: '这个路径不是文件夹',
+  WORKSPACE_ACCESS_DENIED: '没有权限访问这个工作区',
+  WORKSPACE_RESOLVE_FAILED: '工作区校验失败，请稍后重试',
+});
+
+function isWorkspaceResolveErrorCode(value: unknown): value is WorkspaceResolveErrorCode {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(workspaceResolveErrorMessages, value);
+}
+
+function workspaceOperationErrorDetails(error: unknown): { readonly code: WorkspaceResolveErrorCode; readonly message: string } {
+  if (error instanceof TransportRpcError) {
+    const data = error.data;
+    if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+      const code = (data as { readonly code?: JsonValue }).code;
+      if (isWorkspaceResolveErrorCode(code)) {
+        return { code, message: workspaceResolveErrorMessages[code] };
+      }
+    }
+  }
+  return {
+    code: 'WORKSPACE_RESOLVE_FAILED',
+    message: workspaceResolveErrorMessages.WORKSPACE_RESOLVE_FAILED,
+  };
 }
 
 function freezeRuntimeState(state: CloudRuntimeState): CloudRuntimeState {

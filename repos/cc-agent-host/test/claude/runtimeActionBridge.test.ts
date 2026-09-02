@@ -136,7 +136,13 @@ describe('ClaudeRuntimeActionBridge', () => {
     const bridge = new ClaudeRuntimeActionBridge({ hostStateManager: host, nowAction: () => 'unused' });
     const startSeq = host.serverSeq;
 
-    bridge.handle(chat, { type: 'runtime/init', generation: 2, sdkSessionId: 'sdk-new' });
+    bridge.handle(chat, {
+      type: 'runtime/init',
+      generation: 2,
+      sdkSessionId: 'sdk-new',
+      model: 'claude-sonnet',
+      permissionMode: 'default',
+    });
     bridge.handle(chat, runtimeMessage(
       stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'stale' } }),
       { generation: 1 },

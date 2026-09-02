@@ -206,6 +206,7 @@ export class ClaudeChatActor implements ChatCommandActor, CatalogChatCreator {
       workspaceId: parseIdentifier(input.workspaceId, parseWorkspaceId, 'workspaceId'),
       modelId: parseIdentifier(input.modelId, parseModelId, 'modelId'),
       ...(input.effort === undefined ? {} : { effort: input.effort }),
+      ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       ...(input.initialPrompt === undefined ? {} : { initialPrompt: input.initialPrompt }),
     };
     const origin: ActionOrigin = {

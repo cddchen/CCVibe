@@ -4,6 +4,8 @@ import {
   parseHostInitializeResult,
   parseHostReconnectResult,
   parseHostCreateChatResult,
+  parseHostResolveWorkspaceResult,
+  parseHostConfigureChatResult,
   parseHostDispatchActionResult,
   parseHostInteractionResolutionResult,
   parseHostSubscribeResult,
@@ -11,6 +13,10 @@ import {
   parseHostUnsubscribeResult,
   type HostCreateChatParams,
   type HostCreateChatResult,
+  type HostResolveWorkspaceParams,
+  type HostResolveWorkspaceResult,
+  type HostConfigureChatParams,
+  type HostConfigureChatResult,
   type HostDispatchActionParams,
   type HostDispatchActionResult,
   type HostResolveApprovalParams,
@@ -184,6 +190,15 @@ export class ConnectionSupervisor {
     return parseHostCreateChatResult(raw);
   }
 
+  public async resolveWorkspace(params: HostResolveWorkspaceParams): Promise<HostResolveWorkspaceResult> {
+    const transport = this.requireTransport();
+    const raw = await transport.request('catalog/resolveWorkspace', {
+      channel: params.channel,
+      path: params.path,
+    });
+    return parseHostResolveWorkspaceResult(raw);
+  }
+
   public async dispatchAction(params: HostDispatchActionParams): Promise<HostDispatchActionResult> {
     const transport = this.requireTransport();
     const raw = await transport.request('dispatchAction', params as unknown as JsonValue);
@@ -194,6 +209,12 @@ export class ConnectionSupervisor {
     const transport = this.requireTransport();
     const raw = await transport.request('chat/supportedCommands', { channel } as unknown as JsonValue);
     return parseHostSupportedCommandsResult(raw);
+  }
+
+  public async configureChat(params: HostConfigureChatParams): Promise<HostConfigureChatResult> {
+    const transport = this.requireTransport();
+    const raw = await transport.request('chat/configure', params as unknown as JsonValue);
+    return parseHostConfigureChatResult(raw);
   }
 
   public async resolveApproval(params: HostResolveApprovalParams): Promise<HostInteractionResolutionResult> {

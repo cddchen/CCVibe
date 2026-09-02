@@ -1,6 +1,6 @@
 import type { UUID } from 'node:crypto';
 
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import type { TurnId } from '../domain/ids.js';
 
@@ -40,6 +40,8 @@ export type ClaudeRuntimeSignal =
       readonly type: 'runtime/init';
       readonly generation: number;
       readonly sdkSessionId: string;
+      readonly model: string;
+      readonly permissionMode: PermissionMode;
       readonly capabilities?: ClaudeRuntimeCapabilities;
     }
   | {

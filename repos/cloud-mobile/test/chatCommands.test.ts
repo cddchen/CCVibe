@@ -4,11 +4,32 @@ import {
   buildApprovalResolutionCommand,
   buildChatDispatchCommand,
   buildInputResolutionCommand,
+  insertSlashCommand,
 } from '../src/features/chat/chatCommands';
 
 const chatUri = 'agent-chat://workspace-a/chat-a';
 
 describe('chat command builders', () => {
+  it('inserts a slash command at the composer selection without replacing the draft', () => {
+    expect(insertSlashCommand(
+      '请先检查，然后继续',
+      { start: 5, end: 5 },
+      { name: 'animate', argumentHint: '<target>' },
+    )).toEqual({
+      text: '请先检查， /animate <target> 然后继续',
+      cursor: 24,
+    });
+
+    expect(insertSlashCommand(
+      '保留前文',
+      { start: 4, end: 4 },
+      { name: 'review', argumentHint: '' },
+    )).toEqual({
+      text: '保留前文 /review ',
+      cursor: 13,
+    });
+  });
+
   it('builds a send command with the exact dispatchAction wire shape', () => {
     expect(buildChatDispatchCommand({
       channel: chatUri,

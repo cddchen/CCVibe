@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseHostReconnectResult,
+  parseHostResolveWorkspaceResult,
   parseHostStateSnapshot,
   type HostChatState,
   type HostRootCatalogState,
@@ -24,6 +25,8 @@ const rootState = {
     updatedAt: '2026-08-29T00:00:00.000Z',
     status: 'in_progress',
     archived: false,
+    modelId: 'claude-sonnet',
+    effort: 'high',
   }],
   models: [{
     id: 'claude-sonnet',
@@ -64,7 +67,7 @@ describe('Host wire contract adapter', () => {
     expect(snapshot.resource).toBe(root);
     expect(snapshot.state).toMatchObject({
       host: { displayName: 'Host A' },
-      sessions: [{ chatUri: chat, status: 'in_progress', archived: false }],
+      sessions: [{ chatUri: chat, status: 'in_progress', archived: false, modelId: 'claude-sonnet', effort: 'high' }],
     });
 
     const view = projectRootCatalog(snapshot.state as HostRootCatalogState, 4);
@@ -94,6 +97,20 @@ describe('Host wire contract adapter', () => {
     })).toThrow();
   });
 
+  it('keeps session model metadata backward-compatible when fields are absent', () => {
+    const legacySession = { ...rootState.sessions[0] };
+    delete (legacySession as { modelId?: string }).modelId;
+    delete (legacySession as { effort?: string }).effort;
+    const snapshot = parseHostStateSnapshot({
+      resource: root,
+      state: { ...rootState, sessions: [legacySession] },
+      fromSeq: 1,
+    });
+    const session = (snapshot.state as HostRootCatalogState).sessions[0];
+    expect(session?.modelId).toBeUndefined();
+    expect(session?.effort).toBeUndefined();
+  });
+
   it('parses exact Host chat snapshots and replay actions, including catalog action names', () => {
     const snapshot = parseHostStateSnapshot({ resource: chat, state: chatState, fromSeq: 2 });
     expect(snapshot.resource).toBe(chat);
@@ -117,5 +134,24 @@ describe('Host wire contract adapter', () => {
     if (result.type === 'replay') {
       expect(result.actions[0]?.action.type).toBe('catalog/sessionsReplaced');
     }
+  });
+
+  it('parses the Host-resolved workspace returned by catalog/resolveWorkspace', () => {
+    const workspace = parseHostResolveWorkspaceResult({
+      workspace: {
+        id: 'workspace-resolved',
+        path: '/tmp/resolved-workspace',
+        displayName: 'Resolved Workspace',
+        status: 'available',
+      },
+    });
+
+    expect(workspace.workspace).toEqual({
+      id: 'workspace-resolved',
+      path: '/tmp/resolved-workspace',
+      displayName: 'Resolved Workspace',
+      status: 'available',
+    });
+    expect(() => parseHostResolveWorkspaceResult({ workspace: { id: 'made-up' } })).toThrow();
   });
 });

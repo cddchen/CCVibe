@@ -41,7 +41,7 @@ const IOS_CAST_SHADOW: ViewStyle = Object.freeze({
 export const GlassPanel = React.memo(function GlassPanel(props: GlassPanelProps) {
   const radius = props.radius ?? DEFAULT_RADIUS;
   const outerStyle: StyleProp<ViewStyle> = [
-    { borderRadius: radius },
+    { borderRadius: radius, flexShrink: 1, minHeight: 0 },
     props.maxWidth === undefined ? null : { maxWidth: props.maxWidth },
     Platform.OS === 'ios' ? IOS_CAST_SHADOW : null,
   ];
