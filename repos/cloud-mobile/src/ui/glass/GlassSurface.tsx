@@ -211,6 +211,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   contentLayer: {
+    // Keep normal-flow content tied to a bounded surface. `flexGrow` fills a
+    // fixed-height sheet (so an inner ScrollView gets a viewport) while still
+    // preserving intrinsic height for auto-sized cards and composer chrome.
+    flexGrow: 1,
     position: 'relative',
   },
 });

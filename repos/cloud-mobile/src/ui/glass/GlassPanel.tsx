@@ -12,6 +12,7 @@ const DEFAULT_BLUR_INTENSITY = 58;
 export type GlassPanelProps = Readonly<{
   children?: React.ReactNode;
   radius?: number;
+  containerStyle?: StyleProp<ViewStyle>;
   style?: StyleProp<ViewStyle>;
   maxWidth?: number;
   blurIntensity?: number;
@@ -44,6 +45,7 @@ export const GlassPanel = React.memo(function GlassPanel(props: GlassPanelProps)
     { borderRadius: radius, flexShrink: 1, minHeight: 0 },
     props.maxWidth === undefined ? null : { maxWidth: props.maxWidth },
     Platform.OS === 'ios' ? IOS_CAST_SHADOW : null,
+    props.containerStyle,
   ];
 
   return (

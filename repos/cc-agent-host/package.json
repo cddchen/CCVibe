@@ -1,6 +1,6 @@
 {
   "name": "@cddchen/cloud",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Run a Cloud Agent Host for Claude Code sessions.",
   "type": "module",
   "main": "./dist/index.js",
@@ -32,6 +32,8 @@
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "prepack": "npm run build",
     "start": "node dist/bin/cloud.js start",
+    "stop": "node dist/bin/cloud.js stop",
+    "status": "node dist/bin/cloud.js status",
     "start:dev": "npm run build && node dist/bin/cloud.js start",
     "start:prod": "npm run build && node dist/bin/cloud.js start --env=production --foreground"
   },

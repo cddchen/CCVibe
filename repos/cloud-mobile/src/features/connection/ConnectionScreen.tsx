@@ -21,6 +21,8 @@ import {
 } from '../runtime/CloudRuntimeProvider';
 import { validateConnectionForm, type ConnectionFormValues } from './connectionForm';
 import type { CloudRuntimeState } from '../runtime/runtimeStore';
+import type { ConnectionId } from '../../protocol/ids';
+import type { ConnectionPreferences } from '../../storage/connectionPreferences';
 import { GlassSurface } from '../../ui/glass/GlassSurface';
 import { CLOUD_DESIGN_TOKENS } from '../../ui/theme/cloudTheme';
 
@@ -39,23 +41,24 @@ export default function ConnectionScreen(): JSX.Element {
   const [form, setForm] = useState<ConnectionFormValues>(initialForm);
   const [errors, setErrors] = useState<Readonly<Partial<Record<'hostUrl' | 'token', string>>>>({});
   const [submitting, setSubmitting] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [editingConnectionId, setEditingConnectionId] = useState<ConnectionId | null | undefined>();
   const hasEditedForm = useRef(false);
 
   useEffect(() => {
-    const savedAddress = connection.savedAddress;
-    if (savedAddress === undefined) {
-      setEditing(true);
+    if (connection.selectedHost === undefined) {
+      setEditingConnectionId(null);
+      if (!hasEditedForm.current) setForm(initialForm);
       return;
     }
     if (hasEditedForm.current) return;
     setForm((current) => ({
       ...current,
-      hostUrl: savedAddress,
-      developmentMode: connection.savedMode === 'development',
+      hostUrl: connection.selectedHost?.address ?? '',
+      token: '',
+      developmentMode: connection.selectedHost?.mode === 'development',
     }));
-    setEditing(false);
-  }, [connection.savedAddress, connection.savedMode]);
+    setEditingConnectionId(undefined);
+  }, [connection.selectedHost]);
 
   const updateForm = (patch: Partial<ConnectionFormValues>): void => {
     hasEditedForm.current = true;
@@ -70,7 +73,13 @@ export default function ConnectionScreen(): JSX.Element {
 
   const submit = async (): Promise<void> => {
     const validation = validateConnectionForm(form);
-    if (!validation.ok) {
+    // A blank token while editing an existing row means "keep the protected
+    // token". Runtime resolves it from that Host's SecureStore namespace.
+    const canKeepStoredToken = editingConnectionId !== null
+      && !validation.ok
+      && validation.errors.hostUrl === undefined
+      && validation.errors.token !== undefined;
+    if (!validation.ok && !canKeepStoredToken) {
       setErrors(validation.errors);
       return;
     }
@@ -78,12 +87,12 @@ export default function ConnectionScreen(): JSX.Element {
     setErrors({});
     setSubmitting(true);
     try {
-      const result = await actions.connect(form);
+      const result = await actions.connect(form, editingConnectionId ?? null);
       if (!result.ok) {
         setErrors(result.errors);
         return;
       }
-      setEditing(false);
+      setEditingConnectionId(undefined);
       hasEditedForm.current = false;
       router.replace('/');
     } finally {
@@ -103,12 +112,41 @@ export default function ConnectionScreen(): JSX.Element {
   const beginEditing = (): void => {
     hasEditedForm.current = false;
     setErrors({});
-    setEditing(true);
+    setForm({
+      hostUrl: connection.selectedHost?.address ?? '',
+      token: '',
+      developmentMode: connection.selectedHost?.mode === 'development',
+    });
+    setEditingConnectionId(connection.selectedHost?.connectionId ?? null);
+  };
+
+  const addHost = (): void => {
+    hasEditedForm.current = false;
+    setErrors({});
+    setForm(initialForm);
+    setEditingConnectionId(null);
+  };
+
+  const switchHost = async (host: ConnectionPreferences): Promise<void> => {
+    if (submitting || editingConnectionId !== undefined || host.connectionId === connection.selectedConnectionId) return;
+    setErrors({});
+    setSubmitting(true);
+    try {
+      const result = await actions.switchConnection(host.connectionId);
+      if (result.ok) {
+        router.replace('/');
+      } else {
+        setErrors(result.errors);
+      }
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const statusLabel = connectionStatusLabel(connection.syncStatus);
   const statusColor = syncStatusColor(connection.syncStatus, theme);
-  const hasSavedConnection = connection.savedAddress !== undefined;
+  const editing = editingConnectionId !== undefined;
+  const hasSavedConnection = connection.selectedHost !== undefined;
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]}>
@@ -168,10 +206,57 @@ export default function ConnectionScreen(): JSX.Element {
           >
             <View style={styles.cardHeader}>
               <View>
-                <Text style={[styles.cardTitle, { color: theme.colors.onSurface }]}>连接设置</Text>
-                <Text style={[styles.cardHint, { color: theme.colors.onSurfaceVariant }]}>管理 Cloud Host 与访问凭证</Text>
+                <Text style={[styles.cardTitle, { color: theme.colors.onSurface }]}>Host 列表</Text>
+                <Text style={[styles.cardHint, { color: theme.colors.onSurfaceVariant }]}>选择 Host，分别保存地址、模式与 Token</Text>
               </View>
-              <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="tune-variant" size={22} />
+              <Pressable
+                accessibilityLabel="新增 Host"
+                accessibilityRole="button"
+                disabled={submitting}
+                hitSlop={8}
+                onPress={addHost}
+                style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
+                testID="connection-add"
+              >
+                <MaterialCommunityIcons color={theme.colors.primary} name="plus" size={23} />
+                <Text style={[styles.addButtonLabel, { color: theme.colors.primary }]}>新增</Text>
+              </Pressable>
+            </View>
+
+            <View accessibilityLabel="已保存的 Host" testID="connection-host-list">
+              {connection.hosts.map((host) => {
+                const selected = host.connectionId === connection.selectedConnectionId;
+                return (
+                  <Pressable
+                    accessibilityLabel={`${host.address}${selected ? '，当前 Host' : ''}`}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    disabled={submitting || editing}
+                    key={host.connectionId}
+                    onPress={() => void switchHost(host)}
+                    style={({ pressed }) => [
+                      styles.hostRow,
+                      { borderBottomColor: theme.colors.outlineVariant },
+                      selected && { backgroundColor: theme.colors.secondaryContainer },
+                      pressed && styles.hostRowPressed,
+                    ]}
+                    testID={`connection-host-${host.connectionId}`}
+                  >
+                    <View style={[styles.hostStatusIcon, { backgroundColor: selected ? theme.colors.primary : theme.colors.surfaceVariant }]}>
+                      <MaterialCommunityIcons color={selected ? theme.colors.onPrimary : theme.colors.onSurfaceVariant} name={selected ? 'check' : 'cloud-outline'} size={19} />
+                    </View>
+                    <View style={styles.hostCopy}>
+                      <Text ellipsizeMode="middle" numberOfLines={1} style={[styles.hostAddress, { color: theme.colors.onSurface }]}>{host.address}</Text>
+                      <Text style={[styles.hostMode, { color: theme.colors.onSurfaceVariant }]}>{host.mode === 'development' ? '开发模式' : '生产模式'} · 凭证按 Host 独立保护</Text>
+                    </View>
+                    {selected ? <Text style={[styles.selectedLabel, { color: theme.colors.primary }]}>当前</Text> : null}
+                    <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-right" size={20} />
+                  </Pressable>
+                );
+              })}
+              {connection.hosts.length === 0 ? (
+                <Text style={[styles.emptyHosts, { color: theme.colors.onSurfaceVariant }]}>还没有保存 Host，请新增一个连接。</Text>
+              ) : null}
             </View>
 
             <SettingRow icon="web" label="Cloud Host" theme={theme}>
@@ -190,7 +275,7 @@ export default function ConnectionScreen(): JSX.Element {
                 />
               ) : (
                 <Text ellipsizeMode="middle" numberOfLines={1} style={[styles.settingValue, { color: theme.colors.onSurfaceVariant }]}>
-                  {connection.savedAddress ?? '尚未配置'}
+                  {connection.selectedHost?.address ?? '尚未配置'}
                 </Text>
               )}
             </SettingRow>
@@ -298,7 +383,11 @@ function SettingRow(props: SettingRowProps): JSX.Element {
   );
 }
 
-interface ConnectionScreenState {
+export interface ConnectionScreenState {
+  readonly hosts: readonly ConnectionPreferences[];
+  readonly selectedConnectionId: ConnectionId | undefined;
+  readonly selectedHost: ConnectionPreferences | undefined;
+  /** Compatibility selectors for the former single-Host settings card. */
   readonly savedAddress: string | undefined;
   readonly savedMode: 'development' | 'production' | undefined;
   readonly tokenAvailable: boolean;
@@ -306,10 +395,16 @@ interface ConnectionScreenState {
   readonly operationError: CloudRuntimeState['operationError'];
 }
 
-function selectConnectionScreenState(state: CloudRuntimeState): ConnectionScreenState {
+export function selectConnectionScreenState(state: CloudRuntimeState): ConnectionScreenState {
+  const selectedConnectionId = state.selectedConnectionId;
+  const selectedHost = state.savedConnections.find((host) => host.connectionId === selectedConnectionId)
+    ?? state.savedConnection;
   return {
-    savedAddress: state.savedConnection?.address,
-    savedMode: state.savedConnection?.mode,
+    hosts: state.savedConnections,
+    selectedConnectionId,
+    selectedHost,
+    savedAddress: selectedHost?.address,
+    savedMode: selectedHost?.mode,
     tokenAvailable: state.tokenAvailable,
     syncStatus: state.sync.status,
     operationError: state.operationError,
@@ -421,6 +516,16 @@ const styles = StyleSheet.create({
   cardHeader: { minHeight: 48, marginBottom: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   cardTitle: { fontSize: 20, lineHeight: 26, fontWeight: '700', letterSpacing: -0.3 },
   cardHint: { marginTop: 3, fontSize: 13, lineHeight: 19 },
+  addButton: { minHeight: 44, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 14 },
+  addButtonLabel: { fontSize: 14, lineHeight: 20, fontWeight: '700' },
+  hostRow: { minHeight: 68, paddingHorizontal: 8, paddingVertical: 8, marginHorizontal: -8, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderRadius: 14 },
+  hostRowPressed: { opacity: 0.72 },
+  hostStatusIcon: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
+  hostCopy: { flex: 1, minWidth: 0 },
+  hostAddress: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
+  hostMode: { marginTop: 2, fontSize: 12, lineHeight: 17 },
+  selectedLabel: { fontSize: 12, lineHeight: 17, fontWeight: '700' },
+  emptyHosts: { paddingVertical: 14, fontSize: 13, lineHeight: 19, textAlign: 'center' },
   settingRow: { minHeight: 68, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth },
   settingIcon: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
   settingCopy: { flex: 1, minWidth: 0 },

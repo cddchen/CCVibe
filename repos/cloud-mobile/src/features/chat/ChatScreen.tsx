@@ -35,7 +35,13 @@ import {
 import { parseChatUri, type ChatUri } from '../../protocol/resourceUri';
 import type { HostPermissionMode, HostSlashCommand } from '../../protocol/hostWire';
 import { insertSlashCommand, type ComposerTextSelection } from './chatCommands';
-import { atBottomFromMetrics, shouldFollowActiveStream, type ChatScrollMetrics } from './chatScroll';
+import {
+  atBottomFromMetrics,
+  chatBottomOffset,
+  shouldCommitChatBottomMeasurement,
+  shouldFollowActiveStream,
+  type ChatScrollMetrics,
+} from './chatScroll';
 import { nextRequestSheet, type RequestSheetKind } from './sheetCoordinator';
 
 type ConfigPicker = 'model' | 'effort' | 'permission' | undefined;
@@ -85,6 +91,10 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const atBottomRef = useRef(false);
   const bottomStateMeasuredRef = useRef(false);
   const scrollMetricsRef = useRef<ChatScrollMetrics>({ contentHeight: 0, offsetY: 0, viewportHeight: 0 });
+  const activeReplyRef = useRef(false);
+  const programmaticScrollPendingRef = useRef(false);
+  const userScrollInProgressRef = useRef(false);
+  const userScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [composerHeight, setComposerHeight] = useState(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const composerSelectionRef = useRef<ComposerTextSelection>({ start: 0, end: 0 });
@@ -107,6 +117,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   }, []);
   useEffect(() => () => { if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current); }, []);
   useEffect(() => () => { if (requestSheetTimerRef.current !== undefined) clearTimeout(requestSheetTimerRef.current); }, []);
+  useEffect(() => () => { if (userScrollIdleTimerRef.current !== undefined) clearTimeout(userScrollIdleTimerRef.current); }, []);
 
   const activeApproval = view.pendingApprovals.find((candidate) => candidate.id === approvalId)
     ?? (approvalId === undefined ? view.pendingApprovals.find((candidate) => candidate.id !== dismissedApprovalId) : undefined);
@@ -198,38 +209,77 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const canChangeComposer = !sending && !stopping && !active;
   const composerDisabled = sending || stopping;
 
-  const updateBottomState = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>): void => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    scrollMetricsRef.current = { contentHeight: contentSize.height, viewportHeight: layoutMeasurement.height, offsetY: contentOffset.y };
-    const nextAtBottom = atBottomFromMetrics(scrollMetricsRef.current);
-    if (nextAtBottom === undefined) return;
+  const publishBottomState = useCallback((nextAtBottom: boolean): void => {
     if (nextAtBottom === atBottomRef.current && bottomStateMeasuredRef.current) return;
     bottomStateMeasuredRef.current = true;
     atBottomRef.current = nextAtBottom;
     setShowScrollToBottom(!nextAtBottom);
   }, []);
+  const updateBottomState = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>): void => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    scrollMetricsRef.current = { contentHeight: contentSize.height, viewportHeight: layoutMeasurement.height, offsetY: contentOffset.y };
+    const nextAtBottom = atBottomFromMetrics(scrollMetricsRef.current);
+    if (nextAtBottom === undefined) return;
+    if (!shouldCommitChatBottomMeasurement({
+      activeReply: active || activeReplyRef.current,
+      currentlyAtBottom: atBottomRef.current,
+      measuredAtBottom: nextAtBottom,
+      programmaticScrollPending: programmaticScrollPendingRef.current,
+      userInteracting: userScrollInProgressRef.current,
+    })) return;
+    if (nextAtBottom || userScrollInProgressRef.current) programmaticScrollPendingRef.current = false;
+    publishBottomState(nextAtBottom);
+  }, [active, publishBottomState]);
   const scrollToBottom = useCallback((): void => {
-    atBottomRef.current = true;
-    setShowScrollToBottom(false);
-    transcriptRef.current?.scrollToEnd({ animated: false });
+    const offset = chatBottomOffset(scrollMetricsRef.current);
+    if (offset === undefined) return;
+    programmaticScrollPendingRef.current = true;
+    scrollMetricsRef.current = { ...scrollMetricsRef.current, offsetY: offset };
+    publishBottomState(true);
+    transcriptRef.current?.scrollToOffset({ offset, animated: false });
+  }, [publishBottomState]);
+  const beginUserScroll = useCallback((): void => {
+    if (userScrollIdleTimerRef.current !== undefined) clearTimeout(userScrollIdleTimerRef.current);
+    userScrollIdleTimerRef.current = undefined;
+    userScrollInProgressRef.current = true;
+    programmaticScrollPendingRef.current = false;
   }, []);
+  const endUserDrag = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>): void => {
+    updateBottomState(event);
+    if (userScrollIdleTimerRef.current !== undefined) clearTimeout(userScrollIdleTimerRef.current);
+    userScrollIdleTimerRef.current = setTimeout(() => {
+      userScrollIdleTimerRef.current = undefined;
+      userScrollInProgressRef.current = false;
+    }, 120);
+  }, [updateBottomState]);
+  const endUserMomentum = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>): void => {
+    updateBottomState(event);
+    userScrollInProgressRef.current = false;
+  }, [updateBottomState]);
   const initializeTranscriptMetrics = useCallback((height: number): void => {
     const previousAtBottom = bottomStateMeasuredRef.current && atBottomRef.current;
     scrollMetricsRef.current = { ...scrollMetricsRef.current, viewportHeight: height };
     const atBottom = atBottomFromMetrics(scrollMetricsRef.current);
     // A keyboard/rotation viewport change is not a reader scroll: keep a live
     // reply anchored if the reader was already following its end.
-    if (active && previousAtBottom) scrollToBottom();
-    else if (atBottom !== undefined && (!bottomStateMeasuredRef.current || atBottom !== atBottomRef.current)) { bottomStateMeasuredRef.current = true; atBottomRef.current = atBottom; setShowScrollToBottom(!atBottom); }
-  }, [active, scrollToBottom]);
+    if ((active || activeReplyRef.current) && previousAtBottom) scrollToBottom();
+    else if (atBottom !== undefined) publishBottomState(atBottom);
+  }, [active, publishBottomState, scrollToBottom]);
   const updateContentMetrics = useCallback((width: number, height: number): void => {
     void width;
     const previousAtBottom = bottomStateMeasuredRef.current && atBottomRef.current;
     scrollMetricsRef.current = { ...scrollMetricsRef.current, contentHeight: height };
     const measured = atBottomFromMetrics(scrollMetricsRef.current);
     if (measured === undefined) return;
-    if (shouldFollowActiveStream(active, previousAtBottom)) scrollToBottom();
-    else if (!bottomStateMeasuredRef.current || measured !== atBottomRef.current) { bottomStateMeasuredRef.current = true; atBottomRef.current = measured; setShowScrollToBottom(!measured); }
+    if (shouldFollowActiveStream(active || activeReplyRef.current, previousAtBottom)) scrollToBottom();
+    else publishBottomState(measured);
+  }, [active, publishBottomState, scrollToBottom]);
+  useEffect(() => {
+    const wasActive = activeReplyRef.current;
+    activeReplyRef.current = active;
+    if (!wasActive || active || !atBottomRef.current) return;
+    const frame = requestAnimationFrame(scrollToBottom);
+    return () => cancelAnimationFrame(frame);
   }, [active, scrollToBottom]);
 
   const closeComposerMenus = useCallback((): void => {
@@ -313,7 +363,25 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
           {syncStatus !== 'connected' ? <View style={[styles.statusBanner, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="cloud-off-outline" size={18} /><Text style={[styles.statusBannerText, { color: theme.colors.onSurfaceVariant }]}>{syncStatus === 'reconnecting' ? '连接已断开，正在重新连接；当前内容保留在本机' : '当前未连接 Host，消息不会显示为已发送'}</Text><Button compact onPress={actions.retryConnection}>重试</Button></View> : null}
           {subscribeError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>无法载入这个会话（{subscribeError.code}）</Text><Button compact onPress={() => void actions.subscribeChat(props.chatUri)}>重试</Button><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearOperationError} size={22} /></View> : null}
           {chatOperationError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>操作未完成，请重试（{chatOperationError.code}）</Text><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearChatOperationError} size={22} /></View> : null}
-          <FlatList contentContainerStyle={[styles.transcript, { paddingBottom: composerHeight + Math.max(insets.bottom, 10) + 20 }]} data={turns} keyExtractor={(item) => item.id} ListEmptyComponent={awaitingSince === undefined ? <EmptyTranscript failed={subscribeError !== undefined} status={view.status} /> : null} ListFooterComponent={awaitingSince === undefined ? null : <PendingThinking startedAt={awaitingSince} />} onContentSizeChange={updateContentMetrics} onLayout={(event) => initializeTranscriptMetrics(event.nativeEvent.layout.height)} onScroll={updateBottomState} ref={transcriptRef} renderItem={renderItem} scrollEventThrottle={32} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" />
+          <FlatList
+            contentContainerStyle={[styles.transcript, { paddingBottom: composerHeight + Math.max(insets.bottom, 10) + 20 }]}
+            data={turns}
+            keyExtractor={(item) => item.id}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={awaitingSince === undefined ? <EmptyTranscript failed={subscribeError !== undefined} status={view.status} /> : null}
+            ListFooterComponent={awaitingSince === undefined ? null : <PendingThinking startedAt={awaitingSince} />}
+            onContentSizeChange={updateContentMetrics}
+            onLayout={(event) => initializeTranscriptMetrics(event.nativeEvent.layout.height)}
+            onMomentumScrollBegin={beginUserScroll}
+            onMomentumScrollEnd={endUserMomentum}
+            onScroll={updateBottomState}
+            onScrollBeginDrag={beginUserScroll}
+            onScrollEndDrag={endUserDrag}
+            ref={transcriptRef}
+            renderItem={renderItem}
+            scrollEventThrottle={32}
+            showsVerticalScrollIndicator={false}
+          />
           {showScrollToBottom ? <Pressable accessibilityLabel="回到最新消息" accessibilityRole="button" onPress={scrollToBottom} style={[styles.scrollToBottom, { bottom: Math.max(insets.bottom, 10) + composerHeight + 12, backgroundColor: theme.colors.secondaryContainer }]}><MaterialCommunityIcons color={theme.colors.onSecondaryContainer} name="arrow-down" size={22} /></Pressable> : null}
           <View onLayout={(event) => { const height = Math.ceil(event.nativeEvent.layout.height); setComposerHeight((current) => current === height ? current : height); }} style={[styles.composerDock, { bottom: Math.max(insets.bottom, 10) }]}>
             <GlassPanel blurIntensity={72} glassEffectStyle="regular" materialElevation={3} materialShape="extraLarge" style={styles.composerShell}>
@@ -531,12 +599,13 @@ interface ComposerCommandPopoverProps {
 }
 function ComposerCommandPopover(props: ComposerCommandPopoverProps): JSX.Element {
   const theme = useTheme<MD3Theme>();
+  const insets = useSafeAreaInsets();
   return (
-    <BottomSheetFrame enterDelayMs={BOTTOM_SHEET_BACKDROP_DURATION_MS} onClose={props.onClose} panelStyle={styles.choiceSheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}>
-          <GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.choiceSheet}>
+    <BottomSheetFrame enterDelayMs={BOTTOM_SHEET_BACKDROP_DURATION_MS} onClose={props.onClose} panelStyle={styles.commandPopoverMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}>
+          <GlassPanel containerStyle={styles.commandPopoverContainer} forceSolid materialElevation={5} materialShape="extraLarge" materialTone="surfaceContainerLowest" solidColor={theme.colors.surface} style={[styles.commandPopover, { paddingBottom: Math.max(insets.bottom, 16) }]}>
             <View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} />
             <Text variant="headlineSmall" style={styles.sheetTitle}>添加内容</Text>
-            <ScrollView bounces={false} contentContainerStyle={styles.commandList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.boundedScroll}>
+            <ScrollView bounces={false} contentContainerStyle={styles.commandList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.commandScroll}>
               <CommandRow description={props.currentPermission ?? '由 Host 管理'} icon="shield-check-outline" onPress={props.onPermission} title="权限设置" />
               <View style={[styles.commandDivider, { backgroundColor: theme.colors.outlineVariant }]} />
               {props.loading ? <View style={styles.commandLoading}><ActivityIndicator size="small" /><Text style={{ color: theme.colors.onSurfaceVariant }}>正在从 Host 获取命令</Text></View> : null}
@@ -660,8 +729,10 @@ const styles = StyleSheet.create({
   sendPressed: { transform: [{ scale: 0.93 }] },
   menuContent: { maxHeight: 280 },
   popoverLayer: { flex: 1, justifyContent: 'flex-end', paddingHorizontal: 18 },
-  commandPopoverMotion: { width: '100%' },
-  commandPopover: { borderTopLeftRadius: 28, borderTopRightRadius: 28, maxHeight: '72%', overflow: 'hidden', paddingBottom: 16, paddingHorizontal: 18, paddingTop: 12, width: '100%' },
+  commandPopoverMotion: { height: '72%', minHeight: 0, width: '100%' },
+  commandPopoverContainer: { flex: 1, minHeight: 0 },
+  commandPopover: { flex: 1, minHeight: 0, borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden', paddingHorizontal: 18, paddingTop: 12, width: '100%' },
+  commandScroll: { flex: 1, minHeight: 0 },
   commandList: { padding: 8 },
   commandRow: { alignItems: 'center', borderRadius: 14, flexDirection: 'row', gap: 10, minHeight: 62, paddingHorizontal: 10, paddingVertical: 8 },
   commandCopy: { flex: 1, minWidth: 0 },

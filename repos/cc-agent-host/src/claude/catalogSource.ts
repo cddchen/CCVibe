@@ -61,6 +61,19 @@ export type CatalogSdkModelInfo = Pick<
 >;
 
 /**
+ * Host-private identity retained from the SDK model directory.
+ *
+ * The public catalog uses `ModelInfo.value` as its stable selectable id, while
+ * SDK runtime/transcript messages can report `resolvedModel` instead. Keeping
+ * this pair in the Claude adapter lets the Host canonicalize observations
+ * without leaking provider-specific ids to clients.
+ */
+export interface CatalogSdkModelIdentity {
+  readonly modelId: CatalogModel['id'];
+  readonly resolvedModel?: string;
+}
+
+/**
  * Derive stable workspaces from SDK sessions. Claude's session index is the
  * only discovery source available to the host, so a directory with no saved
  * session is intentionally absent from this result.
@@ -150,6 +163,62 @@ export function projectCatalogModels(
   return Object.freeze(models);
 }
 
+/** Retain only identities for SDK rows that survived public catalog projection. */
+export function projectCatalogSdkModelIdentities(
+  sdkModels: readonly CatalogSdkModelInfo[],
+): readonly CatalogSdkModelIdentity[] {
+  const projectedIds = new Set<string>(projectCatalogModels(sdkModels).map((model) => model.id));
+  const identities: CatalogSdkModelIdentity[] = [];
+  const seenIds = new Set<string>();
+  for (const sdkModel of sdkModels) {
+    if (
+      typeof sdkModel.value !== 'string'
+      || !projectedIds.has(sdkModel.value)
+      || seenIds.has(sdkModel.value)
+    ) {
+      continue;
+    }
+    const resolvedModel = typeof sdkModel.resolvedModel === 'string'
+      && sdkModel.resolvedModel.trim().length > 0
+      ? sdkModel.resolvedModel.trim()
+      : undefined;
+    identities.push(Object.freeze({
+      modelId: sdkModel.value as CatalogModel['id'],
+      ...(resolvedModel === undefined ? {} : { resolvedModel }),
+    }));
+    seenIds.add(sdkModel.value);
+  }
+  return Object.freeze(identities);
+}
+
+/**
+ * Resolve an SDK-observed model back to the public catalog id. The currently
+ * selected id wins when aliases share one resolved provider model.
+ */
+export function resolveCatalogSdkModelId(
+  observedModel: unknown,
+  identities: readonly CatalogSdkModelIdentity[],
+  preferredModelId?: string,
+): unknown {
+  if (typeof observedModel !== 'string' || observedModel.trim().length === 0) {
+    return observedModel;
+  }
+  const observed = observedModel.trim();
+  const exact = identities.find((identity) => identity.modelId === observed);
+  if (exact !== undefined) {
+    return exact.modelId;
+  }
+  const preferred = identities.find((identity) => (
+    identity.modelId === preferredModelId
+    && identity.resolvedModel === observed
+  ));
+  if (preferred !== undefined) {
+    return preferred.modelId;
+  }
+  return identities.find((identity) => identity.resolvedModel === observed)?.modelId
+    ?? observed;
+}
+
 /** Project typed SDK session metadata into the protocol-owned catalog shape. */
 export function projectCatalogSessions(
   sdkSessions: CatalogListSessionsResult,
@@ -214,6 +283,7 @@ export function projectSessionConfiguration(
   messages: readonly SessionMessage[],
   models: readonly CatalogModel[] = [],
   defaultModelId?: CatalogModel['id'],
+  identities: readonly CatalogSdkModelIdentity[] = [],
 ): CatalogSessionConfiguration {
   let rawModel: unknown;
   let rawEffort: unknown;
@@ -251,7 +321,10 @@ export function projectSessionConfiguration(
   }
 
   return normalizeCatalogSessionConfiguration(
-    { modelId: rawModel, effort: rawEffort },
+    {
+      modelId: resolveCatalogSdkModelId(rawModel, identities),
+      effort: rawEffort,
+    },
     models,
     defaultModelId,
   );

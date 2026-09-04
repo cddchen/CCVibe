@@ -33,12 +33,14 @@ import type {
   HostPermissionMode,
 } from '../../protocol/hostWire';
 import {
-  createAsyncStorageConnectionPreferencesAdapter,
+  createAsyncStorageHostPreferencesAdapter,
   type AsyncStoragePort,
   type ConnectionPreferences,
+  type ConnectionPreferencesCollection,
   type ConnectionPreferencesStore,
+  type HostPreferencesStore,
 } from '../../storage/connectionPreferences';
-import type { TokenStore } from '../../storage/secureToken';
+import type { HostTokenStore, TokenStore } from '../../storage/secureToken';
 import {
   ConnectionSupervisor,
   type AppStatePort,
@@ -88,6 +90,11 @@ export interface ChatOperationError {
 export interface CloudRuntimeState {
   readonly phase: RuntimePhase;
   readonly sync: SyncState;
+  /** All configured Hosts, ordered by insertion time. */
+  readonly savedConnections: readonly ConnectionPreferences[];
+  /** The Host whose configuration is shown by the settings screen. */
+  readonly selectedConnectionId?: ConnectionId;
+  /** Compatibility projection for callers from the single-Host build. */
   readonly savedConnection?: ConnectionPreferences;
   readonly tokenAvailable: boolean;
   readonly selection: RuntimeSelection;
@@ -166,7 +173,12 @@ export interface CloudRuntimeDependencies {
   readonly clientId?: string;
   readonly createId: () => string;
   readonly createSupervisor?: (options: ConnectionSupervisorOptions) => RuntimeSupervisor;
-  readonly preferencesStore?: ConnectionPreferencesStore;
+  /** Optional legacy single-Host store used by existing tests/integrations. */
+  readonly preferencesStore?: ConnectionPreferencesStore | HostPreferencesStore;
+  /** Preferred Host-list store. If absent, a Host-list adapter is created. */
+  readonly hostPreferencesStore?: HostPreferencesStore;
+  /** Maximum time a user-initiated connect/switch waits for initialization. */
+  readonly connectionTimeoutMs?: number;
 }
 
 export interface RuntimeHydrationForTest {
@@ -178,27 +190,40 @@ export interface RuntimeHydrationForTest {
 
 export class CloudRuntime {
   private readonly dependencies: CloudRuntimeDependencies;
-  private readonly preferences: ConnectionPreferencesStore;
+  private readonly preferences: ConnectionPreferencesStore | undefined;
+  private readonly hostPreferences: HostPreferencesStore | undefined;
   private readonly listeners = new Set<(state: CloudRuntimeState) => void>();
   private readonly actionsValue: CloudRuntimeActions;
   private state: CloudRuntimeState;
   private supervisor: RuntimeSupervisor | undefined;
   private removeSyncSubscription: (() => void) | undefined;
+  private cancelConnectionAttempt: (() => void) | undefined;
   private clientSeq = 0;
   private disposed = false;
+  private connectionOperationGeneration = 0;
 
   public constructor(dependencies: CloudRuntimeDependencies) {
     this.dependencies = dependencies;
-    this.preferences = dependencies.preferencesStore
-      ?? createAsyncStorageConnectionPreferencesAdapter(dependencies.asyncStorage);
+    this.preferences = isLegacyPreferencesStore(dependencies.preferencesStore)
+      ? dependencies.preferencesStore
+      : undefined;
+    this.hostPreferences = dependencies.hostPreferencesStore
+      ?? (isHostPreferencesStore(dependencies.preferencesStore)
+        ? dependencies.preferencesStore
+        : this.preferences === undefined
+          ? createAsyncStorageHostPreferencesAdapter(dependencies.asyncStorage)
+          : createLegacyHostPreferencesStore(this.preferences));
     this.state = freezeRuntimeState({
       phase: 'loading',
       sync: createSyncState({ subscriptions: [AGENT_ROOT_URI] }),
+      savedConnections: [],
       tokenAvailable: false,
       selection: {},
     });
     this.actionsValue = Object.freeze({
-      connect: (values: ConnectionFormValues) => this.connect(values),
+      connect: (values: ConnectionFormValues, connectionId?: ConnectionId | string | null) => this.connect(values, connectionId),
+      switchConnection: (connectionId: ConnectionId | string) => this.switchConnection(connectionId),
+      selectConnection: (connectionId: ConnectionId | string) => this.switchConnection(connectionId),
       reconnectSaved: () => this.reconnectSaved(),
       disconnect: () => this.disconnect(),
       retryConnection: () => this.retryConnection(),
@@ -238,13 +263,19 @@ export class CloudRuntime {
   public async initialize(): Promise<void> {
     if (this.disposed) return;
     try {
-      const [savedConnection, token] = await Promise.all([
-        this.preferences.load(),
-        this.dependencies.tokenStore.read(),
-      ]);
+      const collection = await this.hostPreferences?.loadHosts() ?? { hosts: [] };
+      const savedConnection = findSelectedConnection(collection);
+      const selectedConnectionId = collection.selectedConnectionId ?? savedConnection?.connectionId;
+      const token = savedConnection === undefined
+        ? null
+        : await this.readHostToken(savedConnection.connectionId, true);
       if (this.disposed) return;
       this.setState({
-        phase: savedConnection !== null && token !== null ? 'ready' : 'unconfigured',
+        savedConnections: collection.hosts,
+        ...(selectedConnectionId === undefined
+          ? {}
+          : { selectedConnectionId }),
+        phase: savedConnection !== undefined && token !== null ? 'ready' : 'unconfigured',
         savedConnection: savedConnection ?? undefined,
         tokenAvailable: token !== null,
         selection: {
@@ -252,13 +283,13 @@ export class CloudRuntime {
           ...(savedConnection?.lastModelId === undefined ? {} : { modelId: savedConnection.lastModelId }),
         },
       });
-      if (savedConnection !== null && token !== null) {
-        this.attachConnection({
+      if (savedConnection !== undefined && token !== null) {
+        void this.attachConnection({
           connectionId: savedConnection.connectionId,
           address: savedConnection.address,
           mode: savedConnection.mode,
           token,
-        });
+        }, false);
       }
     } catch {
       this.setState({ phase: 'error', operationError: { operation: 'create', code: 'STORAGE_UNAVAILABLE' } });
@@ -297,12 +328,41 @@ export class CloudRuntime {
     }
   }
 
-  private async connect(values: ConnectionFormValues): Promise<ConnectionActionResult> {
-    const result = validateConnectionForm(values);
-    if (!result.ok) return result;
-
+  private async connect(
+    values: ConnectionFormValues,
+    requestedConnectionId?: ConnectionId | string | null,
+  ): Promise<ConnectionActionResult> {
     const savedConnection = this.state.savedConnection;
-    const connectionId = savedConnection?.connectionId ?? createConnectionId(`connection-${this.dependencies.createId()}`);
+    const connectionId = requestedConnectionId === null
+      ? createConnectionId(`connection-${this.dependencies.createId()}`)
+      : requestedConnectionId === undefined
+        ? savedConnection?.connectionId ?? createConnectionId(`connection-${this.dependencies.createId()}`)
+        : createConnectionId(String(requestedConnectionId));
+    let valuesToValidate = values;
+    if (values.token.trim().length === 0 && requestedConnectionId !== null) {
+      try {
+        const storedToken = await this.readHostToken(connectionId, true);
+        if (storedToken !== null) valuesToValidate = { ...values, token: storedToken };
+      } catch {
+        return { ok: false, errors: { token: '该 Host 的 Token 读取失败，请重新输入' } };
+      }
+    }
+    const result = validateConnectionForm(valuesToValidate);
+    if (!result.ok) return result;
+    const operationGeneration = this.beginConnectionOperation();
+
+    const existingHost = this.state.savedConnections.find((host) => host.connectionId === connectionId);
+    const hostPreferences = Object.freeze({
+      connectionId,
+      address: result.config.address,
+      mode: result.config.mode,
+      ...(existingHost?.lastWorkspaceId === undefined
+        ? {}
+        : { lastWorkspaceId: existingHost.lastWorkspaceId }),
+      ...(existingHost?.lastModelId === undefined
+        ? {}
+        : { lastModelId: existingHost.lastModelId }),
+    });
     const config = Object.freeze({
       connectionId,
       address: result.config.address,
@@ -311,14 +371,12 @@ export class CloudRuntime {
     });
 
     try {
-      await this.dependencies.tokenStore.write(config.token);
-      await this.preferences.save({
-        connectionId,
-        address: config.address,
-        mode: config.mode,
-        ...(this.state.selection.workspaceId === undefined ? {} : { lastWorkspaceId: this.state.selection.workspaceId }),
-        ...(this.state.selection.modelId === undefined ? {} : { lastModelId: this.state.selection.modelId }),
+      await this.writeHostToken(connectionId, config.token);
+      await this.saveHostCollection({
+        hosts: upsertConnection(this.state.savedConnections, hostPreferences),
+        selectedConnectionId: connectionId,
       });
+      if (!this.isCurrentConnectionOperation(operationGeneration)) return { ok: false, errors: { hostUrl: '连接请求已切换' } };
     } catch {
       this.setState({ phase: 'error', operationError: { operation: 'create', code: 'STORAGE_UNAVAILABLE' } });
       return { ok: false, errors: { hostUrl: '连接配置保存失败，请稍后重试' } };
@@ -326,44 +384,101 @@ export class CloudRuntime {
 
     this.setState({
       phase: 'ready',
-      savedConnection: {
-        connectionId,
-        address: config.address,
-        mode: config.mode,
-        ...(this.state.selection.workspaceId === undefined ? {} : { lastWorkspaceId: this.state.selection.workspaceId }),
-        ...(this.state.selection.modelId === undefined ? {} : { lastModelId: this.state.selection.modelId }),
-      },
+      savedConnections: upsertConnection(this.state.savedConnections, hostPreferences),
+      selectedConnectionId: connectionId,
+      savedConnection: hostPreferences,
       tokenAvailable: true,
+      selection: {
+        ...(hostPreferences.lastWorkspaceId === undefined ? {} : { workspaceId: hostPreferences.lastWorkspaceId }),
+        ...(hostPreferences.lastModelId === undefined ? {} : { modelId: hostPreferences.lastModelId }),
+      },
       operationError: undefined,
     });
-    this.attachConnection(config);
-    return { ok: true };
+    const attempt = this.attachConnection(config);
+    const connectionResult = await attempt;
+    if (!this.isCurrentConnectionOperation(operationGeneration)) return { ok: false, errors: { hostUrl: '连接请求已切换' } };
+    if (connectionResult.ok) return { ok: true };
+    return {
+      ok: false,
+      errors: { hostUrl: connectionFailureMessage(connectionResult.code) },
+    };
   }
 
   private async reconnectSaved(): Promise<boolean> {
     const savedConnection = this.state.savedConnection;
     if (savedConnection === undefined) return false;
+    const operationGeneration = this.beginConnectionOperation();
     try {
-      const token = await this.dependencies.tokenStore.read();
+      const token = await this.readHostToken(savedConnection.connectionId, true);
+      if (!this.isCurrentConnectionOperation(operationGeneration)) return false;
       if (token === null || token.trim().length === 0) {
         this.setState({ tokenAvailable: false, phase: 'unconfigured' });
         return false;
       }
       this.setState({ phase: 'ready', operationError: undefined });
-      this.attachConnection({
+      const attempt = this.attachConnection({
         connectionId: savedConnection.connectionId,
         address: savedConnection.address,
         mode: savedConnection.mode,
         token,
       });
-      return true;
+      const result = await attempt;
+      if (!this.isCurrentConnectionOperation(operationGeneration)) return false;
+      return result.ok;
     } catch {
       this.setState({ phase: 'error', operationError: { operation: 'create', code: 'STORAGE_UNAVAILABLE' } });
       return false;
     }
   }
 
+  private async switchConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult> {
+    const selectedId = createConnectionId(String(connectionId));
+    const host = this.state.savedConnections.find((candidate) => candidate.connectionId === selectedId);
+    if (host === undefined) {
+      return { ok: false, errors: { hostUrl: '找不到要切换的 Host' } };
+    }
+    const operationGeneration = this.beginConnectionOperation();
+    // A Host switch is an ownership change: the previous supervisor must be
+    // fenced before any token/config lookup for the replacement proceeds.
+    this.detachSupervisor(true);
+    try {
+      const token = await this.readHostToken(selectedId, false);
+      if (!this.isCurrentConnectionOperation(operationGeneration)) return { ok: false, errors: { hostUrl: '连接请求已切换' } };
+      if (token === null || token.trim().length === 0) {
+        this.setState({ selectedConnectionId: selectedId, savedConnection: host, tokenAvailable: false, phase: 'unconfigured' });
+        await this.saveHostSelection(selectedId);
+        return { ok: false, errors: { token: '请输入该 Host 的 Token' } };
+      }
+      await this.saveHostSelection(selectedId);
+      if (!this.isCurrentConnectionOperation(operationGeneration)) return { ok: false, errors: { hostUrl: '连接请求已切换' } };
+      this.setState({
+        selectedConnectionId: selectedId,
+        savedConnection: host,
+        tokenAvailable: true,
+        selection: {
+          ...(host.lastWorkspaceId === undefined ? {} : { workspaceId: host.lastWorkspaceId }),
+          ...(host.lastModelId === undefined ? {} : { modelId: host.lastModelId }),
+        },
+        phase: 'ready',
+        operationError: undefined,
+      });
+      const result = await this.attachConnection({
+        connectionId: host.connectionId,
+        address: host.address,
+        mode: host.mode,
+        token,
+      });
+      if (!this.isCurrentConnectionOperation(operationGeneration)) return { ok: false, errors: { hostUrl: '连接请求已切换' } };
+      if (result.ok) return { ok: true };
+      return { ok: false, errors: { hostUrl: connectionFailureMessage(result.code) } };
+    } catch {
+      this.setState({ phase: 'error', operationError: { operation: 'create', code: 'STORAGE_UNAVAILABLE' } });
+      return { ok: false, errors: { hostUrl: '连接配置读取失败，请稍后重试' } };
+    }
+  }
+
   private disconnect(): void {
+    this.beginConnectionOperation();
     this.detachSupervisor(true);
     this.setState({ phase: this.state.savedConnection === undefined ? 'unconfigured' : 'ready', operationError: undefined });
   }
@@ -437,10 +552,14 @@ export class CloudRuntime {
     const savedConnection = this.state.savedConnection;
     if (savedConnection === undefined) return;
     try {
-      await this.preferences.save({
+      const updatedHost = Object.freeze({
         ...savedConnection,
-        ...selection,
+        ...(selection.workspaceId === undefined ? {} : { lastWorkspaceId: selection.workspaceId }),
+        ...(selection.modelId === undefined ? {} : { lastModelId: selection.modelId }),
       });
+      const hosts = upsertConnection(this.state.savedConnections, updatedHost);
+      this.setState({ savedConnections: hosts, savedConnection: updatedHost });
+      await this.saveHostCollection({ hosts, selectedConnectionId: savedConnection.connectionId });
     } catch {
       // Preferences are non-critical; the in-memory selection remains authoritative for this session.
     }
@@ -694,30 +813,138 @@ export class CloudRuntime {
     readonly address: string;
     readonly token: string;
     readonly mode: ConnectionMode;
-  }): void {
+  }, waitForReady = true): Promise<ConnectionAttemptResult> {
     this.detachSupervisor(true);
     const syncStore = createSyncStore({ address: config.address, subscriptions: [AGENT_ROOT_URI] });
-    const supervisor = (this.dependencies.createSupervisor ?? createDefaultSupervisor)({
-      config,
-      clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
-      clientInfo: {
-        name: 'Cloud',
-        version: '0.2.0',
-        platform: this.dependencies.platform ?? 'unknown',
-      },
-      store: syncStore,
-      appState: this.dependencies.appState,
-      initialSubscriptions: [AGENT_ROOT_URI],
-    });
+    let supervisor: RuntimeSupervisor;
+    try {
+      supervisor = (this.dependencies.createSupervisor ?? createDefaultSupervisor)({
+        config,
+        clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
+        clientInfo: {
+          name: 'Cloud',
+          version: '0.4.0',
+          platform: this.dependencies.platform ?? 'unknown',
+        },
+        store: syncStore,
+        appState: this.dependencies.appState,
+        initialSubscriptions: [AGENT_ROOT_URI],
+      });
+    } catch {
+      this.setState({ phase: 'error', operationError: { operation: 'create', code: 'CONNECTION' } });
+      return Promise.resolve({ ok: false, code: 'CONNECTION' });
+    }
     this.supervisor = supervisor;
     this.removeSyncSubscription = syncStore.subscribe((sync) => {
       this.setState({ sync });
     });
     this.setState({ sync: syncStore.getState(), phase: 'ready', operationError: undefined });
-    supervisor.start();
+    try {
+      supervisor.start();
+    } catch {
+      this.setState({
+        phase: 'error',
+        operationError: { operation: 'create', code: 'CONNECTION' },
+      });
+      return Promise.resolve({ ok: false, code: 'CONNECTION' });
+    }
+    return waitForReady
+      ? this.waitForConnection(syncStore, supervisor)
+      : Promise.resolve({ ok: true });
+  }
+
+  private waitForConnection(syncStore: { getState(): SyncState; subscribe(listener: (state: SyncState) => void): () => void }, supervisor: RuntimeSupervisor): Promise<ConnectionAttemptResult> {
+    const immediate = connectionAttemptResult(syncStore.getState(), supervisor);
+    if (immediate !== undefined) {
+      if (!immediate.ok) this.setState({ phase: 'error', operationError: { operation: 'create', code: normalizeConnectionFailureCode(immediate.code) } });
+      return Promise.resolve(immediate);
+    }
+
+    const timeoutMs = this.dependencies.connectionTimeoutMs ?? 15_000;
+    return new Promise<ConnectionAttemptResult>((resolve) => {
+      let settled = false;
+      let remove = (): void => undefined;
+      const timeout = setTimeout(() => settle({ ok: false, code: 'TIMEOUT' }), Math.max(0, timeoutMs));
+      const settle = (result: ConnectionAttemptResult): void => {
+        if (settled) return;
+        settled = true;
+        remove();
+        clearTimeout(timeout);
+        if (this.cancelConnectionAttempt === cancel) this.cancelConnectionAttempt = undefined;
+        if (!result.ok) {
+          this.setState({ phase: 'error', operationError: { operation: 'create', code: normalizeConnectionFailureCode(result.code) } });
+        }
+        resolve(result);
+      };
+      const cancel = (): void => settle({ ok: false, code: 'CANCELLED' });
+      this.cancelConnectionAttempt?.();
+      this.cancelConnectionAttempt = cancel;
+      remove = syncStore.subscribe((next) => {
+        const result = connectionAttemptResult(next, supervisor);
+        if (result === undefined || settled) return;
+        settle(result);
+      });
+    });
+  }
+
+  private beginConnectionOperation(): number {
+    this.connectionOperationGeneration += 1;
+    this.cancelConnectionAttempt?.();
+    this.cancelConnectionAttempt = undefined;
+    return this.connectionOperationGeneration;
+  }
+
+  private isCurrentConnectionOperation(generation: number): boolean {
+    return !this.disposed && generation === this.connectionOperationGeneration;
+  }
+
+  private async readHostToken(connectionId: ConnectionId, migrateLegacy: boolean): Promise<string | null> {
+    const scoped = isHostTokenStore(this.dependencies.tokenStore)
+      ? await this.dependencies.tokenStore.readForHost(connectionId)
+      : await this.dependencies.tokenStore.read();
+    const usableScoped = scoped !== null && scoped.trim().length > 0 ? scoped : null;
+    if (usableScoped !== null || !migrateLegacy || !isHostTokenStore(this.dependencies.tokenStore)) return usableScoped;
+
+    const legacy = await this.dependencies.tokenStore.read();
+    if (legacy === null || legacy.trim().length === 0) return null;
+    await this.dependencies.tokenStore.writeForHost(connectionId, legacy);
+    // Remove the old unscoped secret after a successful scoped write. This
+    // prevents a token for Host A from being accidentally reused for Host B.
+    try {
+      await this.dependencies.tokenStore.clear();
+    } catch {
+      // A scoped copy exists; a failed cleanup must not block first launch.
+    }
+    return legacy;
+  }
+
+  private writeHostToken(connectionId: ConnectionId, token: string): Promise<void> {
+    return isHostTokenStore(this.dependencies.tokenStore)
+      ? this.dependencies.tokenStore.writeForHost(connectionId, token)
+      : this.dependencies.tokenStore.write(token);
+  }
+
+  private async saveHostCollection(collection: ConnectionPreferencesCollection): Promise<void> {
+    if (this.hostPreferences !== undefined) {
+      await this.hostPreferences.saveHosts(collection);
+      return;
+    }
+    const selected = findSelectedConnection(collection);
+    if (selected !== undefined && this.preferences !== undefined) await this.preferences.save(selected);
+  }
+
+  private async saveHostSelection(connectionId: ConnectionId): Promise<void> {
+    const collection = {
+      hosts: this.state.savedConnections,
+      selectedConnectionId: connectionId,
+    };
+    await this.saveHostCollection(collection);
+    this.setState({ selectedConnectionId: connectionId });
   }
 
   private detachSupervisor(stop: boolean): void {
+    this.cancelConnectionAttempt?.();
+    this.cancelConnectionAttempt = undefined;
     this.removeSyncSubscription?.();
     this.removeSyncSubscription = undefined;
     const supervisor = this.supervisor;
@@ -753,7 +980,10 @@ export interface CreateChatAndSendInput {
 }
 
 export interface CloudRuntimeActions {
-  connect(values: ConnectionFormValues): Promise<ConnectionActionResult>;
+  connect(values: ConnectionFormValues, connectionId?: ConnectionId | string | null): Promise<ConnectionActionResult>;
+  switchConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult>;
+  /** Alias retained for UI callers that model a Host row as a selection. */
+  selectConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult>;
   reconnectSaved(): Promise<boolean>;
   disconnect(): void;
   retryConnection(): void;
@@ -810,6 +1040,101 @@ function createDefaultSupervisor(options: ConnectionSupervisorOptions): RuntimeS
   return new ConnectionSupervisor(options);
 }
 
+interface ConnectionAttemptResult {
+  readonly ok: boolean;
+  readonly code?: string;
+}
+
+function connectionAttemptResult(
+  sync: SyncState,
+  supervisor: RuntimeSupervisor,
+): ConnectionAttemptResult | undefined {
+  const supervisorState = supervisor.getState();
+  if (supervisorState.status === 'connected') return { ok: true };
+  if (supervisorState.status === 'error' || supervisorState.status === 'replaced') {
+    return { ok: false, code: normalizeConnectionFailureCode(supervisorState.errorCode) };
+  }
+  if (sync.status === 'connected') return { ok: true };
+  if (sync.status === 'error' || sync.status === 'replaced') {
+    return { ok: false, code: normalizeConnectionFailureCode(sync.errorCode) };
+  }
+  return undefined;
+}
+
+function normalizeConnectionFailureCode(code: string | undefined): string {
+  if (code === undefined || code.length === 0) return 'CONNECTION';
+  if (code.startsWith('CLOSED_')) return 'CLOSED';
+  if (code === 'TRANSPORT' || code === 'FACTORY') return 'CONNECTION';
+  return code;
+}
+
+function connectionFailureMessage(code: string | undefined): string {
+  switch (normalizeConnectionFailureCode(code)) {
+    case 'TIMEOUT': return 'Host 响应超时，请检查地址与网络';
+    case 'CLOSED': return 'Host 连接已关闭，请检查地址与网络';
+    case 'PROTOCOL': return 'Host 返回了无法识别的数据';
+    case 'CONNECTION': return '无法连接 Host，请检查地址与网络';
+    case 'CANCELLED': return '连接请求已取消';
+    default: return '无法连接 Host，请检查地址与网络';
+  }
+}
+
+function isHostPreferencesStore(
+  value: ConnectionPreferencesStore | HostPreferencesStore | undefined,
+): value is HostPreferencesStore {
+  if (value === undefined) return false;
+  return typeof (value as Partial<HostPreferencesStore>).loadHosts === 'function'
+    && typeof (value as Partial<HostPreferencesStore>).saveHosts === 'function';
+}
+
+function isLegacyPreferencesStore(
+  value: ConnectionPreferencesStore | HostPreferencesStore | undefined,
+): value is ConnectionPreferencesStore {
+  if (value === undefined) return false;
+  return typeof (value as Partial<ConnectionPreferencesStore>).load === 'function'
+    && typeof (value as Partial<ConnectionPreferencesStore>).save === 'function';
+}
+
+function createLegacyHostPreferencesStore(store: ConnectionPreferencesStore): HostPreferencesStore {
+  return Object.freeze({
+    loadHosts: async (): Promise<ConnectionPreferencesCollection> => {
+      const host = await store.load();
+      return host === null
+        ? Object.freeze({ hosts: Object.freeze([]) })
+        : Object.freeze({ hosts: Object.freeze([host]), selectedConnectionId: host.connectionId });
+    },
+    saveHosts: async (collection: ConnectionPreferencesCollection): Promise<void> => {
+      const host = findSelectedConnection(collection);
+      if (host !== undefined) await store.save(host);
+    },
+    selectHost: async (connectionId: ConnectionId | string): Promise<void> => {
+      const host = await store.load();
+      if (host === null || host.connectionId !== String(connectionId)) throw new TypeError('connectionId is not configured');
+      await store.save(host);
+    },
+  });
+}
+
+function findSelectedConnection(collection: ConnectionPreferencesCollection): ConnectionPreferences | undefined {
+  return collection.hosts.find((host) => host.connectionId === collection.selectedConnectionId)
+    ?? collection.hosts[0];
+}
+
+function upsertConnection(
+  hosts: readonly ConnectionPreferences[],
+  host: ConnectionPreferences,
+): readonly ConnectionPreferences[] {
+  const index = hosts.findIndex((candidate) => candidate.connectionId === host.connectionId);
+  if (index < 0) return Object.freeze([...hosts, host]);
+  const next = [...hosts];
+  next[index] = host;
+  return Object.freeze(next);
+}
+
+function isHostTokenStore(value: TokenStore): value is TokenStore & HostTokenStore {
+  return typeof value.readForHost === 'function' && typeof value.writeForHost === 'function';
+}
+
 function errorCode(error: unknown): string {
   if (error instanceof Error && error.name === 'TransportTimeoutError') return 'TIMEOUT';
   if (error instanceof Error && error.name === 'TransportClosedError') return 'CLOSED';
@@ -859,6 +1184,7 @@ function freezeRuntimeState(state: CloudRuntimeState): CloudRuntimeState {
   return Object.freeze({
     ...state,
     sync: freezeSyncState(state.sync),
+    savedConnections: Object.freeze([...state.savedConnections]),
     ...(state.savedConnection === undefined ? {} : { savedConnection: Object.freeze({ ...state.savedConnection }) }),
     selection: Object.freeze({ ...state.selection }),
     ...(state.pendingSend === undefined ? {} : { pendingSend: Object.freeze({ ...state.pendingSend }) }),

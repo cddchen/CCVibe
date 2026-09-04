@@ -42,6 +42,19 @@ npm run build
 npm start
 ```
 
+通过 npm 启动时，额外 CLI 参数必须放在 `--` 之后；否则 npm 不会将它们传给 `cloud`。例如局域网所有网卡监听：
+
+```sh
+npm run start -- --token=cddchen --global
+```
+
+`--global` 仅控制 Host 的监听地址，不会发布 mDNS/Bonjour 广播；移动端当前也没有自动扫描局域网 Host。请在移动端“新增 Host”中手动填入启动输出的 `ws://<局域网 IPv4>:8787/ws`，并开启“开发模式”，再填写同一 Token。可用以下命令检查和停止后台实例：
+
+```sh
+npm run status
+npm run stop
+```
+
 默认情况下，Host 会调用 Claude Agent SDK 的 `listSessions()`，从已有会话的
 绝对 `cwd` 自动发现并去重工作区，再从 SDK Query 初始化结果读取模型目录。
 没有任何历史会话时 SDK 无法推断目录，此时需要显式配置工作区才能创建新会话。
@@ -102,5 +115,7 @@ WantedBy=multi-user.target
 - `npm test`：Vitest 单元/协议/传输测试。
 - `npm run build`：生成 `dist`，并提供 `cloud` bin。
 - `npm start`：以后台模式运行已构建的服务入口。
+- `npm run status`：显示后台 Host 的连接地址和日志路径。
+- `npm run stop`：向后台 Host 发送 `SIGTERM`，等待其完成清理后退出。
 - `npm run start:prod`：以适合进程管理器的前台生产模式运行。
 - `npm pack --dry-run`：检查将发布到 npm 的文件。

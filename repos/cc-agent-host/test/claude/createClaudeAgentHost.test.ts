@@ -7,6 +7,7 @@ import type {
   Query,
   SDKMessage,
   SDKResultSuccess,
+  SDKSystemMessage,
   SDKUserMessage,
   SessionMessage,
   WarmQuery,
@@ -18,6 +19,7 @@ import {
   createChatUri,
   createClientId,
   createCommandId,
+  createCatalogSession,
   createClaudeAgentHost,
   createAccessControlList,
   createModel,
@@ -481,6 +483,26 @@ function streamText(text: string): SDKMessage[] {
   ] satisfies SDKMessage[];
 }
 
+function initMessage(model: string): SDKSystemMessage {
+  return {
+    type: 'system',
+    subtype: 'init',
+    apiKeySource: 'user',
+    claude_code_version: '2.1.220',
+    cwd: '/tmp/project',
+    tools: [],
+    mcp_servers: [],
+    model,
+    permissionMode: 'default',
+    slash_commands: [],
+    output_style: 'default',
+    skills: [],
+    plugins: [],
+    uuid: '00000000-0000-4000-8000-000000000201',
+    session_id: SDK_SESSION_ID,
+  };
+}
+
 function successMessage(userMessageUuid: string): SDKResultSuccess {
   const usage = Object.create(null) as NonNullableUsage;
   return {
@@ -666,6 +688,214 @@ describe('createClaudeAgentHost', () => {
       }]);
       expect(host.registry.getBacking(parseChatUri('agent-chat://epoch-1/sdk-session-auto'))?.lifecycle)
         .toBe('materialized');
+    } finally {
+      await host.shutdown();
+    }
+  });
+
+  it('keeps the selected SDK alias when runtime init reports its resolved provider model', async () => {
+    const harness = serviceHarness();
+    const workspace = createWorkspace({
+      id: createWorkspaceId('workspace-model-alias'),
+      path: '/tmp/project',
+      displayName: 'Model Alias Project',
+    });
+    const sdkModels = [{
+      value: 'default',
+      displayName: 'Default',
+      description: 'Default model',
+      resolvedModel: 'claude-default-provider-model',
+    }, {
+      value: 'haiku',
+      displayName: 'Haiku',
+      description: 'Fast model',
+      resolvedModel: 'gemini-3.7-flash-high',
+    }] satisfies CatalogSdkModelInfo[];
+    const service: ClaudeAgentHostSdkService = {
+      ...harness.service,
+      listSupportedModels: () => sdkModels,
+    };
+    const host = await createClaudeAgentHost({
+      ...baseOptions(service),
+      catalog: { workspaces: [workspace] },
+    });
+
+    try {
+      await host.refreshCatalog();
+      host.createChat({
+        chatUri: chat,
+        cwd: workspace.path,
+        desiredConfig: { model: 'haiku', permissionMode: 'default' },
+      });
+      host.hostStateManager.dispatchCatalog(root, {
+        type: 'catalog/chatCreated',
+        session: createCatalogSession({
+          chatUri: chat,
+          sdkSessionRef: SDK_SESSION_ID,
+          workspaceId: workspace.id,
+          title: 'Haiku chat',
+          updatedAt: 'before-runtime-init',
+          status: 'idle',
+          archived: false,
+          modelId: createModelId('haiku'),
+          permissionMode: 'default',
+        }),
+        timestamp: 'before-runtime-init',
+      });
+      const updated = deferred<void>();
+      const dispose = host.hostStateManager.subscribeAll((envelope) => {
+        if (envelope.channel === root && envelope.action.type === 'catalog/chatUpdated') {
+          updated.resolve();
+        }
+      });
+      try {
+        await host.registry.send(chat, createTurnId('model-alias-turn'), 'hello');
+        await harness.warm.acceptNext();
+        harness.query.yield(initMessage('gemini-3.7-flash-high'));
+        await updated.promise;
+      } finally {
+        dispose();
+      }
+
+      expect(host.hostStateManager.getCatalogState(root)?.sessions).toMatchObject([{
+        chatUri: chat,
+        modelId: 'haiku',
+      }]);
+    } finally {
+      await host.shutdown();
+    }
+  });
+
+  it('retains an explicit alias through a completed send and catalog refresh', async () => {
+    const harness = serviceHarness();
+    const workspace = createWorkspace({
+      id: createWorkspaceId('workspace-explicit-model-alias'),
+      path: '/tmp/project',
+      displayName: 'Explicit Model Alias Project',
+    });
+    const defaultModel = createModel({
+      id: createModelId('default'),
+      displayName: 'Default',
+    });
+    const haikuModel = createModel({
+      id: createModelId('haiku'),
+      displayName: 'Haiku',
+    });
+    const repository = new FakeOverlayRepository();
+    let listSessionsCalls = 0;
+    const service: ClaudeAgentHostSdkService = {
+      ...harness.service,
+      listSessions: () => {
+        listSessionsCalls += 1;
+        return listSessionsCalls === 1
+          ? []
+          : [{
+              sessionId: SDK_SESSION_ID,
+              summary: 'Haiku chat',
+              lastModified: 1_700_000_000_000,
+              cwd: workspace.path,
+              fileSize: 1,
+            } satisfies CatalogListSessionsResult[number]];
+      },
+      // Explicit catalog entries are authoritative, but this probe supplies
+      // the private SDK value→resolvedModel identity used by runtime signals.
+      listSupportedModels: () => [{
+        value: 'default',
+        displayName: 'Default',
+        description: 'Default model',
+        resolvedModel: 'claude-default-provider-model',
+      }, {
+        value: 'haiku',
+        displayName: 'Haiku',
+        description: 'Haiku model',
+        resolvedModel: 'gemini-3.7-flash-high',
+      }, {
+        value: 'sdk-only-model',
+        displayName: 'SDK-only model',
+        description: 'SDK-only model',
+      }] satisfies CatalogSdkModelInfo[],
+    };
+    const host = await createClaudeAgentHost({
+      ...baseOptions(service),
+      overlayRepository: repository,
+      catalog: {
+        workspaces: [workspace],
+        models: [defaultModel, haikuModel],
+        defaultModelId: defaultModel.id,
+      },
+    });
+
+    try {
+      await host.refreshCatalog();
+      const backing = await host.createChatPersisted({
+        chatUri: chat,
+        sdkSessionId: SDK_SESSION_ID,
+        cwd: workspace.path,
+        desiredConfig: { model: 'haiku', permissionMode: 'default' },
+      });
+      host.hostStateManager.dispatchCatalog(root, {
+        type: 'catalog/chatCreated',
+        session: createCatalogSession({
+          chatUri: chat,
+          sdkSessionRef: SDK_SESSION_ID,
+          workspaceId: workspace.id,
+          title: 'Haiku chat',
+          updatedAt: 'before-send',
+          status: 'idle',
+          archived: false,
+          modelId: createModelId('haiku'),
+          permissionMode: 'default',
+        }),
+        timestamp: 'before-send',
+      });
+
+      const initialized = deferred<void>();
+      const dispose = host.hostStateManager.subscribeAll((envelope) => {
+        if (envelope.channel === root && envelope.action.type === 'catalog/chatUpdated') {
+          initialized.resolve();
+        }
+      });
+      try {
+        const handle = await host.registry.send(chat, createTurnId('explicit-model-alias-turn'), 'hello');
+        expect(harness.startupOptions[0]?.model).toBe('haiku');
+
+        const userMessage = await harness.warm.acceptNext();
+        harness.query.yield(initMessage('gemini-3.7-flash-high'));
+        await initialized.promise;
+        expect(host.hostStateManager.getCatalogState(root)?.sessions).toMatchObject([{
+          chatUri: chat,
+          modelId: 'haiku',
+        }]);
+
+        await host.registry.setRuntimeConfig(chat, {
+          model: 'haiku',
+          permissionMode: 'default',
+        });
+        expect(harness.query.configCalls).toContainEqual(['setModel', 'haiku']);
+
+        for (const message of streamText('hello')) {
+          harness.query.yield(message);
+        }
+        if (userMessage.uuid === undefined) {
+          throw new Error('runtime user message is missing its UUID');
+        }
+        harness.query.yield(successMessage(userMessage.uuid));
+        await expect(handle.completed).resolves.toMatchObject({ status: 'completed' });
+      } finally {
+        dispose();
+      }
+
+      const refreshed = await host.refreshCatalog();
+      expect(refreshed.models).toEqual([defaultModel, haikuModel]);
+      expect(refreshed.sessions).toMatchObject([{
+        chatUri: chat,
+        sdkSessionRef: SDK_SESSION_ID,
+        modelId: 'haiku',
+      }]);
+      expect(backing.desiredConfig.model).toBe('haiku');
+      expect(host.registry.getBacking(chat)?.desiredConfig.model).toBe('haiku');
+      expect(repository.rows.get(chat)).toMatchObject({ model: 'haiku', lifecycle: 'materialized' });
+      expect(listSessionsCalls).toBe(2);
     } finally {
       await host.shutdown();
     }

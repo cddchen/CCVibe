@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { CHAT_BOTTOM_THRESHOLD_PX, atBottomFromMetrics, chatDistanceFromEnd, isChatAtBottom, shouldFollowActiveStream } from '../src/features/chat/chatScroll';
+import {
+  CHAT_BOTTOM_THRESHOLD_PX,
+  atBottomFromMetrics,
+  chatBottomOffset,
+  chatDistanceFromEnd,
+  isChatAtBottom,
+  shouldCommitChatBottomMeasurement,
+  shouldFollowActiveStream,
+} from '../src/features/chat/chatScroll';
 describe('chat bottom following', () => {
   it('uses a stable, forgiving bottom threshold', () => {
     expect(isChatAtBottom(1000, 400, 600 - CHAT_BOTTOM_THRESHOLD_PX)).toBe(true);
@@ -21,5 +29,24 @@ describe('chat bottom following', () => {
   });
   it('continues following consecutive active content growth without a user drag', () => {
     expect([1, 2, 3].every(() => shouldFollowActiveStream(true, true))).toBe(true);
+  });
+  it('targets the true content end, including space reserved for the composer', () => {
+    expect(chatBottomOffset({ contentHeight: 1240, viewportHeight: 640, offsetY: 0 })).toBe(600);
+    expect(chatBottomOffset({ contentHeight: 420, viewportHeight: 640, offsetY: 0 })).toBe(0);
+    expect(chatBottomOffset({ contentHeight: 420, viewportHeight: 0, offsetY: 0 })).toBeUndefined();
+  });
+  it('keeps a live reply pinned through stale passive events but releases it for a reader drag', () => {
+    const pinned = {
+      activeReply: true,
+      currentlyAtBottom: true,
+      measuredAtBottom: false,
+      programmaticScrollPending: false,
+      userInteracting: false,
+    };
+    expect(shouldCommitChatBottomMeasurement(pinned)).toBe(false);
+    expect(shouldCommitChatBottomMeasurement({ ...pinned, programmaticScrollPending: true })).toBe(false);
+    expect(shouldCommitChatBottomMeasurement({ ...pinned, userInteracting: true })).toBe(true);
+    expect(shouldCommitChatBottomMeasurement({ ...pinned, measuredAtBottom: true })).toBe(true);
+    expect(shouldCommitChatBottomMeasurement({ ...pinned, activeReply: false })).toBe(true);
   });
 });

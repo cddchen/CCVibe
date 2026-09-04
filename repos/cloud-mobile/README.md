@@ -54,11 +54,32 @@ npm run build:ios:device
 npm run build:android:release
 ```
 
+需要自动升级整个 Cloud 的版本并立即打包双端安装包时，使用以下命令：
+
+```bash
+# 1.2.3 → 2.0.0，同时递增原生构建号并打包
+npm run release:major
+
+# 1.2.3 → 1.3.0，同时递增原生构建号并打包
+npm run release:minor
+
+# 1.2.3 → 1.2.4，同时递增原生构建号并打包
+npm run release:patch
+```
+
+升级脚本会先验证 Host、Mobile、Expo、Xcode、Gradle 和移动端握手版本当前一致，再统一更新版本。iOS `buildNumber` 与 Android `versionCode` 各自递增 1，然后复用 `build:mobile:release` 生成 IPA/APK。构建失败时已更新的版本会保留，可修复环境后直接执行 `npm run build:mobile:release` 重试，避免再次递增版本。
+
+只预览下一版本而不修改文件、不执行构建：
+
+```bash
+node scripts/bump-cloud-version.mjs patch --dry-run
+```
+
 默认产物：
 
 ```text
-.build-artifacts/Cloud-0.1.0-ios-device.ipa
-.build-artifacts/Cloud-0.1.0-android-release.apk
+.build-artifacts/Cloud-<version>-ios-device.ipa
+.build-artifacts/Cloud-<version>-android-release.apk
 ```
 
 脚本会自动读取 `package.json` 版本号和 Xcode 工程中的 Development Team。需要覆盖签名 Team 时，可执行 `IOS_DEVELOPMENT_TEAM=<Team ID> npm run build:ios:device`。

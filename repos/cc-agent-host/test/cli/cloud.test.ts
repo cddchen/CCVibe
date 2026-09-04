@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { CloudCliError, createSixDigitToken, parseCloudCli } from '../../src/cli/cloud.js';
@@ -82,6 +86,15 @@ describe('cloud CLI', () => {
     expect(parseCloudCli(['stop'])).toEqual({ command: 'stop' });
     expect(parseCloudCli(['status'])).toEqual({ command: 'status' });
     expect(parseCloudCli([])).toEqual({ command: 'help' });
+  });
+
+  it('exposes status and stop through the source-package npm scripts', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf8')) as {
+      readonly scripts: Readonly<Record<string, string>>;
+    };
+
+    expect(packageJson.scripts.stop).toBe('node dist/bin/cloud.js stop');
+    expect(packageJson.scripts.status).toBe('node dist/bin/cloud.js status');
   });
 
   it('rejects conflicting, unknown, and value-less arguments without exposing tokens', () => {

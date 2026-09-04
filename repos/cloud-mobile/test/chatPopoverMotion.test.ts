@@ -25,10 +25,35 @@ describe('Chat command popover motion contract', () => {
     expect(source).toContain('BOTTOM_SHEET_EXIT_DURATION_MS + MODAL_UNMOUNT_GRACE_MS');
   });
 
-  it('uses immediate bottom scrolling so stream growth has no animation lifecycle race', () => {
+  it('uses an exact immediate offset so the composer-reserved padding remains visible', () => {
     const source = fs.readFileSync(path.join(projectRoot, 'src/features/chat/ChatScreen.tsx'), 'utf8');
-    expect(source).toContain('scrollToEnd({ animated: false })');
-    expect(source).not.toContain('programmaticScrollRef');
+    expect(source).toContain('chatBottomOffset(scrollMetricsRef.current)');
+    expect(source).toContain('scrollToOffset({ offset, animated: false })');
+    expect(source).not.toContain('scrollToEnd({ animated: false })');
+  });
+
+  it('gives asynchronously loaded commands a stable, readable sheet surface', () => {
+    const source = fs.readFileSync(path.join(projectRoot, 'src/features/chat/ChatScreen.tsx'), 'utf8');
+    const start = source.indexOf('function ComposerCommandPopover');
+    const end = source.indexOf('function CommandRow', start);
+    const component = source.slice(start, end);
+
+    expect(component).toContain('panelStyle={styles.commandPopoverMotion}');
+    expect(component).toContain('containerStyle={styles.commandPopoverContainer}');
+    expect(component).toContain('forceSolid');
+    expect(component).toContain('solidColor={theme.colors.surface}');
+    expect(component).toContain('materialTone="surfaceContainerLowest"');
+    expect(component).toContain('style={styles.commandScroll}');
+    expect(source).toContain("commandPopoverMotion: { height: '72%'");
+  });
+
+  it('lets the GlassSurface content layer provide a viewport for the command list', () => {
+    const source = fs.readFileSync(path.join(projectRoot, 'src/ui/glass/GlassSurface.tsx'), 'utf8');
+    const start = source.indexOf('contentLayer: {');
+    const end = source.indexOf('\n  },', start);
+    const contentLayer = source.slice(start, end);
+
+    expect(contentLayer).toContain('flexGrow: 1');
   });
 
   it('dismisses the composer keyboard before opening a sheet outside its avoiding view', () => {

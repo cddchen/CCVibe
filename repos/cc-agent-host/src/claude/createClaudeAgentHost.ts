@@ -82,10 +82,13 @@ import type { ActionOrigin, ChatActionEnvelope } from '../protocol/types.js';
 import {
   projectCatalogSessions,
   projectCatalogModels,
+  projectCatalogSdkModelIdentities,
   projectSessionConfiguration,
   projectCatalogWorkspaces,
+  resolveCatalogSdkModelId,
   type CatalogListSessionsResult,
   type CatalogSessionConfiguration,
+  type CatalogSdkModelIdentity,
   type CatalogSdkModelInfo,
   type CatalogSource,
   type CatalogSourceSnapshot,
@@ -380,6 +383,7 @@ export async function createClaudeAgentHost(
   const overlayRepository = options.overlayRepository ?? options.persistence;
   const persistedChatUris = new Set<ChatUri>();
   const persistedChatMetadata = new Map<ChatUri, PersistedChatMetadata>();
+  let sdkModelIdentities: readonly CatalogSdkModelIdentity[] = [];
   let persistenceTail: Promise<void> = Promise.resolve();
 
   const enqueuePersistence = <Result>(
@@ -467,7 +471,13 @@ export async function createClaudeAgentHost(
         const session = catalog?.sessions.find((candidate) => candidate.chatUri === chatUri);
         if (catalog !== undefined && session !== undefined) {
           const configuration = normalizeCatalogSessionConfiguration(
-            { modelId: signal.model },
+            {
+              modelId: resolveCatalogSdkModelId(
+                signal.model,
+                sdkModelIdentities,
+                registry.getBacking(chatUri)?.desiredConfig.model,
+              ),
+            },
             catalog.models,
             catalog.defaultModelId,
           );
@@ -758,16 +768,25 @@ export async function createClaudeAgentHost(
     let models = modelInputs.length > 0 || explicitSourceModels !== undefined
       ? modelInputs.map(createModel)
       : [];
-    if (models.length === 0 && explicitSourceModels === undefined && typeof sdkService.listSupportedModels === 'function') {
+    let discoveredSdkModels: readonly CatalogSdkModelInfo[] = [];
+    if (typeof sdkService.listSupportedModels === 'function') {
       const probeCwd = workspaces[0]?.path ?? process.cwd();
       try {
         const sdkModels = await sdkService.listSupportedModels(probeCwd) as readonly CatalogSdkModelInfo[];
-        models = [...projectCatalogModels(sdkModels)];
+        discoveredSdkModels = sdkModels;
+        // Deployment/source models remain authoritative. Even when the public
+        // catalog is explicit, retain the SDK's private value→resolvedModel
+        // identities so runtime observations can be canonicalized accurately.
+        if (models.length === 0 && explicitSourceModels === undefined) {
+          models = [...projectCatalogModels(sdkModels)];
+        }
       } catch {
         // Catalog discovery is best effort. A missing Claude login, an
         // unavailable directory, or an older SDK must not prevent the host
         // from exposing an otherwise useful session/workspace catalog.
-        models = [];
+        if (models.length === 0 && explicitSourceModels === undefined) {
+          models = [];
+        }
       }
     }
     const configuredDefaultModelId = sourced.defaultModelId ?? configured.defaultModelId;
@@ -836,7 +855,12 @@ export async function createClaudeAgentHost(
           dir: sdkSession.cwd ?? workspace.path,
           includeSystemMessages: true,
         });
-        const observedConfiguration = projectSessionConfiguration(messages, models, defaultModelId);
+        const observedConfiguration = projectSessionConfiguration(
+          messages,
+          models,
+          defaultModelId,
+          projectCatalogSdkModelIdentities(discoveredSdkModels),
+        );
         const restoredBacking = registry.restorePersistedBacking({
           chatUri: session.chatUri,
           sdkSessionId: session.sdkSessionRef,
@@ -887,6 +911,7 @@ export async function createClaudeAgentHost(
     if (state === undefined) {
       throw new Error('catalog resource is not registered');
     }
+    sdkModelIdentities = projectCatalogSdkModelIdentities(discoveredSdkModels);
     return state;
   };
 

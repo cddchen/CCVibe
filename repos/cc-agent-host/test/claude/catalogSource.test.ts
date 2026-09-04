@@ -9,9 +9,11 @@ import {
 } from '../../src/index.js';
 import {
   projectCatalogModels,
+  projectCatalogSdkModelIdentities,
   projectCatalogSessions,
   projectSessionConfiguration,
   projectCatalogWorkspaces,
+  resolveCatalogSdkModelId,
   type CatalogSdkModelInfo,
   type CatalogListSessionsResult,
 } from '../../src/claude/catalogSource.js';
@@ -82,6 +84,34 @@ describe('catalog SDK projection', () => {
       capabilities: ['effort', 'adaptive-thinking', 'auto-mode'],
       supportedEffortLevels: ['low', 'medium', 'high'],
     }]);
+  });
+
+  it('maps an SDK resolved provider model back to its selectable catalog id', () => {
+    const sdkModels = [{
+      value: 'default',
+      displayName: 'Default',
+      description: 'Default model',
+      resolvedModel: 'claude-default-provider-model',
+    }, {
+      value: 'haiku',
+      displayName: 'Haiku',
+      description: 'Fast model',
+      resolvedModel: 'gemini-3.7-flash-high',
+    }] satisfies CatalogSdkModelInfo[];
+    const identities = projectCatalogSdkModelIdentities(sdkModels);
+
+    expect(resolveCatalogSdkModelId('haiku', identities, 'default')).toBe('haiku');
+    expect(resolveCatalogSdkModelId('gemini-3.7-flash-high', identities, 'haiku')).toBe('haiku');
+
+    const configured = projectSessionConfiguration([{
+      type: 'assistant',
+      uuid: 'assistant-resolved-model',
+      session_id: 'session-resolved-model',
+      message: { role: 'assistant', model: 'gemini-3.7-flash-high', content: [] },
+      parent_tool_use_id: null,
+      parent_agent_id: null,
+    } as SessionMessage], projectCatalogModels(sdkModels), undefined, identities);
+    expect(configured).toEqual({ modelId: createModelId('haiku') });
   });
 
   it('projects the typed listSessions result without leaking SDK metadata', () => {
