@@ -10,6 +10,26 @@ export interface NormalizeConnectionAddressOptions {
 
 export type ConnectionAddressOptions = ConnectionMode | NormalizeConnectionAddressOptions;
 
+/**
+ * Return the security mode implied by a URL scheme without parsing or
+ * normalizing the rest of the address. This is intentionally conservative:
+ * malformed/unknown schemes return undefined and must still go through URL
+ * validation before they can be persisted.
+ */
+export function connectionModeFromScheme(rawAddress: string): ConnectionMode | undefined {
+  const scheme = /^\s*([a-z][a-z\d+.-]*):/iu.exec(rawAddress)?.[1]?.toLowerCase();
+  switch (scheme) {
+    case 'http':
+    case 'ws':
+      return 'development';
+    case 'https':
+    case 'wss':
+      return 'production';
+    default:
+      return undefined;
+  }
+}
+
 function resolveOptions(options: ConnectionAddressOptions): Required<Pick<NormalizeConnectionAddressOptions, 'mode' | 'allowInsecure'>> {
   if (typeof options === 'string') {
     return { mode: options, allowInsecure: options === 'development' };

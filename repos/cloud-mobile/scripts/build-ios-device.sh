@@ -12,6 +12,16 @@ if [[ ! -d "$PROJECT_ROOT/ios/Cloud.xcworkspace" ]]; then
   exit 1
 fi
 
+if [[ -f "$PROJECT_ROOT/ios/Podfile.lock" ]] && ! cmp -s "$PROJECT_ROOT/ios/Podfile.lock" "$PROJECT_ROOT/ios/Pods/Manifest.lock"; then
+  echo "检测到 CocoaPods 依赖未同步��Podfile.lock 与 Pods/Manifest.lock 不一致），正在执行 pod install..."
+  if command -v pod >/dev/null 2>&1; then
+    (cd "$PROJECT_ROOT/ios" && pod install)
+  else
+    echo "错误：Podfile.lock 与 Pods/Manifest.lock 不一致，且未找到 pod 命令，请安装 CocoaPods 后执行 pod install。" >&2
+    exit 1
+  fi
+fi
+
 NODE_EXECUTABLE="${NODE_BINARY:-$(command -v node || true)}"
 if [[ -z "$NODE_EXECUTABLE" ]]; then
   echo "错误：未找到 Node.js，请安装 Node.js 或设置 NODE_BINARY。" >&2

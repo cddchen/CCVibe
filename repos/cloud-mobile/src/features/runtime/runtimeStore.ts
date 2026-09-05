@@ -97,6 +97,8 @@ export interface CloudRuntimeState {
   /** Compatibility projection for callers from the single-Host build. */
   readonly savedConnection?: ConnectionPreferences;
   readonly tokenAvailable: boolean;
+  /** Non-sensitive availability metadata, keyed by the Host's local id. */
+  readonly tokenAvailability: Readonly<Record<string, boolean>>;
   readonly selection: RuntimeSelection;
   readonly pendingSend?: PendingSend;
   readonly operationError?: RuntimeOperationError;
@@ -149,6 +151,13 @@ export type ResolveInputActionInput = Omit<HostResolveInputParams, 'clientSeq' |
 export type ConnectionActionResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly errors: Readonly<Partial<Record<'hostUrl' | 'token', string>>> };
+
+/** Result shared by save-only and connection actions so UI can surface field errors. */
+export type ConnectionSaveResult = ConnectionActionResult;
+
+export type DeleteConnectionResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly errors: Readonly<Partial<Record<'hostUrl', string>>> };
 
 export interface RuntimeSupervisor {
   getState(): SyncState;
@@ -218,10 +227,14 @@ export class CloudRuntime {
       sync: createSyncState({ subscriptions: [AGENT_ROOT_URI] }),
       savedConnections: [],
       tokenAvailable: false,
+      tokenAvailability: {},
       selection: {},
     });
     this.actionsValue = Object.freeze({
       connect: (values: ConnectionFormValues, connectionId?: ConnectionId | string | null) => this.connect(values, connectionId),
+      saveConnection: (values: ConnectionFormValues, connectionId?: ConnectionId | string | null) => this.saveConnection(values, connectionId),
+      deleteConnection: (connectionId: ConnectionId | string) => this.deleteConnection(connectionId),
+      hasHostToken: (connectionId: ConnectionId | string) => this.hasHostToken(connectionId),
       switchConnection: (connectionId: ConnectionId | string) => this.switchConnection(connectionId),
       selectConnection: (connectionId: ConnectionId | string) => this.switchConnection(connectionId),
       reconnectSaved: () => this.reconnectSaved(),
@@ -266,9 +279,12 @@ export class CloudRuntime {
       const collection = await this.hostPreferences?.loadHosts() ?? { hosts: [] };
       const savedConnection = findSelectedConnection(collection);
       const selectedConnectionId = collection.selectedConnectionId ?? savedConnection?.connectionId;
+      const tokenAvailability = await this.readTokenAvailability(collection.hosts, selectedConnectionId);
       const token = savedConnection === undefined
         ? null
-        : await this.readHostToken(savedConnection.connectionId, true);
+        : tokenAvailability[String(savedConnection.connectionId)] === true
+          ? await this.readHostToken(savedConnection.connectionId, false)
+          : null;
       if (this.disposed) return;
       this.setState({
         savedConnections: collection.hosts,
@@ -278,6 +294,7 @@ export class CloudRuntime {
         phase: savedConnection !== undefined && token !== null ? 'ready' : 'unconfigured',
         savedConnection: savedConnection ?? undefined,
         tokenAvailable: token !== null,
+        tokenAvailability,
         selection: {
           ...(savedConnection?.lastWorkspaceId === undefined ? {} : { workspaceId: savedConnection.lastWorkspaceId }),
           ...(savedConnection?.lastModelId === undefined ? {} : { modelId: savedConnection.lastModelId }),
@@ -388,6 +405,7 @@ export class CloudRuntime {
       selectedConnectionId: connectionId,
       savedConnection: hostPreferences,
       tokenAvailable: true,
+      tokenAvailability: { ...this.state.tokenAvailability, [String(connectionId)]: true },
       selection: {
         ...(hostPreferences.lastWorkspaceId === undefined ? {} : { workspaceId: hostPreferences.lastWorkspaceId }),
         ...(hostPreferences.lastModelId === undefined ? {} : { modelId: hostPreferences.lastModelId }),
@@ -404,6 +422,146 @@ export class CloudRuntime {
     };
   }
 
+  private async saveConnection(
+    values: ConnectionFormValues,
+    requestedConnectionId?: ConnectionId | string | null,
+  ): Promise<ConnectionSaveResult> {
+    const savedConnection = this.state.savedConnection;
+    const connectionId = requestedConnectionId === null
+      ? createConnectionId(`connection-${this.dependencies.createId()}`)
+      : requestedConnectionId === undefined
+        ? savedConnection?.connectionId ?? createConnectionId(`connection-${this.dependencies.createId()}`)
+        : createConnectionId(String(requestedConnectionId));
+
+    let valuesToValidate = values;
+    if (values.token.trim().length === 0 && requestedConnectionId !== null) {
+      try {
+        const storedToken = await this.readHostToken(connectionId, true);
+        if (storedToken !== null) valuesToValidate = { ...values, token: storedToken };
+      } catch {
+        return { ok: false, errors: { token: '该 Host 的 Token 读取失败，请重新输入' } };
+      }
+    }
+    const result = validateConnectionForm(valuesToValidate);
+    if (!result.ok) return result;
+
+    const existingHost = this.state.savedConnections.find((host) => host.connectionId === connectionId);
+    const hostPreferences = createHostPreferences(connectionId, result.config, existingHost);
+    const hosts = upsertConnection(this.state.savedConnections, hostPreferences);
+    const selectedConnectionId = this.state.selectedConnectionId
+      ?? this.state.savedConnection?.connectionId
+      ?? connectionId;
+    const selectedHost = hosts.find((host) => host.connectionId === selectedConnectionId);
+    const replacingActiveHost = this.supervisor !== undefined
+      && this.state.selectedConnectionId === connectionId;
+
+    try {
+      await this.writeHostToken(connectionId, result.config.token);
+      await this.saveHostCollection({ hosts, selectedConnectionId });
+    } catch {
+      this.setState({ phase: 'error', operationError: { operation: 'create', code: 'STORAGE_UNAVAILABLE' } });
+      return { ok: false, errors: { hostUrl: '连接配置保存失败，请稍后重试' } };
+    }
+
+    // A save-only edit of the live Host changes the configuration underneath
+    // its supervisor. Fence it after the durable write; the user can connect
+    // explicitly from the detail screen when they are ready.
+    if (replacingActiveHost) {
+      this.beginConnectionOperation();
+      this.detachSupervisor(true);
+    }
+
+    const tokenAvailability = {
+      ...this.state.tokenAvailability,
+      [String(connectionId)]: true,
+    };
+    this.setState({
+      savedConnections: hosts,
+      selectedConnectionId,
+      ...(selectedHost === undefined ? { savedConnection: undefined } : { savedConnection: selectedHost }),
+      tokenAvailable: selectedConnectionId === connectionId ? true : this.state.tokenAvailable,
+      tokenAvailability,
+      ...(replacingActiveHost ? { phase: 'unconfigured', sync: freezeSyncState(createSyncState({ subscriptions: [AGENT_ROOT_URI] })) } : {}),
+      selection: selectedHost === undefined
+        ? {}
+        : {
+            ...(selectedHost.lastWorkspaceId === undefined ? {} : { workspaceId: selectedHost.lastWorkspaceId }),
+            ...(selectedHost.lastModelId === undefined ? {} : { modelId: selectedHost.lastModelId }),
+          },
+      operationError: undefined,
+    });
+    return { ok: true };
+  }
+
+  private async deleteConnection(connectionId: ConnectionId | string): Promise<DeleteConnectionResult> {
+    const selectedId = createConnectionId(String(connectionId));
+    const host = this.state.savedConnections.find((candidate) => candidate.connectionId === selectedId);
+    if (host === undefined) {
+      return { ok: false, errors: { hostUrl: '找不到要删除的 Host' } };
+    }
+
+    const isSelected = this.state.selectedConnectionId === selectedId;
+    if (isSelected) {
+      // Stop first so a deleted Host can never keep receiving commands while
+      // its collection entry and secret are being removed.
+      this.beginConnectionOperation();
+      this.detachSupervisor(true);
+    }
+
+    const hosts = Object.freeze(this.state.savedConnections.filter((candidate) => candidate.connectionId !== selectedId));
+    const nextSelectedId = isSelected
+      ? hosts[0]?.connectionId
+      : this.state.selectedConnectionId;
+    try {
+      await this.saveHostCollection({
+        hosts,
+        ...(nextSelectedId === undefined ? {} : { selectedConnectionId: nextSelectedId }),
+      });
+      await this.clearHostToken(selectedId);
+    } catch {
+      this.setState({ phase: 'error', operationError: { operation: 'create', code: 'STORAGE_UNAVAILABLE' } });
+      return { ok: false, errors: { hostUrl: '主机删除失败，请稍后重试' } };
+    }
+
+    const nextSelectedHost = nextSelectedId === undefined
+      ? undefined
+      : hosts.find((candidate) => candidate.connectionId === nextSelectedId);
+    const nextSelectedToken = isSelected
+      ? nextSelectedHost === undefined
+        ? false
+        : await this.hasHostToken(nextSelectedHost.connectionId)
+      : this.state.tokenAvailable;
+    const tokenAvailability = {
+      ...removeTokenAvailability(this.state.tokenAvailability, selectedId),
+      ...(isSelected && nextSelectedHost === undefined ? {} : nextSelectedHost === undefined ? {} : { [String(nextSelectedHost.connectionId)]: nextSelectedToken }),
+    };
+
+    this.setState({
+      savedConnections: hosts,
+      selectedConnectionId: nextSelectedId,
+      ...(nextSelectedHost === undefined ? { savedConnection: undefined } : { savedConnection: nextSelectedHost }),
+      tokenAvailable: isSelected ? nextSelectedToken : this.state.tokenAvailable,
+      tokenAvailability,
+      ...(isSelected ? { phase: 'unconfigured', sync: freezeSyncState(createSyncState({ subscriptions: [AGENT_ROOT_URI] })) } : {}),
+      selection: nextSelectedHost === undefined
+        ? {}
+        : {
+            ...(nextSelectedHost.lastWorkspaceId === undefined ? {} : { workspaceId: nextSelectedHost.lastWorkspaceId }),
+            ...(nextSelectedHost.lastModelId === undefined ? {} : { modelId: nextSelectedHost.lastModelId }),
+          },
+      operationError: undefined,
+    });
+    return { ok: true };
+  }
+
+  private async hasHostToken(connectionId: ConnectionId | string): Promise<boolean> {
+    try {
+      return (await this.readHostToken(createConnectionId(String(connectionId)), false)) !== null;
+    } catch {
+      return false;
+    }
+  }
+
   private async reconnectSaved(): Promise<boolean> {
     const savedConnection = this.state.savedConnection;
     if (savedConnection === undefined) return false;
@@ -412,10 +570,19 @@ export class CloudRuntime {
       const token = await this.readHostToken(savedConnection.connectionId, true);
       if (!this.isCurrentConnectionOperation(operationGeneration)) return false;
       if (token === null || token.trim().length === 0) {
-        this.setState({ tokenAvailable: false, phase: 'unconfigured' });
+        this.setState({
+          tokenAvailable: false,
+          tokenAvailability: { ...this.state.tokenAvailability, [String(savedConnection.connectionId)]: false },
+          phase: 'unconfigured',
+        });
         return false;
       }
-      this.setState({ phase: 'ready', operationError: undefined });
+      this.setState({
+        phase: 'ready',
+        operationError: undefined,
+        tokenAvailable: true,
+        tokenAvailability: { ...this.state.tokenAvailability, [String(savedConnection.connectionId)]: true },
+      });
       const attempt = this.attachConnection({
         connectionId: savedConnection.connectionId,
         address: savedConnection.address,
@@ -445,7 +612,13 @@ export class CloudRuntime {
       const token = await this.readHostToken(selectedId, false);
       if (!this.isCurrentConnectionOperation(operationGeneration)) return { ok: false, errors: { hostUrl: '连接请求已切换' } };
       if (token === null || token.trim().length === 0) {
-        this.setState({ selectedConnectionId: selectedId, savedConnection: host, tokenAvailable: false, phase: 'unconfigured' });
+        this.setState({
+          selectedConnectionId: selectedId,
+          savedConnection: host,
+          tokenAvailable: false,
+          tokenAvailability: { ...this.state.tokenAvailability, [String(selectedId)]: false },
+          phase: 'unconfigured',
+        });
         await this.saveHostSelection(selectedId);
         return { ok: false, errors: { token: '请输入该 Host 的 Token' } };
       }
@@ -455,6 +628,7 @@ export class CloudRuntime {
         selectedConnectionId: selectedId,
         savedConnection: host,
         tokenAvailable: true,
+        tokenAvailability: { ...this.state.tokenAvailability, [String(selectedId)]: true },
         selection: {
           ...(host.lastWorkspaceId === undefined ? {} : { workspaceId: host.lastWorkspaceId }),
           ...(host.lastModelId === undefined ? {} : { modelId: host.lastModelId }),
@@ -823,7 +997,7 @@ export class CloudRuntime {
         clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
         clientInfo: {
           name: 'Cloud',
-          version: '0.4.0',
+          version: '0.6.0',
           platform: this.dependencies.platform ?? 'unknown',
         },
         store: syncStore,
@@ -918,6 +1092,30 @@ export class CloudRuntime {
     return legacy;
   }
 
+  private async readTokenAvailability(
+    hosts: readonly ConnectionPreferences[],
+    selectedConnectionId: ConnectionId | undefined,
+  ): Promise<Readonly<Record<string, boolean>>> {
+    const availability: Record<string, boolean> = {};
+    for (const host of hosts) {
+      try {
+        // Only the selected Host participates in legacy-token migration. A
+        // legacy unscoped token must never be copied to every Host row.
+        const token = await this.readHostToken(host.connectionId, host.connectionId === selectedConnectionId);
+        availability[String(host.connectionId)] = token !== null;
+      } catch {
+        availability[String(host.connectionId)] = false;
+      }
+    }
+    return Object.freeze(availability);
+  }
+
+  private clearHostToken(connectionId: ConnectionId): Promise<void> {
+    return isHostTokenStore(this.dependencies.tokenStore) && typeof this.dependencies.tokenStore.clearForHost === 'function'
+      ? this.dependencies.tokenStore.clearForHost(connectionId)
+      : this.dependencies.tokenStore.clear();
+  }
+
   private writeHostToken(connectionId: ConnectionId, token: string): Promise<void> {
     return isHostTokenStore(this.dependencies.tokenStore)
       ? this.dependencies.tokenStore.writeForHost(connectionId, token)
@@ -981,6 +1179,12 @@ export interface CreateChatAndSendInput {
 
 export interface CloudRuntimeActions {
   connect(values: ConnectionFormValues, connectionId?: ConnectionId | string | null): Promise<ConnectionActionResult>;
+  /** Persist a Host and its scoped token without starting a connection attempt. */
+  saveConnection(values: ConnectionFormValues, connectionId?: ConnectionId | string | null): Promise<ConnectionSaveResult>;
+  /** Remove a Host, its scoped token, and (when selected) its live supervisor. */
+  deleteConnection(connectionId: ConnectionId | string): Promise<DeleteConnectionResult>;
+  /** Read one Host's non-sensitive token availability metadata. */
+  hasHostToken(connectionId: ConnectionId | string): Promise<boolean>;
   switchConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult>;
   /** Alias retained for UI callers that model a Host row as a selection. */
   selectConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult>;
@@ -1131,6 +1335,31 @@ function upsertConnection(
   return Object.freeze(next);
 }
 
+function createHostPreferences(
+  connectionId: ConnectionId,
+  config: { readonly address: string; readonly mode: ConnectionPreferences['mode'] },
+  existingHost: ConnectionPreferences | undefined,
+): ConnectionPreferences {
+  return Object.freeze({
+    connectionId,
+    address: config.address,
+    mode: config.mode,
+    ...(existingHost?.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: existingHost.lastWorkspaceId }),
+    ...(existingHost?.lastModelId === undefined ? {} : { lastModelId: existingHost.lastModelId }),
+  });
+}
+
+function removeTokenAvailability(
+  availability: Readonly<Record<string, boolean>>,
+  connectionId: ConnectionId,
+): Readonly<Record<string, boolean>> {
+  const next: Record<string, boolean> = {};
+  for (const [id, available] of Object.entries(availability)) {
+    if (id !== String(connectionId)) next[id] = available;
+  }
+  return next;
+}
+
 function isHostTokenStore(value: TokenStore): value is TokenStore & HostTokenStore {
   return typeof value.readForHost === 'function' && typeof value.writeForHost === 'function';
 }
@@ -1185,6 +1414,7 @@ function freezeRuntimeState(state: CloudRuntimeState): CloudRuntimeState {
     ...state,
     sync: freezeSyncState(state.sync),
     savedConnections: Object.freeze([...state.savedConnections]),
+    tokenAvailability: Object.freeze({ ...state.tokenAvailability }),
     ...(state.savedConnection === undefined ? {} : { savedConnection: Object.freeze({ ...state.savedConnection }) }),
     selection: Object.freeze({ ...state.selection }),
     ...(state.pendingSend === undefined ? {} : { pendingSend: Object.freeze({ ...state.pendingSend }) }),

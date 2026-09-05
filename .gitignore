@@ -1,4 +1,10 @@
 .*
+!.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/maintain-project-harness/
+!.agents/skills/maintain-project-harness/**
 !.github/
 .github/*
 !.github/workflows/

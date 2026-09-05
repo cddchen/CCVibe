@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain Project Harness"
+  short_description: "Generate and refresh durable agent collaboration docs"
+  default_prompt: "Use $maintain-project-harness to audit this repository and create or update its harness.md and AGENTS.md."

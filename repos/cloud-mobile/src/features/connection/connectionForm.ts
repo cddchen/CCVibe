@@ -1,9 +1,14 @@
 import type { ConnectionMode } from '../../domain/types';
-import { normalizeConnectionAddress } from '../../protocol/connectionAddress';
+import { connectionModeFromScheme, normalizeConnectionAddress } from '../../protocol/connectionAddress';
 
 export interface ConnectionFormValues {
   readonly hostUrl: string;
   readonly token: string;
+  /**
+   * Kept in the form contract for callers from the first single-Host build.
+   * The settings UI no longer exposes a toggle: validation derives this
+   * value from the URL scheme so a saved Host cannot drift from its address.
+   */
   readonly developmentMode: boolean;
 }
 
@@ -29,22 +34,37 @@ export type ConnectionFormResult =
       readonly errors: Readonly<Partial<Record<'hostUrl' | 'token', string>>>;
     };
 
+/**
+ * Derive the Host mode from the scheme the user entered.
+ *
+ * `http`/`ws` are the explicitly local/development transports and
+ * `https`/`wss` are production transports. Unknown schemes stay undefined so
+ * validation can reject them instead of silently choosing a security mode.
+ */
+export function deriveConnectionMode(hostUrl: string): ConnectionMode | undefined {
+  return connectionModeFromScheme(hostUrl);
+}
+
+export function deriveDevelopmentMode(hostUrl: string): boolean {
+  return deriveConnectionMode(hostUrl) === 'development';
+}
+
 export function validateConnectionForm(values: ConnectionFormValues): ConnectionFormResult {
-  const mode: ConnectionMode = values.developmentMode ? 'development' : 'production';
+  const mode = deriveConnectionMode(values.hostUrl);
   const errors: Partial<Record<'hostUrl' | 'token', string>> = {};
   let address: string | undefined;
 
   if (values.hostUrl.trim().length === 0) {
     errors.hostUrl = '请输入 Host URL';
+  } else if (mode === undefined) {
+    errors.hostUrl = '请输入以 ws://、wss://、http:// 或 https:// 开头的 Host URL';
   } else {
     try {
       address = normalizeConnectionAddress(values.hostUrl, mode);
     } catch {
-      errors.hostUrl = values.developmentMode
-        ? '请输入有效的 Host URL'
-        : isInsecureAddress(values.hostUrl)
-          ? '生产模式仅支持 https:// 或 wss:// 地址'
-          : '请输入有效的 Host URL';
+      errors.hostUrl = mode === 'production' && isInsecureAddress(values.hostUrl)
+        ? '生产 Host 仅支持 https:// 或 wss:// 地址'
+        : '请输入有效的 Host URL';
     }
   }
 
@@ -52,7 +72,7 @@ export function validateConnectionForm(values: ConnectionFormValues): Connection
     errors.token = '请输入 Token，或使用已保存的 Token';
   }
 
-  if (Object.keys(errors).length > 0 || address === undefined) {
+  if (Object.keys(errors).length > 0 || address === undefined || mode === undefined) {
     return Object.freeze({ ok: false, errors: Object.freeze(errors) });
   }
 

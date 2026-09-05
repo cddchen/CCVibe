@@ -1,6 +1,6 @@
 {
   "name": "@cddchen/cloud",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "description": "Run a Cloud Agent Host for Claude Code sessions.",
   "type": "module",
   "main": "./dist/index.js",

@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import type { ConnectionConfig, ConnectionMode } from '../domain/types';
 import { createConnectionId, type ConnectionId } from '../protocol/ids';
-import { normalizeConnectionAddress } from '../protocol/connectionAddress';
+import { connectionModeFromScheme, normalizeConnectionAddress } from '../protocol/connectionAddress';
 
 export interface AsyncStoragePort {
   getItem(key: string): Promise<string | null>;
@@ -298,7 +298,11 @@ function upsertHost(
 }
 
 function normalizePreferences(config: ConnectionConfig | ConnectionPreferences | ConnectionPreferencesInput): ConnectionPreferences {
-  const mode = config.mode;
+  // The scheme is the source of truth now that the settings UI intentionally
+  // hides the development toggle. This also repairs older records whose mode
+  // drifted from their persisted address while retaining a fallback for
+  // malformed input that will be rejected by address normalization below.
+  const mode = connectionModeFromScheme(config.address) ?? config.mode;
   const lastWorkspaceId = 'lastWorkspaceId' in config ? config.lastWorkspaceId : undefined;
   const lastModelId = 'lastModelId' in config ? config.lastModelId : undefined;
   return Object.freeze({

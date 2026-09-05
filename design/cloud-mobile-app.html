@@ -288,30 +288,56 @@
 
     .profile-hero { position: relative; padding: 12px 0 8px; text-align: center; }
     .profile-back-button { position: absolute; top: 0; left: 0; }
-    .profile-back-button[hidden], .setting-input[hidden], .setting-row .value[hidden] { display: none; }
-    .profile-edit-button {
-      position: absolute; top: 0; right: 0; min-width: 52px; height: 44px; padding: 0 8px; border: 0; border-radius: 12px;
-      background: transparent; color: var(--fg); font-size: 14px; font-weight: 600;
-    }
-    .profile-edit-button:hover { background: var(--fg-soft); }
-    .profile-edit-button:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .host-list-view[hidden], .host-editor[hidden] { display: none; }
     .cloud-mark { width: 70px; height: 70px; margin: 0 auto 14px; display: grid; place-items: center; border-radius: 22px; background: var(--fg); color: var(--surface); box-shadow: 0 16px 34px color-mix(in oklch, var(--fg) 18%, transparent); }
     .cloud-mark svg { width: 36px; height: 36px; }
-    .settings { overflow: hidden; margin-top: 24px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border); }
-    .setting-row { min-height: 54px; padding: 0 14px; display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--border); }
-    .setting-row:last-child { border-bottom: 0; }
-    .setting-row svg { width: 19px; height: 19px; }
-    .setting-row .value { max-width: 190px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-    .setting-input {
-      width: min(48vw, 190px); height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 11px;
-      background: var(--bg); color: var(--fg); outline: 0; font-size: 12px;
+    .settings { overflow: hidden; margin-top: 12px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border); }
+    .host-list-heading { margin: 28px 2px 10px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .host-list-item {
+      width: 100%; min-height: 58px; padding: 0 14px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
+      border: 0; border-bottom: 1px solid var(--border); background: transparent; text-align: left;
     }
-    .setting-input::placeholder { color: var(--muted); }
-    .toggle { width: 52px; height: 44px; padding: 8px 2px; border: 0; border-radius: 999px; background: transparent; position: relative; }
-    .toggle::before { content: ""; position: absolute; inset: 8px 2px; border-radius: 999px; background: var(--fg); }
-    .toggle::after { content: ""; position: relative; z-index: 1; display: block; width: 24px; height: 24px; margin-left: 24px; border-radius: 50%; background: var(--surface); box-shadow: 0 2px 5px color-mix(in oklch, var(--fg) 20%, transparent); transition: margin .18s ease; }
-    .toggle[aria-checked="false"]::before { background: var(--border); }
-    .toggle[aria-checked="false"]::after { margin-left: 0; }
+    .host-list-item:last-child { border-bottom: 0; }
+    .host-list-item:hover { background: var(--fg-soft); }
+    .host-list-item:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .host-list-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .host-list-item svg { width: 18px; height: 18px; color: var(--muted); }
+    .host-list-trailing { display: flex; align-items: center; gap: 8px; }
+    .host-list-trailing .host-active-mark { color: var(--accent); }
+    .host-list-item-add { color: var(--fg); font-weight: 600; }
+    .host-list-item-add svg { color: var(--accent); }
+    .host-editor { position: relative; margin-top: 26px; }
+    .host-editor h2 { margin: 0 2px 18px; font-size: 21px; }
+    .host-delete-button {
+      position: absolute; top: -11px; right: -8px; min-width: 56px; height: 44px; padding: 0 8px;
+      border: 0; border-radius: 12px; background: transparent; color: oklch(57.5% .215 29.2); font-weight: 600;
+    }
+    .host-delete-button[hidden] { display: none; }
+    .host-delete-button:hover { background: color-mix(in oklch, currentColor 9%, transparent); }
+    .host-delete-button:active { background: color-mix(in oklch, currentColor 14%, transparent); }
+    .host-field { margin-top: 16px; }
+    .host-field label { display: block; margin: 0 2px 7px; color: var(--muted); font-size: 12px; }
+    .host-field input {
+      width: 100%; height: 50px; padding: 0 14px; border: 1px solid var(--border); border-radius: 14px;
+      background: var(--surface); color: var(--fg); outline: 0;
+    }
+    .host-field input[readonly] { background: var(--fg-soft); border-color: transparent; cursor: default; }
+    .host-field input::placeholder { color: var(--muted); }
+    .host-editor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 22px; }
+    .host-editor-actions .btn { width: 100%; margin-top: 0; }
+    .host-security-note { margin: 14px 8px; text-align: center; }
+    .host-delete-scrim { position: absolute; inset: 0; z-index: 58; display: none; place-items: center; padding: 24px; background: color-mix(in oklch, var(--fg) 26%, transparent); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+    .host-delete-scrim.is-open { display: grid; animation: fade .18s ease; }
+    .host-delete-dialog { width: min(100%, 300px); overflow: hidden; border: 1px solid color-mix(in oklch, var(--surface) 62%, var(--border)); border-radius: 22px; background: var(--glass-strong); text-align: center; box-shadow: 0 24px 60px color-mix(in oklch, var(--fg) 28%, transparent); backdrop-filter: blur(28px) saturate(1.4); -webkit-backdrop-filter: blur(28px) saturate(1.4); }
+    .host-delete-copy { padding: 22px 20px 18px; }
+    .host-delete-copy h2 { font-size: 19px; }
+    .host-delete-copy p { margin: 8px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .host-delete-actions { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border); }
+    .host-delete-actions button { min-height: 50px; border: 0; background: transparent; font-weight: 600; }
+    .host-delete-actions button + button { border-left: 1px solid var(--border); }
+    .host-delete-actions button:hover { background: var(--fg-soft); }
+    .host-delete-actions button:active { background: color-mix(in oklch, var(--fg) 9%, transparent); }
+    .host-delete-actions .confirm-delete { color: oklch(57.5% .215 29.2); }
 
     .scrim { position: absolute; inset: 0; z-index: 50; display: none; background: color-mix(in oklch, var(--fg) 24%, transparent); backdrop-filter: blur(3px); }
     .scrim.is-open { display: block; animation: fade .2s ease; }
@@ -545,22 +571,44 @@
           <div class="empty-state" id="emptyRequests" hidden=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m5 12 4 4L19 6"></path><circle cx="12" cy="12" r="10"></circle></svg><strong>请求已处理</strong><span>新的请求会由 Host 同步到这里。</span></div>
         </section>
 
-        <section class="screen" data-screen="profile" data-od-id="profile-screen" aria-label="我的">
+        <section class="screen" data-screen="profile" data-od-id="profile-screen" aria-label="云端主机设置">
           <div class="profile-hero">
-            <button class="icon-button profile-back-button" data-go-home="" aria-label="返回首页" data-od-id="profile-back-button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 5-7 7 7 7"></path></svg></button>
-            <button class="profile-edit-button" id="profileEditButton" type="button" data-od-id="profile-edit-button">编辑</button>
+            <button class="icon-button profile-back-button" aria-label="返回首页" data-od-id="profile-back-button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 5-7 7 7 7"></path></svg></button>
             <div class="cloud-mark"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 23h15a6 6 0 0 0 .6-12A9 9 0 0 0 8 9.6 6.8 6.8 0 0 0 9 23Z"></path></svg></div>
             <h1 data-od-id="profile-heading">Cloud</h1>
             <p class="meta">远程移动控制端 · 演示环境</p>
           </div>
-          <div class="settings" data-od-id="connection-settings">
-            <div class="setting-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg><label for="hostInput">Cloud Host</label><span class="value" id="hostValue">wss://…</span><input class="setting-input" id="hostInput" type="url" inputmode="url" placeholder="输入 wss:// Host 地址" autocomplete="url" data-od-id="host-input" hidden></div>
-            <div class="setting-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z"></path></svg><label for="tokenInput">Token</label><span class="value" id="tokenValue">已保护</span><input class="setting-input" id="tokenInput" type="password" placeholder="输入新 Token" autocomplete="new-password" data-od-id="token-input" hidden></div>
-            <div class="setting-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 12a8 8 0 0 1 14-5M20 12a8 8 0 0 1-14 5"></path><path d="M18 3v4h-4M6 21v-4h4"></path></svg><span>自动重连</span><button class="toggle" role="switch" aria-checked="true" aria-label="自动重连"></button></div>
+          <div class="host-list-view" id="hostListView" data-od-id="host-list-view">
+            <p class="host-list-heading">云端主机</p>
+            <div class="settings" id="hostList" data-od-id="saved-host-list" aria-label="已保存的云端主机"></div>
+            <p class="meta host-security-note">列表仅显示 Host，Token 始终保持隐藏。</p>
           </div>
-          <p class="meta" style="margin: 16px 8px; text-align: center;">Token 不进入 URL、日志或会话内容。</p>
+          <form class="host-editor" id="hostEditor" data-od-id="host-editor" hidden>
+            <button class="host-delete-button" id="deleteHostButton" type="button" data-od-id="delete-host-button" hidden>删除</button>
+            <h2 id="hostEditorHeading">编辑主机</h2>
+            <div class="host-field"><label for="hostInput">Host</label><input id="hostInput" type="url" inputmode="url" placeholder="wss://hostname:port" autocomplete="url" data-od-id="host-input" required></div>
+            <div class="host-field"><label for="tokenInput">Token</label><input id="tokenInput" type="password" placeholder="输入 Token" autocomplete="new-password" data-od-id="token-input"></div>
+            <p class="meta host-security-note" id="tokenHint">留空则保留已保存的 Token。</p>
+            <div class="host-editor-actions">
+              <button class="btn btn-secondary" id="saveHostButton" type="submit" data-od-id="save-host-button">保存</button>
+              <button class="btn btn-primary" id="connectHostButton" type="button" data-od-id="connect-host-button">连接</button>
+            </div>
+          </form>
         </section>
       </main>
+
+      <div class="host-delete-scrim" id="hostDeleteScrim" role="presentation">
+        <div class="host-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="hostDeleteTitle" aria-describedby="hostDeleteDescription" data-od-id="delete-host-dialog">
+          <div class="host-delete-copy">
+            <h2 id="hostDeleteTitle">删除这台主机？</h2>
+            <p id="hostDeleteDescription"></p>
+          </div>
+          <div class="host-delete-actions">
+            <button id="cancelDeleteHost" type="button" data-od-id="cancel-delete-host">取消</button>
+            <button class="confirm-delete" id="confirmDeleteHost" type="button" data-od-id="confirm-delete-host">删除</button>
+          </div>
+        </div>
+      </div>
 
       <div class="scrim" id="newChatScrim" role="presentation">
         <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" data-od-id="new-chat-sheet">
@@ -694,44 +742,201 @@
 
       document.querySelectorAll('[data-open-chat]').forEach(button => button.addEventListener('click', () => showScreen('chat')));
       document.querySelectorAll('[data-go-home]').forEach(button => button.addEventListener('click', () => showScreen('home')));
-      document.getElementById('settingsButton').addEventListener('click', () => showScreen('profile'));
 
-      const profileEditButton = document.getElementById('profileEditButton');
       const profileBackButton = document.querySelector('[data-od-id="profile-back-button"]');
-      const hostValue = document.getElementById('hostValue');
-      const tokenValue = document.getElementById('tokenValue');
+      const hostListView = document.getElementById('hostListView');
+      const hostList = document.getElementById('hostList');
+      const hostEditor = document.getElementById('hostEditor');
+      const hostEditorHeading = document.getElementById('hostEditorHeading');
       const hostInput = document.getElementById('hostInput');
       const tokenInput = document.getElementById('tokenInput');
-      let isEditingProfile = false;
+      const tokenHint = document.getElementById('tokenHint');
+      const saveHostButton = document.getElementById('saveHostButton');
+      const connectHostButton = document.getElementById('connectHostButton');
+      const deleteHostButton = document.getElementById('deleteHostButton');
+      const hostDeleteScrim = document.getElementById('hostDeleteScrim');
+      const hostDeleteDescription = document.getElementById('hostDeleteDescription');
+      const cancelDeleteHost = document.getElementById('cancelDeleteHost');
+      const confirmDeleteHost = document.getElementById('confirmDeleteHost');
+      const savedHostStorageKey = 'cloud-saved-hosts';
+      const activeHostStorageKey = 'cloud-active-host';
+      let editingHostIndex = -1;
+      let hostEditorMode = 'view';
+      let hostRecords = [{ host: 'wss://cloud.example.com', hasToken: true }, { host: 'ws://localhost:8787', hasToken: true }];
+      let activeHost = '';
 
-      function setProfileEditState(active) {
-        isEditingProfile = active;
-        profileBackButton.hidden = active;
-        profileEditButton.textContent = active ? '保存' : '编辑';
-        profileEditButton.setAttribute('aria-label', active ? '保存设置' : '编辑设置');
-        hostValue.hidden = active;
-        tokenValue.hidden = active;
-        hostInput.hidden = !active;
-        tokenInput.hidden = !active;
-        if (active) hostInput.focus();
+      try {
+        const storedHosts = JSON.parse(localStorage.getItem(savedHostStorageKey) || 'null');
+        if (Array.isArray(storedHosts)) hostRecords = storedHosts.filter(item => item && typeof item.host === 'string');
+      } catch (error) {
+        hostRecords = hostRecords.slice();
+      }
+      try { activeHost = localStorage.getItem(activeHostStorageKey) || ''; } catch (error) {}
+      if (!hostRecords.some(record => record.host === activeHost)) activeHost = hostRecords[0] ? hostRecords[0].host : '';
+
+      function persistHosts() {
+        try { localStorage.setItem(savedHostStorageKey, JSON.stringify(hostRecords.map(({ host, hasToken }) => ({ host, hasToken })))); } catch (error) {}
       }
 
-      profileEditButton.addEventListener('click', () => {
-        if (!isEditingProfile) {
-          setProfileEditState(true);
-          return;
-        }
+      function persistActiveHost() {
+        try { localStorage.setItem(activeHostStorageKey, activeHost); } catch (error) {}
+      }
+      persistActiveHost();
+
+      function renderHostList() {
+        hostList.innerHTML = hostRecords.map((record, index) => `
+          <button class="host-list-item" type="button" data-host-index="${index}" data-od-id="saved-host-${index + 1}" aria-label="编辑已保存的主机${record.host === activeHost ? '，当前默认连接' : ''}" ${record.host === activeHost ? 'aria-current="true"' : ''}>
+            <span>${record.host.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>
+            <span class="host-list-trailing" aria-hidden="true">
+              ${record.host === activeHost ? '<svg class="host-active-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"></path></svg>' : ''}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 5 7 7-7 7"></path></svg>
+            </span>
+          </button>`).join('') + `
+          <button class="host-list-item host-list-item-add" id="addHostButton" type="button" data-od-id="add-host-button">
+            <span>新增主机</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+          </button>`;
+      }
+
+      function showHostList() {
+        editingHostIndex = -1;
+        hostEditorMode = 'view';
+        hostEditor.hidden = true;
+        hostListView.hidden = false;
+        profileBackButton.setAttribute('aria-label', '返回首页');
+        renderHostList();
+      }
+
+      function showHostDetail(index, mode) {
+        editingHostIndex = index;
+        hostEditorMode = mode;
+        const record = index >= 0 ? hostRecords[index] : null;
+        const isView = mode === 'view';
+        hostEditorHeading.textContent = isView ? '主机详情' : record ? '编辑主机' : '新增主机';
+        hostInput.value = record ? record.host : '';
+        hostInput.readOnly = isView;
+        tokenInput.type = isView ? 'text' : 'password';
+        tokenInput.value = isView ? '已保护' : '';
+        tokenInput.readOnly = isView;
+        tokenInput.required = !isView && (!record || !record.hasToken);
+        tokenHint.textContent = isView ? 'Token 已安全保存，不会显示明文。' : record && record.hasToken ? '留空则保留已保存的 Token。' : 'Token 会安全保存，不会显示在列表中。';
+        saveHostButton.type = isView ? 'button' : 'submit';
+        saveHostButton.textContent = isView ? '编辑' : '保存';
+        saveHostButton.setAttribute('aria-label', isView ? '编辑当前主机' : '保存当前主机');
+        deleteHostButton.hidden = !isView;
+        hostListView.hidden = true;
+        hostEditor.hidden = false;
+        profileBackButton.setAttribute('aria-label', '返回主机列表');
+        if (!isView) setTimeout(() => hostInput.focus(), 0);
+      }
+
+      function validateHostForm() {
         const nextHost = hostInput.value.trim();
-        if (nextHost && !/^wss?:\/\//i.test(nextHost)) {
+        if (!nextHost) {
+          notify('请输入 Host 地址');
+          hostInput.focus();
+          return null;
+        }
+        if (!/^wss?:\/\//i.test(nextHost)) {
           notify('Host 地址需以 ws:// 或 wss:// 开头');
           hostInput.focus();
-          return;
+          return null;
         }
-        if (nextHost) hostValue.textContent = nextHost;
-        if (tokenInput.value.trim()) tokenValue.textContent = '已保护';
+        const token = tokenInput.value.trim();
+        const currentRecord = editingHostIndex >= 0 ? hostRecords[editingHostIndex] : null;
+        if (!token && (!currentRecord || !currentRecord.hasToken)) {
+          notify('请输入 Token');
+          tokenInput.focus();
+          return null;
+        }
+        return { host: nextHost, hasToken: Boolean(token) || Boolean(currentRecord && currentRecord.hasToken) };
+      }
+
+      function saveHost() {
+        const record = validateHostForm();
+        if (!record) return null;
+        if (editingHostIndex >= 0) {
+          const previousHost = hostRecords[editingHostIndex].host;
+          hostRecords[editingHostIndex] = record;
+          if (activeHost === previousHost) {
+            activeHost = record.host;
+            persistActiveHost();
+          }
+        } else hostRecords.push(record);
+        persistHosts();
         tokenInput.value = '';
-        setProfileEditState(false);
-        notify('设置已保存');
+        return record;
+      }
+
+      document.getElementById('settingsButton').addEventListener('click', () => {
+        showHostList();
+        showScreen('profile');
+      });
+
+      profileBackButton.addEventListener('click', event => {
+        if (hostEditor.hidden) showScreen('home');
+        else showHostList();
+      });
+
+      hostList.addEventListener('click', event => {
+        const hostButton = event.target.closest('[data-host-index]');
+        if (hostButton) showHostDetail(Number(hostButton.dataset.hostIndex), 'view');
+        else if (event.target.closest('#addHostButton')) showHostDetail(-1, 'new');
+      });
+
+      saveHostButton.addEventListener('click', () => {
+        if (hostEditorMode === 'view') showHostDetail(editingHostIndex, 'edit');
+      });
+
+      function closeDeleteDialog() {
+        hostDeleteScrim.classList.remove('is-open');
+        deleteHostButton.focus();
+      }
+
+      deleteHostButton.addEventListener('click', () => {
+        const record = hostRecords[editingHostIndex];
+        if (!record) return;
+        hostDeleteDescription.textContent = `“${record.host}”及其连接信息将从此设备移除。`;
+        hostDeleteScrim.classList.add('is-open');
+        setTimeout(() => cancelDeleteHost.focus(), 0);
+      });
+
+      cancelDeleteHost.addEventListener('click', closeDeleteDialog);
+      hostDeleteScrim.addEventListener('click', event => { if (event.target === hostDeleteScrim) closeDeleteDialog(); });
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && hostDeleteScrim.classList.contains('is-open')) closeDeleteDialog();
+      });
+
+      confirmDeleteHost.addEventListener('click', () => {
+        const removed = hostRecords[editingHostIndex];
+        if (!removed) return;
+        hostRecords.splice(editingHostIndex, 1);
+        if (activeHost === removed.host) {
+          activeHost = hostRecords[0] ? hostRecords[0].host : '';
+          persistActiveHost();
+        }
+        persistHosts();
+        hostDeleteScrim.classList.remove('is-open');
+        showHostList();
+        notify('主机已删除');
+      });
+
+      hostEditor.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!saveHost()) return;
+        showHostList();
+        notify('主机已保存');
+      });
+
+      connectHostButton.addEventListener('click', () => {
+        const record = hostEditorMode === 'view' ? hostRecords[editingHostIndex] : saveHost();
+        if (!record) return;
+        activeHost = record.host;
+        persistActiveHost();
+        document.getElementById('hostStatus').textContent = 'Host 已连接';
+        showHostList();
+        showScreen('home');
+        notify('连接成功');
       });
 
       document.querySelectorAll('[data-open-sheet]').forEach(button => button.addEventListener('click', () => {
@@ -846,8 +1051,6 @@
         updateRequestState();
       }));
       document.getElementById('refreshRequests').addEventListener('click', () => notify('已与 Host 同步'));
-      document.querySelectorAll('.toggle').forEach(toggle => toggle.addEventListener('click', () => toggle.setAttribute('aria-checked', toggle.getAttribute('aria-checked') !== 'true')));
-
       setInterval(() => {
         const now = new Date();
         document.getElementById('clock').textContent = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`;

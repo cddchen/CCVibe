@@ -34,22 +34,31 @@ describe('connection form validation', () => {
     expect(JSON.stringify(result.preferences)).not.toContain('secret-token');
   });
 
-  it('requires an explicit development toggle for ws/http addresses', () => {
+  it('derives development mode from ws/http schemes regardless of the legacy toggle field', () => {
     expect(validateConnectionForm({
       ...validForm,
       hostUrl: 'ws://localhost:8787/agent',
     })).toMatchObject({
-      ok: false,
-      errors: { hostUrl: '生产模式仅支持 https:// 或 wss:// 地址' },
+      ok: true,
+      config: { address: 'ws://localhost:8787/agent', mode: 'development' },
     });
 
     expect(validateConnectionForm({
       ...validForm,
       hostUrl: 'ws://localhost:8787/agent',
-      developmentMode: true,
+      developmentMode: false,
     })).toMatchObject({
       ok: true,
       config: { address: 'ws://localhost:8787/agent', mode: 'development' },
+    });
+
+    expect(validateConnectionForm({
+      ...validForm,
+      hostUrl: 'https://cloud.example.test/agent',
+      developmentMode: true,
+    })).toMatchObject({
+      ok: true,
+      config: { address: 'wss://cloud.example.test/agent', mode: 'production' },
     });
   });
 
@@ -62,7 +71,7 @@ describe('connection form validation', () => {
 
     expect(result).toMatchObject({
       ok: false,
-      errors: { hostUrl: '请输入有效的 Host URL' },
+      errors: { hostUrl: '请输入以 ws://、wss://、http:// 或 https:// 开头的 Host URL' },
     });
     expect(JSON.stringify(result)).not.toContain('sensitive-token');
   });

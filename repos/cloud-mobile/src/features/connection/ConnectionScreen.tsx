@@ -1,14 +1,14 @@
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import { useRouter } from 'expo-router';
-import { useEffect, useRef, useState, type JSX, type ReactNode } from 'react';
+import { useEffect, useState, type JSX } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   TextInput,
   View,
 } from 'react-native';
@@ -19,18 +19,25 @@ import {
   useCloudActions,
   useCloudSelector,
 } from '../runtime/CloudRuntimeProvider';
-import { validateConnectionForm, type ConnectionFormValues } from './connectionForm';
+import {
+  deriveDevelopmentMode,
+  validateConnectionForm,
+  type ConnectionFormValues,
+} from './connectionForm';
 import type { CloudRuntimeState } from '../runtime/runtimeStore';
 import type { ConnectionId } from '../../protocol/ids';
 import type { ConnectionPreferences } from '../../storage/connectionPreferences';
-import { GlassSurface } from '../../ui/glass/GlassSurface';
 import { CLOUD_DESIGN_TOKENS } from '../../ui/theme/cloudTheme';
 
-const initialForm: ConnectionFormValues = {
+export type ConnectionSettingsView = 'list' | 'detail' | 'edit' | 'new';
+
+type ConnectionFormErrors = Readonly<Partial<Record<'hostUrl' | 'token', string>>>;
+
+const EMPTY_FORM: ConnectionFormValues = Object.freeze({
   hostUrl: '',
   token: '',
   developmentMode: false,
-};
+});
 
 export default function ConnectionScreen(): JSX.Element {
   const router = useRouter();
@@ -38,31 +45,56 @@ export default function ConnectionScreen(): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const actions = useCloudActions();
   const connection = useCloudSelector(selectConnectionScreenState);
-  const [form, setForm] = useState<ConnectionFormValues>(initialForm);
-  const [errors, setErrors] = useState<Readonly<Partial<Record<'hostUrl' | 'token', string>>>>({});
+  const [view, setView] = useState<ConnectionSettingsView>('list');
+  const [focusedConnectionId, setFocusedConnectionId] = useState<ConnectionId | undefined>();
+  const [detailTokenAvailable, setDetailTokenAvailable] = useState<boolean | undefined>();
+  const [form, setForm] = useState<ConnectionFormValues>(EMPTY_FORM);
+  const [errors, setErrors] = useState<ConnectionFormErrors>({});
   const [submitting, setSubmitting] = useState(false);
-  const [editingConnectionId, setEditingConnectionId] = useState<ConnectionId | null | undefined>();
-  const hasEditedForm = useRef(false);
+
+  const focusedHost = focusedConnectionId === undefined
+    ? undefined
+    : connection.hosts.find((host) => host.connectionId === focusedConnectionId);
+
+  // A second client or another runtime action can remove the row while this
+  // screen is open. Return to the stable list instead of rendering a stale
+  // detail form with credentials for a Host that no longer exists.
+  useEffect(() => {
+    if (focusedConnectionId === undefined || focusedHost !== undefined) return;
+    setFocusedConnectionId(undefined);
+    setDetailTokenAvailable(undefined);
+    setView('list');
+  }, [focusedConnectionId, focusedHost]);
 
   useEffect(() => {
-    if (connection.selectedHost === undefined) {
-      setEditingConnectionId(null);
-      if (!hasEditedForm.current) setForm(initialForm);
-      return;
-    }
-    if (hasEditedForm.current) return;
-    setForm((current) => ({
-      ...current,
-      hostUrl: connection.selectedHost?.address ?? '',
-      token: '',
-      developmentMode: connection.selectedHost?.mode === 'development',
-    }));
-    setEditingConnectionId(undefined);
-  }, [connection.selectedHost]);
+    if (view !== 'detail' || focusedConnectionId === undefined) return;
+    let active = true;
+    setDetailTokenAvailable(undefined);
+    void actions.hasHostToken(focusedConnectionId).then((available) => {
+      if (active) setDetailTokenAvailable(available);
+    });
+    return () => {
+      active = false;
+    };
+  }, [actions, focusedConnectionId, view]);
+
+  const selectedHostTokenAvailable = focusedHost === undefined
+    ? false
+    : connection.tokenAvailability[String(focusedHost.connectionId)]
+      ?? (focusedHost.connectionId === connection.selectedConnectionId ? connection.tokenAvailable : false);
+  const resolvedDetailTokenAvailable = detailTokenAvailable ?? selectedHostTokenAvailable;
+  const heroSubtitle = connection.selectedHost === undefined
+    ? '远程移动控制端'
+    : connection.selectedHost.mode === 'development'
+      ? '远程移动控制端 · 开发环境'
+      : '远程移动控制端 · 生产环境';
 
   const updateForm = (patch: Partial<ConnectionFormValues>): void => {
-    hasEditedForm.current = true;
-    setForm((current) => ({ ...current, ...patch }));
+    setForm((current) => {
+      const next = { ...current, ...patch };
+      if ('hostUrl' in patch) next.developmentMode = deriveDevelopmentMode(next.hostUrl);
+      return next;
+    });
     if ('hostUrl' in patch && errors.hostUrl !== undefined) {
       setErrors((current) => ({ ...current, hostUrl: undefined }));
     }
@@ -71,82 +103,149 @@ export default function ConnectionScreen(): JSX.Element {
     }
   };
 
-  const submit = async (): Promise<void> => {
+  const showList = (): void => {
+    setView('list');
+    setErrors({});
+    setDetailTokenAvailable(undefined);
+  };
+
+  const goBack = (): void => {
+    if (view === 'list') {
+      // The list is the route boundary. Native back preserves the interactive
+      // iOS gesture and Android back stack semantics.
+      router.back();
+      return;
+    }
+    showList();
+  };
+
+  const openDetail = (host: ConnectionPreferences): void => {
+    setFocusedConnectionId(host.connectionId);
+    setDetailTokenAvailable(undefined);
+    setErrors({});
+    setView('detail');
+  };
+
+  const openEdit = (): void => {
+    if (focusedHost === undefined) return;
+    setForm(formForHost(focusedHost));
+    setErrors({});
+    setView('edit');
+  };
+
+  const openNew = (): void => {
+    setFocusedConnectionId(undefined);
+    setDetailTokenAvailable(undefined);
+    setForm(EMPTY_FORM);
+    setErrors({});
+    setView('new');
+  };
+
+  const save = async (): Promise<void> => {
     const validation = validateConnectionForm(form);
-    // A blank token while editing an existing row means "keep the protected
-    // token". Runtime resolves it from that Host's SecureStore namespace.
-    const canKeepStoredToken = editingConnectionId !== null
-      && !validation.ok
-      && validation.errors.hostUrl === undefined
-      && validation.errors.token !== undefined;
-    if (!validation.ok && !canKeepStoredToken) {
+    if (!validation.ok && !(view === 'edit' && canKeepStoredToken(validation))) {
       setErrors(validation.errors);
       return;
     }
-
     setErrors({});
     setSubmitting(true);
     try {
-      const result = await actions.connect(form, editingConnectionId ?? null);
+      const result = await actions.saveConnection(
+        form,
+        view === 'edit' ? focusedConnectionId ?? null : null,
+      );
       if (!result.ok) {
         setErrors(result.errors);
         return;
       }
-      setEditingConnectionId(undefined);
-      hasEditedForm.current = false;
+      showList();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const connect = async (): Promise<void> => {
+    if (view === 'detail' && focusedConnectionId !== undefined) {
+      setErrors({});
+      setSubmitting(true);
+      try {
+        // A saved row is already canonical; switching it must use the runtime
+        // operation that fences the previous Host and verifies this Host's
+        // own credentials before changing the active selection.
+        const result = await actions.switchConnection(focusedConnectionId);
+        if (!result.ok) {
+          setErrors(result.errors);
+          return;
+        }
+        router.replace('/');
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
+    const values = form;
+    const validation = validateConnectionForm(values);
+    if (!validation.ok && !(view === 'edit' && canKeepStoredToken(validation))) {
+      setErrors(validation.errors);
+      return;
+    }
+    setErrors({});
+    setSubmitting(true);
+    try {
+      const result = await actions.connect(
+        values,
+        view === 'edit' ? focusedConnectionId ?? null : null,
+      );
+      if (!result.ok) {
+        setErrors(result.errors);
+        return;
+      }
       router.replace('/');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const reconnect = async (): Promise<void> => {
+  const requestDelete = (): void => {
+    if (focusedHost === undefined || submitting) return;
+    Alert.alert(
+      '删除这台主机？',
+      `“${focusedHost.address}”及其连接信息将从此设备移除。`,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '删除',
+          style: 'destructive',
+          onPress: () => { void deleteHost(focusedHost.connectionId); },
+        },
+      ],
+    );
+  };
+
+  const deleteHost = async (connectionId: ConnectionId): Promise<void> => {
     setSubmitting(true);
     try {
-      if (await actions.reconnectSaved()) router.replace('/');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const beginEditing = (): void => {
-    hasEditedForm.current = false;
-    setErrors({});
-    setForm({
-      hostUrl: connection.selectedHost?.address ?? '',
-      token: '',
-      developmentMode: connection.selectedHost?.mode === 'development',
-    });
-    setEditingConnectionId(connection.selectedHost?.connectionId ?? null);
-  };
-
-  const addHost = (): void => {
-    hasEditedForm.current = false;
-    setErrors({});
-    setForm(initialForm);
-    setEditingConnectionId(null);
-  };
-
-  const switchHost = async (host: ConnectionPreferences): Promise<void> => {
-    if (submitting || editingConnectionId !== undefined || host.connectionId === connection.selectedConnectionId) return;
-    setErrors({});
-    setSubmitting(true);
-    try {
-      const result = await actions.switchConnection(host.connectionId);
-      if (result.ok) {
-        router.replace('/');
-      } else {
+      const result = await actions.deleteConnection(connectionId);
+      if (!result.ok) {
         setErrors(result.errors);
+        return;
       }
+      setFocusedConnectionId(undefined);
+      showList();
     } finally {
       setSubmitting(false);
     }
   };
 
-  const statusLabel = connectionStatusLabel(connection.syncStatus);
-  const statusColor = syncStatusColor(connection.syncStatus, theme);
-  const editing = editingConnectionId !== undefined;
-  const hasSavedConnection = connection.selectedHost !== undefined;
+  const operationError = connection.operationError === undefined
+    ? undefined
+    : runtimeErrorLabel(connection.operationError.code);
+  // Editors render validation failures beside their fields. The detail view
+  // has no editable fields, so it receives the same result as a compact
+  // summary; runtime failures remain available to both views as an inline
+  // message without duplicating field-level text.
+  const detailError = errors.hostUrl ?? errors.token ?? operationError;
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]}>
@@ -154,7 +253,6 @@ export default function ConnectionScreen(): JSX.Element {
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        <View pointerEvents="none" style={[styles.ambient, { backgroundColor: theme.colors.primaryContainer }]} />
         <ScrollView
           contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, 28) }]}
           keyboardShouldPersistTaps="handled"
@@ -162,223 +260,349 @@ export default function ConnectionScreen(): JSX.Element {
         >
           <View style={styles.hero}>
             <Pressable
-              accessibilityLabel="返回首页"
-              accessibilityRole="button"
-              hitSlop={8}
-              onPress={() => router.back()}
-              style={({ pressed }) => [styles.headerIcon, pressed && styles.pressed]}
-              testID="connection-back"
-            >
-              <MaterialCommunityIcons color={theme.colors.onBackground} name="chevron-left" size={28} />
-            </Pressable>
-            <Pressable
-              accessibilityLabel={editing ? '保存连接设置' : '编辑连接设置'}
+              accessibilityLabel={view === 'list' ? '返回首页' : '返回主机列表'}
               accessibilityRole="button"
               disabled={submitting}
-              hitSlop={8}
-              onPress={() => {
-                if (editing) void submit();
-                else beginEditing();
-              }}
-              style={({ pressed }) => [styles.editButton, pressed && styles.pressed]}
-              testID="connection-edit"
+              onPress={goBack}
+              style={({ pressed }) => [
+                styles.backButton,
+                { backgroundColor: theme.colors.surface },
+                pressed && styles.pressed,
+              ]}
+              testID="connection-back"
             >
-              <Text style={[styles.editLabel, { color: theme.colors.primary }]}>{editing ? '保存' : '编辑'}</Text>
+              <MaterialCommunityIcons color={theme.colors.onBackground} name="chevron-left" size={29} />
             </Pressable>
-            <View style={styles.heroMark}>
-              <MaterialCommunityIcons color="#FFFFFF" name="cloud-outline" size={39} />
-            </View>
-            <Text style={[styles.eyebrow, { color: theme.colors.onSurfaceVariant }]}>远程移动控制端</Text>
-            <Text style={[styles.heroTitle, { color: theme.colors.onBackground }]}>Cloud</Text>
-            <View accessibilityLiveRegion="polite" style={styles.statusPill}>
-              <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-              <Text style={[styles.statusText, { color: theme.colors.onSurfaceVariant }]}>Host {statusLabel}</Text>
+            <View style={styles.heroCopy}>
+              <View style={styles.heroMark}>
+                <MaterialCommunityIcons color="#FFFFFF" name="cloud-outline" size={39} />
+              </View>
+              <Text allowFontScaling style={[styles.heroTitle, { color: theme.colors.onBackground }]}>Cloud</Text>
+              <Text allowFontScaling style={[styles.heroSubtitle, { color: theme.colors.onSurfaceVariant }]}>{heroSubtitle}</Text>
             </View>
           </View>
 
-          <GlassSurface
-            materialElevation={1}
-            materialShape="extraLarge"
-            materialTone="surfaceContainer"
-            solidColor={theme.colors.surface}
-            style={styles.connectionCard}
-            testID="connection-settings-card"
-          >
-            <View style={styles.cardHeader}>
-              <View>
-                <Text style={[styles.cardTitle, { color: theme.colors.onSurface }]}>Host 列表</Text>
-                <Text style={[styles.cardHint, { color: theme.colors.onSurfaceVariant }]}>选择 Host，分别保存地址、模式与 Token</Text>
-              </View>
-              <Pressable
-                accessibilityLabel="新增 Host"
-                accessibilityRole="button"
-                disabled={submitting}
-                hitSlop={8}
-                onPress={addHost}
-                style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
-                testID="connection-add"
-              >
-                <MaterialCommunityIcons color={theme.colors.primary} name="plus" size={23} />
-                <Text style={[styles.addButtonLabel, { color: theme.colors.primary }]}>新增</Text>
-              </Pressable>
-            </View>
-
-            <View accessibilityLabel="已保存的 Host" testID="connection-host-list">
-              {connection.hosts.map((host) => {
-                const selected = host.connectionId === connection.selectedConnectionId;
-                return (
-                  <Pressable
-                    accessibilityLabel={`${host.address}${selected ? '，当前 Host' : ''}`}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    disabled={submitting || editing}
-                    key={host.connectionId}
-                    onPress={() => void switchHost(host)}
-                    style={({ pressed }) => [
-                      styles.hostRow,
-                      { borderBottomColor: theme.colors.outlineVariant },
-                      selected && { backgroundColor: theme.colors.secondaryContainer },
-                      pressed && styles.hostRowPressed,
-                    ]}
-                    testID={`connection-host-${host.connectionId}`}
-                  >
-                    <View style={[styles.hostStatusIcon, { backgroundColor: selected ? theme.colors.primary : theme.colors.surfaceVariant }]}>
-                      <MaterialCommunityIcons color={selected ? theme.colors.onPrimary : theme.colors.onSurfaceVariant} name={selected ? 'check' : 'cloud-outline'} size={19} />
-                    </View>
-                    <View style={styles.hostCopy}>
-                      <Text ellipsizeMode="middle" numberOfLines={1} style={[styles.hostAddress, { color: theme.colors.onSurface }]}>{host.address}</Text>
-                      <Text style={[styles.hostMode, { color: theme.colors.onSurfaceVariant }]}>{host.mode === 'development' ? '开发模式' : '生产模式'} · 凭证按 Host 独立保护</Text>
-                    </View>
-                    {selected ? <Text style={[styles.selectedLabel, { color: theme.colors.primary }]}>当前</Text> : null}
-                    <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-right" size={20} />
-                  </Pressable>
-                );
-              })}
-              {connection.hosts.length === 0 ? (
-                <Text style={[styles.emptyHosts, { color: theme.colors.onSurfaceVariant }]}>还没有保存 Host，请新增一个连接。</Text>
-              ) : null}
-            </View>
-
-            <SettingRow icon="web" label="Cloud Host" theme={theme}>
-              {editing ? (
-                <TextInput
-                  accessibilityLabel="Host URL"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  keyboardType="url"
-                  onChangeText={(hostUrl) => updateForm({ hostUrl })}
-                  placeholder={form.developmentMode ? 'ws://127.0.0.1:8787' : 'https://host.example.com'}
-                  placeholderTextColor={theme.colors.onSurfaceVariant}
-                  style={[styles.settingInput, { color: theme.colors.onSurface }, errors.hostUrl !== undefined && styles.inputError]}
-                  testID="connection-host-url"
-                  value={form.hostUrl}
-                />
-              ) : (
-                <Text ellipsizeMode="middle" numberOfLines={1} style={[styles.settingValue, { color: theme.colors.onSurfaceVariant }]}>
-                  {connection.selectedHost?.address ?? '尚未配置'}
-                </Text>
-              )}
-            </SettingRow>
-            {errors.hostUrl !== undefined ? <Text style={[styles.errorText, { color: theme.colors.error }]}>{errors.hostUrl}</Text> : null}
-
-            <SettingRow icon="lock-outline" label="Token" theme={theme}>
-              {editing ? (
-                <TextInput
-                  accessibilityLabel="Token"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={(token) => updateForm({ token })}
-                  placeholder="输入新 Token"
-                  placeholderTextColor={theme.colors.onSurfaceVariant}
-                  secureTextEntry
-                  style={[styles.settingInput, { color: theme.colors.onSurface }, errors.token !== undefined && styles.inputError]}
-                  testID="connection-token"
-                  value={form.token}
-                />
-              ) : (
-                <Text style={[styles.settingValue, { color: theme.colors.onSurfaceVariant }]}>已保护</Text>
-              )}
-            </SettingRow>
-            {errors.token !== undefined ? <Text style={[styles.errorText, { color: theme.colors.error }]}>{errors.token}</Text> : null}
-
-            <View style={[styles.settingRow, { borderBottomColor: theme.colors.outlineVariant }]}>
-              <View style={[styles.settingIcon, { backgroundColor: theme.colors.surfaceVariant }]}>
-                <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="flask-outline" size={20} />
-              </View>
-              <View style={styles.settingCopy}>
-                <Text style={[styles.settingLabel, { color: theme.colors.onSurface }]}>开发模式</Text>
-                <Text style={[styles.settingDescription, { color: theme.colors.onSurfaceVariant }]}>允许使用 ws:// 或 http://</Text>
-              </View>
-              <Switch
-                accessibilityLabel="开发模式"
-                disabled={!editing || submitting}
-                onValueChange={(developmentMode) => updateForm({ developmentMode })}
-                testID="connection-development-mode"
-                value={form.developmentMode}
-              />
-            </View>
-
-            {connection.operationError !== undefined ? (
-              <View style={[styles.inlineError, { backgroundColor: theme.colors.errorContainer }]}>
-                <MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={20} />
-                <Text style={[styles.inlineErrorText, { color: theme.colors.onErrorContainer }]}>
-                  {runtimeErrorLabel(connection.operationError.code)}
-                </Text>
-              </View>
-            ) : null}
-
-            {editing ? (
-              <Pressable
-                accessibilityLabel="连接 Host"
-                accessibilityRole="button"
-                disabled={submitting}
-                onPress={() => void submit()}
-                style={({ pressed }) => [styles.primaryButton, { backgroundColor: theme.colors.primary }, pressed && styles.primaryPressed]}
-                testID="connection-submit"
-              >
-                {submitting ? <ActivityIndicator color={theme.colors.onPrimary} /> : <MaterialCommunityIcons color={theme.colors.onPrimary} name="connection" size={20} />}
-                <Text style={[styles.primaryButtonLabel, { color: theme.colors.onPrimary }]}>{submitting ? '连接中' : hasSavedConnection ? '保存并连接' : '连接 Host'}</Text>
-              </Pressable>
-            ) : (
-              <Pressable
-                accessibilityLabel="使用已保存连接"
-                accessibilityRole="button"
-                disabled={!connection.tokenAvailable || submitting}
-                onPress={() => void reconnect()}
-                style={({ pressed }) => [styles.primaryButton, { backgroundColor: theme.colors.primary }, pressed && styles.primaryPressed, (!connection.tokenAvailable || submitting) && styles.disabledButton]}
-                testID="connection-submit"
-              >
-                {submitting ? <ActivityIndicator color={theme.colors.onPrimary} /> : <MaterialCommunityIcons color={theme.colors.onPrimary} name="refresh" size={20} />}
-                <Text style={[styles.primaryButtonLabel, { color: theme.colors.onPrimary }]}>重连 Host</Text>
-              </Pressable>
-            )}
-          </GlassSurface>
-
-          <View style={styles.privacyNote}>
-            <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="shield-check-outline" size={17} />
-            <Text style={[styles.footerNote, { color: theme.colors.onSurfaceVariant }]}>Token 不进入 URL、日志或会话内容。</Text>
-          </View>
+          {view === 'list' ? (
+            <HostList
+              hosts={connection.hosts}
+              selectedConnectionId={connection.selectedConnectionId}
+              disabled={submitting}
+              theme={theme}
+              onOpenDetail={openDetail}
+              onOpenNew={openNew}
+            />
+          ) : view === 'detail' && focusedHost !== undefined ? (
+            <HostDetail
+              host={focusedHost}
+              tokenAvailable={resolvedDetailTokenAvailable}
+              disabled={submitting}
+              error={detailError}
+              theme={theme}
+              onDelete={requestDelete}
+              onEdit={openEdit}
+              onConnect={() => { void connect(); }}
+            />
+          ) : (
+            <HostEditor
+              mode={view === 'new' ? 'new' : 'edit'}
+              form={form}
+              errors={errors}
+              disabled={submitting}
+              error={operationError}
+              theme={theme}
+              onChange={updateForm}
+              onSave={() => { void save(); }}
+              onConnect={() => { void connect(); }}
+            />
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-interface SettingRowProps {
-  readonly children: ReactNode;
-  readonly icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+interface HostListProps {
+  readonly hosts: readonly ConnectionPreferences[];
+  readonly selectedConnectionId: ConnectionId | undefined;
+  readonly disabled: boolean;
+  readonly theme: MD3Theme;
+  readonly onOpenDetail: (host: ConnectionPreferences) => void;
+  readonly onOpenNew: () => void;
+}
+
+function HostList(props: HostListProps): JSX.Element {
+  return (
+    <View style={styles.listSection} testID="connection-list-view">
+      <Text allowFontScaling style={[styles.sectionHeading, { color: props.theme.colors.onSurfaceVariant }]}>云端主机</Text>
+      <View
+        accessibilityLabel="已保存的云端主机"
+        style={[styles.hostListSurface, { backgroundColor: props.theme.colors.surface, borderColor: props.theme.colors.outlineVariant }]}
+        testID="connection-settings-card"
+      >
+        <View accessibilityLabel="已保存的云端主机" testID="connection-host-list">
+          {props.hosts.map((host, index) => {
+            const selected = host.connectionId === props.selectedConnectionId;
+            return (
+              <Pressable
+                accessibilityLabel={`${host.address}${selected ? '，当前 Host' : ''}`}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+                disabled={props.disabled}
+                key={host.connectionId}
+                onPress={() => props.onOpenDetail(host)}
+                style={({ pressed }) => [
+                  styles.hostRow,
+                  index < props.hosts.length - 1 && {
+                    borderBottomColor: props.theme.colors.outlineVariant,
+                    borderBottomWidth: StyleSheet.hairlineWidth,
+                  },
+                  pressed && styles.rowPressed,
+                ]}
+                testID={`connection-host-${host.connectionId}`}
+              >
+                <Text
+                  allowFontScaling
+                  ellipsizeMode="middle"
+                  numberOfLines={1}
+                  style={[styles.hostAddress, { color: props.theme.colors.onSurface }]}
+                >
+                  {host.address}
+                </Text>
+                <View style={styles.hostTrailing}>
+                  {selected ? <MaterialCommunityIcons color={props.theme.colors.primary} name="check" size={22} /> : null}
+                  <MaterialCommunityIcons color={props.theme.colors.onSurfaceVariant} name="chevron-right" size={22} />
+                </View>
+              </Pressable>
+            );
+          })}
+          <Pressable
+            accessibilityLabel="新增主机"
+            accessibilityRole="button"
+            disabled={props.disabled}
+            onPress={props.onOpenNew}
+            style={({ pressed }) => [
+              styles.hostRow,
+              styles.addHostRow,
+              props.hosts.length > 0 && {
+                borderTopColor: props.theme.colors.outlineVariant,
+                borderTopWidth: StyleSheet.hairlineWidth,
+              },
+              pressed && styles.rowPressed,
+            ]}
+            testID="connection-add"
+          >
+            <Text allowFontScaling style={[styles.addHostLabel, { color: props.theme.colors.onSurface }]}>新增主机</Text>
+            <MaterialCommunityIcons color={props.theme.colors.primary} name="plus" size={23} />
+          </Pressable>
+        </View>
+      </View>
+      <Text allowFontScaling style={[styles.securityNote, { color: props.theme.colors.onSurfaceVariant }]}>列表仅显示 Host，Token 始终保持隐藏。</Text>
+    </View>
+  );
+}
+
+interface HostDetailProps {
+  readonly host: ConnectionPreferences;
+  readonly tokenAvailable: boolean;
+  readonly disabled: boolean;
+  readonly error: string | undefined;
+  readonly theme: MD3Theme;
+  readonly onDelete: () => void;
+  readonly onEdit: () => void;
+  readonly onConnect: () => void;
+}
+
+function HostDetail(props: HostDetailProps): JSX.Element {
+  return (
+    <View style={styles.formSection} testID="connection-detail-view">
+      <View style={styles.titleRow}>
+        <Text allowFontScaling style={[styles.formTitle, { color: props.theme.colors.onBackground }]}>主机详情</Text>
+        <Pressable
+          accessibilityLabel="删除 Host"
+          accessibilityRole="button"
+          disabled={props.disabled}
+          onPress={props.onDelete}
+          style={({ pressed }) => [styles.deleteButton, pressed && styles.deletePressed]}
+          testID="connection-delete"
+        >
+          <Text allowFontScaling style={[styles.deleteLabel, { color: props.theme.colors.error }]}>删除</Text>
+        </Pressable>
+      </View>
+      <ReadOnlyField label="Host" value={props.host.address} theme={props.theme} testID="connection-host-url" />
+      <ReadOnlyField
+        label="Token"
+        value={props.tokenAvailable ? '已保护' : '未设置'}
+        theme={props.theme}
+        testID="connection-token"
+      />
+      <Text allowFontScaling style={[styles.securityNote, { color: props.theme.colors.onSurfaceVariant }]}>Token {props.tokenAvailable ? '已安全保存' : '尚未保存'}，不会显示明文。</Text>
+      {props.error === undefined ? null : <InlineError message={props.error} theme={props.theme} />}
+      <View style={styles.actionsRow}>
+        <Pressable
+          accessibilityLabel="编辑主机"
+          accessibilityRole="button"
+          disabled={props.disabled}
+          onPress={props.onEdit}
+          style={({ pressed }) => [styles.secondaryButton, { borderColor: props.theme.colors.outlineVariant, backgroundColor: props.theme.colors.surface }, pressed && styles.secondaryPressed]}
+          testID="connection-edit"
+        >
+          <Text allowFontScaling style={[styles.secondaryButtonLabel, { color: props.theme.colors.onSurface }]}>编辑</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel="连接 Host"
+          accessibilityRole="button"
+          disabled={props.disabled}
+          onPress={props.onConnect}
+          style={({ pressed }) => [styles.primaryButton, { backgroundColor: props.theme.colors.primary }, pressed && styles.primaryPressed]}
+          testID="connection-submit"
+        >
+          {props.disabled ? <ActivityIndicator color={props.theme.colors.onPrimary} /> : null}
+          <Text allowFontScaling style={[styles.primaryButtonLabel, { color: props.theme.colors.onPrimary }]}>{props.disabled ? '连接中' : '连接'}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+interface HostEditorProps {
+  readonly mode: 'edit' | 'new';
+  readonly form: ConnectionFormValues;
+  readonly errors: ConnectionFormErrors;
+  readonly disabled: boolean;
+  readonly error: string | undefined;
+  readonly theme: MD3Theme;
+  readonly onChange: (patch: Partial<ConnectionFormValues>) => void;
+  readonly onSave: () => void;
+  readonly onConnect: () => void;
+}
+
+function HostEditor(props: HostEditorProps): JSX.Element {
+  const editing = props.mode === 'edit';
+  return (
+    <View style={styles.formSection} testID="connection-editor-view">
+      <Text allowFontScaling style={[styles.formTitle, { color: props.theme.colors.onBackground }]}>{editing ? '编辑主机' : '新增主机'}</Text>
+      <LabeledInput
+        label="Host"
+        value={props.form.hostUrl}
+        placeholder="wss://hostname:port"
+        error={props.errors.hostUrl}
+        theme={props.theme}
+        disabled={props.disabled}
+        testID="connection-host-url"
+        onChangeText={(hostUrl) => props.onChange({ hostUrl })}
+      />
+      <LabeledInput
+        label="Token"
+        value={props.form.token}
+        placeholder="输入 Token"
+        error={props.errors.token}
+        theme={props.theme}
+        disabled={props.disabled}
+        secureTextEntry
+        testID="connection-token"
+        onChangeText={(token) => props.onChange({ token })}
+      />
+      <Text allowFontScaling style={[styles.securityNote, { color: props.theme.colors.onSurfaceVariant }]}>
+        {editing ? '留空则保留已保存的 Token。' : 'Token 会安全保存，不会显示在列表中。'}
+      </Text>
+      {props.error === undefined ? null : <InlineError message={props.error} theme={props.theme} />}
+      <View style={styles.actionsRow}>
+        <Pressable
+          accessibilityLabel="保存主机"
+          accessibilityRole="button"
+          disabled={props.disabled}
+          onPress={props.onSave}
+          style={({ pressed }) => [styles.secondaryButton, { borderColor: props.theme.colors.outlineVariant, backgroundColor: props.theme.colors.surface }, pressed && styles.secondaryPressed]}
+          testID="connection-save"
+        >
+          <Text allowFontScaling style={[styles.secondaryButtonLabel, { color: props.theme.colors.onSurface }]}>{props.disabled ? '保存中' : '保存'}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel="连接 Host"
+          accessibilityRole="button"
+          disabled={props.disabled}
+          onPress={props.onConnect}
+          style={({ pressed }) => [styles.primaryButton, { backgroundColor: props.theme.colors.primary }, pressed && styles.primaryPressed]}
+          testID="connection-submit"
+        >
+          {props.disabled ? <ActivityIndicator color={props.theme.colors.onPrimary} /> : null}
+          <Text allowFontScaling style={[styles.primaryButtonLabel, { color: props.theme.colors.onPrimary }]}>{props.disabled ? '连接中' : '连接'}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+interface ReadOnlyFieldProps {
   readonly label: string;
+  readonly value: string;
+  readonly theme: MD3Theme;
+  readonly testID: string;
+}
+
+function ReadOnlyField(props: ReadOnlyFieldProps): JSX.Element {
+  return (
+    <View style={styles.fieldGroup} testID={props.testID}>
+      <Text allowFontScaling style={[styles.fieldLabel, { color: props.theme.colors.onSurfaceVariant }]}>{props.label}</Text>
+      <View style={[styles.readOnlyField, { backgroundColor: props.theme.colors.surfaceVariant }]}>
+        <Text
+          allowFontScaling
+          ellipsizeMode="middle"
+          numberOfLines={1}
+          style={[styles.fieldValue, { color: props.theme.colors.onSurface }]}
+        >
+          {props.value}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+interface LabeledInputProps {
+  readonly label: string;
+  readonly value: string;
+  readonly placeholder: string;
+  readonly error: string | undefined;
+  readonly theme: MD3Theme;
+  readonly disabled: boolean;
+  readonly secureTextEntry?: boolean;
+  readonly testID: string;
+  readonly onChangeText: (value: string) => void;
+}
+
+function LabeledInput(props: LabeledInputProps): JSX.Element {
+  return (
+    <View style={styles.fieldGroup}>
+      <Text allowFontScaling style={[styles.fieldLabel, { color: props.theme.colors.onSurfaceVariant }]}>{props.label}</Text>
+      <TextInput
+        accessibilityLabel={props.label}
+        allowFontScaling
+        autoCapitalize="none"
+        autoCorrect={false}
+        editable={!props.disabled}
+        onChangeText={props.onChangeText}
+        placeholder={props.placeholder}
+        placeholderTextColor={props.theme.colors.onSurfaceVariant}
+        secureTextEntry={props.secureTextEntry}
+        style={[styles.fieldInput, { backgroundColor: props.theme.colors.surface, borderColor: props.error === undefined ? props.theme.colors.outlineVariant : props.theme.colors.error, color: props.theme.colors.onSurface }]}
+        testID={props.testID}
+        value={props.value}
+      />
+      {props.error === undefined ? null : <Text allowFontScaling style={[styles.fieldError, { color: props.theme.colors.error }]}>{props.error}</Text>}
+    </View>
+  );
+}
+
+interface InlineErrorProps {
+  readonly message: string;
   readonly theme: MD3Theme;
 }
 
-function SettingRow(props: SettingRowProps): JSX.Element {
+function InlineError(props: InlineErrorProps): JSX.Element {
   return (
-    <View style={[styles.settingRow, { borderBottomColor: props.theme.colors.outlineVariant }]}>
-      <View style={[styles.settingIcon, { backgroundColor: props.theme.colors.surfaceVariant }]}>
-        <MaterialCommunityIcons color={props.theme.colors.onSurfaceVariant} name={props.icon} size={20} />
-      </View>
-      <Text style={[styles.settingLabel, styles.settingLabelWide, { color: props.theme.colors.onSurface }]}>{props.label}</Text>
-      <View style={styles.settingValueContainer}>{props.children}</View>
+    <View style={[styles.inlineError, { backgroundColor: props.theme.colors.errorContainer }]}>
+      <MaterialCommunityIcons color={props.theme.colors.onErrorContainer} name="alert-circle-outline" size={20} />
+      <Text allowFontScaling style={[styles.inlineErrorText, { color: props.theme.colors.onErrorContainer }]}>{props.message}</Text>
     </View>
   );
 }
@@ -387,10 +611,11 @@ export interface ConnectionScreenState {
   readonly hosts: readonly ConnectionPreferences[];
   readonly selectedConnectionId: ConnectionId | undefined;
   readonly selectedHost: ConnectionPreferences | undefined;
-  /** Compatibility selectors for the former single-Host settings card. */
+  /** Compatibility selectors for callers from the former single-Host settings card. */
   readonly savedAddress: string | undefined;
   readonly savedMode: 'development' | 'production' | undefined;
   readonly tokenAvailable: boolean;
+  readonly tokenAvailability: Readonly<Record<string, boolean>>;
   readonly syncStatus: CloudRuntimeState['sync']['status'];
   readonly operationError: CloudRuntimeState['operationError'];
 }
@@ -406,33 +631,22 @@ export function selectConnectionScreenState(state: CloudRuntimeState): Connectio
     savedAddress: selectedHost?.address,
     savedMode: selectedHost?.mode,
     tokenAvailable: state.tokenAvailable,
+    tokenAvailability: state.tokenAvailability,
     syncStatus: state.sync.status,
     operationError: state.operationError,
   };
 }
 
-function connectionStatusLabel(status: ConnectionScreenState['syncStatus']): string {
-  switch (status) {
-    case 'connected': return '已连接';
-    case 'connecting': return '连接中';
-    case 'reconnecting': return '重新连接中';
-    case 'paused': return '已暂停';
-    case 'error': return '连接错误';
-    case 'replaced': return '连接已替换';
-    case 'idle': return '未连接';
-  }
+export function formForHost(host: ConnectionPreferences): ConnectionFormValues {
+  return {
+    hostUrl: host.address,
+    token: '',
+    developmentMode: deriveDevelopmentMode(host.address),
+  };
 }
 
-function syncStatusColor(status: ConnectionScreenState['syncStatus'], theme: MD3Theme): string {
-  switch (status) {
-    case 'connected': return theme.colors.tertiary;
-    case 'connecting':
-    case 'reconnecting': return theme.colors.secondary;
-    case 'error':
-    case 'replaced': return theme.colors.error;
-    case 'paused':
-    case 'idle': return theme.colors.outline;
-  }
+function canKeepStoredToken(result: Extract<ReturnType<typeof validateConnectionForm>, { readonly ok: false }>): boolean {
+  return result.errors.hostUrl === undefined && result.errors.token !== undefined;
 }
 
 function runtimeErrorLabel(code: string): string {
@@ -452,27 +666,19 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: CLOUD_DESIGN_TOKENS.spacingPage,
     paddingTop: 8,
-    gap: CLOUD_DESIGN_TOKENS.spacingSection,
-  },
-  ambient: {
-    position: 'absolute',
-    width: 280,
-    height: 280,
-    top: -130,
-    right: -100,
-    borderRadius: 140,
-    opacity: 0.18,
+    gap: 26,
   },
   hero: {
-    minHeight: 286,
+    minHeight: 274,
     alignItems: 'center',
     justifyContent: 'flex-end',
     paddingTop: 20,
     paddingBottom: 2,
   },
-  headerIcon: {
+  heroCopy: { alignItems: 'center', transform: [{ translateY: -44 }] },
+  backButton: {
     position: 'absolute',
-    top: 0,
+    top: 14,
     left: -8,
     width: CLOUD_DESIGN_TOKENS.minTouchTarget,
     height: CLOUD_DESIGN_TOKENS.minTouchTarget,
@@ -480,19 +686,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: CLOUD_DESIGN_TOKENS.minTouchTarget / 2,
   },
-  editButton: {
-    position: 'absolute',
-    top: 0,
-    right: -8,
-    minWidth: 58,
-    height: CLOUD_DESIGN_TOKENS.minTouchTarget,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 14,
-  },
-  editLabel: { fontSize: 15, fontWeight: '600' },
-  pressed: { backgroundColor: 'rgba(47,107,255,0.10)' },
+  pressed: { opacity: 0.68 },
   heroMark: {
     width: 70,
     height: 70,
@@ -507,42 +701,52 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 4,
   },
-  eyebrow: { fontSize: 13, lineHeight: 18, letterSpacing: 0.2 },
-  heroTitle: { marginTop: 4, fontSize: 46, lineHeight: 54, fontWeight: '800', letterSpacing: -1.8 },
-  statusPill: { minHeight: 44, marginTop: 4, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  statusDot: { width: 9, height: 9, borderRadius: 5 },
-  statusText: { fontSize: 17, lineHeight: 24 },
-  connectionCard: { padding: 18, borderRadius: CLOUD_DESIGN_TOKENS.radiusCard, gap: 0 },
-  cardHeader: { minHeight: 48, marginBottom: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  cardTitle: { fontSize: 20, lineHeight: 26, fontWeight: '700', letterSpacing: -0.3 },
-  cardHint: { marginTop: 3, fontSize: 13, lineHeight: 19 },
-  addButton: { minHeight: 44, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 14 },
-  addButtonLabel: { fontSize: 14, lineHeight: 20, fontWeight: '700' },
-  hostRow: { minHeight: 68, paddingHorizontal: 8, paddingVertical: 8, marginHorizontal: -8, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderRadius: 14 },
-  hostRowPressed: { opacity: 0.72 },
-  hostStatusIcon: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
-  hostCopy: { flex: 1, minWidth: 0 },
-  hostAddress: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
-  hostMode: { marginTop: 2, fontSize: 12, lineHeight: 17 },
-  selectedLabel: { fontSize: 12, lineHeight: 17, fontWeight: '700' },
-  emptyHosts: { paddingVertical: 14, fontSize: 13, lineHeight: 19, textAlign: 'center' },
-  settingRow: { minHeight: 68, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth },
-  settingIcon: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
-  settingCopy: { flex: 1, minWidth: 0 },
-  settingLabel: { fontSize: 15, lineHeight: 21, fontWeight: '600' },
-  settingLabelWide: { width: 86 },
-  settingDescription: { marginTop: 2, fontSize: 12, lineHeight: 17 },
-  settingValueContainer: { minWidth: 0, flex: 1, alignItems: 'flex-end' },
-  settingValue: { maxWidth: '100%', fontSize: 13, lineHeight: 19, textAlign: 'right' },
-  settingInput: { width: '100%', minHeight: 44, paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, borderColor: '#D2D7E0', borderRadius: 12, fontSize: 13, textAlign: 'right' },
-  inputError: { borderColor: '#BA1A1A' },
-  errorText: { marginTop: 5, marginLeft: 46, fontSize: 12, lineHeight: 17 },
-  inlineError: { minHeight: 48, marginTop: 12, paddingHorizontal: 12, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  inlineErrorText: { flex: 1, fontSize: 13, lineHeight: 18 },
-  primaryButton: { minHeight: 52, marginTop: 18, paddingHorizontal: 18, borderRadius: 26, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: '#2F6BFF', shadowOpacity: 0.20, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 3 },
-  primaryPressed: { transform: [{ scale: 0.98 }], opacity: 0.92 },
-  disabledButton: { opacity: 0.52, shadowOpacity: 0 },
-  primaryButtonLabel: { fontSize: 16, lineHeight: 22, fontWeight: '700' },
-  privacyNote: { minHeight: 44, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
-  footerNote: { fontSize: 12, lineHeight: 18 },
+  heroTitle: { fontSize: 34, lineHeight: 38, fontWeight: '800', letterSpacing: -1.2 },
+  heroSubtitle: { marginTop: 5, fontSize: 13, lineHeight: 19 },
+  listSection: { gap: 0 },
+  sectionHeading: { marginHorizontal: 2, marginBottom: 10, fontSize: 12, lineHeight: 18, fontWeight: '600' },
+  hostListSurface: {
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 22,
+    shadowColor: '#171A21',
+    shadowOpacity: 0.07,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 2,
+  },
+  hostRow: {
+    minHeight: 58,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  hostTrailing: { minWidth: 45, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 9 },
+  hostAddress: { flex: 1, minWidth: 0, fontSize: 15, lineHeight: 21 },
+  rowPressed: { backgroundColor: 'rgba(47,107,255,0.08)' },
+  addHostRow: { borderBottomWidth: 0 },
+  addHostLabel: { flex: 1, fontSize: 15, lineHeight: 21, fontWeight: '700' },
+  securityNote: { marginTop: 14, paddingHorizontal: 8, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+  formSection: { gap: 0 },
+  titleRow: { minHeight: 44, marginBottom: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  formTitle: { fontSize: 24, lineHeight: 29, fontWeight: '700', letterSpacing: -0.4 },
+  deleteButton: { minWidth: 58, minHeight: CLOUD_DESIGN_TOKENS.minTouchTarget, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', borderRadius: 14 },
+  deletePressed: { backgroundColor: 'rgba(186,26,26,0.10)' },
+  deleteLabel: { fontSize: 15, lineHeight: 21, fontWeight: '600' },
+  fieldGroup: { marginTop: 16 },
+  fieldLabel: { marginHorizontal: 2, marginBottom: 7, fontSize: 13, lineHeight: 19 },
+  readOnlyField: { minHeight: 52, paddingHorizontal: 18, justifyContent: 'center', borderRadius: 16 },
+  fieldValue: { fontSize: 15, lineHeight: 21 },
+  fieldInput: { minHeight: 52, paddingHorizontal: 16, paddingVertical: 11, borderWidth: 1, borderRadius: 16, fontSize: 15, lineHeight: 21 },
+  fieldError: { marginTop: 5, marginHorizontal: 2, fontSize: 12, lineHeight: 18 },
+  actionsRow: { marginTop: 26, flexDirection: 'row', gap: 12 },
+  secondaryButton: { minHeight: 52, flex: 1, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderRadius: 28 },
+  secondaryPressed: { backgroundColor: 'rgba(23,26,33,0.06)' },
+  secondaryButtonLabel: { fontSize: 15, lineHeight: 21, fontWeight: '700' },
+  primaryButton: { minHeight: 52, flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 28, shadowColor: '#2F6BFF', shadowOpacity: 0.20, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 3 },
+  primaryPressed: { transform: [{ scale: 0.98 }], opacity: 0.90 },
+  primaryButtonLabel: { fontSize: 15, lineHeight: 21, fontWeight: '700' },
+  inlineError: { minHeight: 48, marginTop: 16, paddingHorizontal: 12, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  inlineErrorText: { flex: 1, fontSize: 13, lineHeight: 19 },
 });
