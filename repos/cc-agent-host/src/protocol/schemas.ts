@@ -173,7 +173,19 @@ const chatInterruptActionSchema = z
   })
   .strict();
 
-export const clientActionSchema = z.discriminatedUnion('type', [chatSendActionSchema, chatInterruptActionSchema]);
+const chatRewindActionSchema = z
+  .object({
+    type: z.literal('chat/rewind'),
+    turnId: turnIdSchema,
+    mode: z.enum(['conversation', 'conversation_and_files']),
+  })
+  .strict();
+
+export const clientActionSchema = z.discriminatedUnion('type', [
+  chatSendActionSchema,
+  chatInterruptActionSchema,
+  chatRewindActionSchema,
+]);
 
 /*
  * Interaction decisions deliberately use a protocol-owned JSON projection.

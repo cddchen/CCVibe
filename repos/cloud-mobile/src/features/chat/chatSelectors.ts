@@ -23,12 +23,20 @@ export type ChatPartViewModel =
       readonly kind: 'markdown';
       readonly id: string;
       readonly content: string;
-      readonly blocks: readonly MarkdownBlock[];
     }
   | {
       readonly kind: 'reasoning';
       readonly id: string;
       readonly content: string;
+      readonly collapsed: true;
+    }
+  | {
+      readonly kind: 'system';
+      readonly id: string;
+      readonly event: string;
+      readonly title: string;
+      readonly content: string;
+      readonly level: 'info' | 'progress' | 'success' | 'warning' | 'error';
       readonly collapsed: true;
     }
   | {
@@ -54,11 +62,6 @@ export interface ChatTurnViewModel {
   readonly completedAt?: string;
   readonly error?: string;
 }
-
-export type ChatTranscriptItem =
-  | { readonly key: string; readonly turnId: string; readonly kind: 'prompt'; readonly text: string }
-  | { readonly key: string; readonly turnId: string; readonly kind: 'part'; readonly part: ChatPartViewModel }
-  | { readonly key: string; readonly turnId: string; readonly kind: 'failure'; readonly status: 'failed'; readonly message: string };
 
 export interface PendingApprovalViewModel {
   readonly id: string;
@@ -131,7 +134,6 @@ export interface ChatViewModel {
   readonly permissionModes: NonNullable<HostRootCatalogState['permissionModes']>;
   readonly history: readonly ChatTurnViewModel[];
   readonly activeTurn?: ChatTurnViewModel;
-  readonly transcript: readonly ChatTranscriptItem[];
   readonly pendingApprovals: readonly PendingApprovalViewModel[];
   readonly pendingInputs: readonly PendingInputViewModel[];
   readonly hasPendingInteraction: boolean;
@@ -143,38 +145,94 @@ export interface ChatSelectorInput {
   readonly catalog: HostRootCatalogState | undefined;
 }
 
-export function selectChatViewModel(input: ChatSelectorInput): ChatViewModel {
+/**
+ * Builds a screen-scoped projector. Host state is immutable, so source object
+ * identity lets streaming updates reuse every completed turn and unchanged
+ * part instead of reparsing the whole transcript on each delta.
+ */
+export function createChatViewModelSelector(): (input: ChatSelectorInput) => ChatViewModel {
+  const projectedTurns = new WeakMap<object, ChatTurnViewModel>();
+  const projectedParts = new WeakMap<object, ChatPartViewModel>();
+  let previousTurns: HostChatState['turns'] | undefined;
+  let previousChatUri: ChatUri | undefined;
+  let previousActiveId: string | undefined;
+  let history: readonly ChatTurnViewModel[] = Object.freeze([]);
+  let previousModels: HostRootCatalogState['models'] | undefined;
+  let models: ChatViewModel['models'] = Object.freeze([]);
+  let previousPermissionModes: HostRootCatalogState['permissionModes'] | undefined;
+  let permissionModes: ChatViewModel['permissionModes'] = Object.freeze([]);
+  let previousApprovals: HostChatState['pendingApprovals'] | undefined;
+  let previousApprovalCatalog: HostRootCatalogState | undefined;
+  let previousApprovalWorkspaceId: string | undefined;
+  let pendingApprovals: readonly PendingApprovalViewModel[] = Object.freeze([]);
+  let previousInputs: HostChatState['pendingInputs'] | undefined;
+  let pendingInputs: readonly PendingInputViewModel[] = Object.freeze([]);
+
+  const projectCachedPart = (part: HostPart): ChatPartViewModel => {
+    const cached = projectedParts.get(part);
+    if (cached !== undefined) return cached;
+    const projected = projectPart(part);
+    projectedParts.set(part, projected);
+    return projected;
+  };
+  const projectCachedTurn = (turn: HostTurn | HostActiveTurn): ChatTurnViewModel => {
+    const cached = projectedTurns.get(turn);
+    if (cached !== undefined) return cached;
+    const projected = projectTurn(turn, projectCachedPart);
+    projectedTurns.set(turn, projected);
+    return projected;
+  };
+
+  return (input: ChatSelectorInput): ChatViewModel => {
   const session = input.catalog?.sessions.find((candidate) => candidate.chatUri === input.chatUri);
   const workspace = session === undefined
     ? undefined
     : input.catalog?.workspaces.find((candidate) => candidate.id === session.workspaceId);
   const state = input.chatState;
   const activeId = state?.activeTurn?.id;
-  const history = state === undefined
-    ? []
-    : state.turns.filter((turn) => turn.id !== activeId).map(projectTurn);
-  const activeTurn = state?.activeTurn === undefined ? undefined : projectTurn(state.activeTurn);
-  const allTurns = activeTurn === undefined ? history : [...history, activeTurn];
-  const transcript: ChatTranscriptItem[] = allTurns.flatMap((turn): ChatTranscriptItem[] => [
-    { key: `${turn.id}:prompt`, turnId: turn.id, kind: 'prompt' as const, text: turn.prompt },
-    ...turn.parts.map((part) => ({ key: `${turn.id}:${part.id}`, turnId: turn.id, kind: 'part' as const, part })),
-    ...(turn.status === 'failed' ? [{
-      key: `${turn.id}:failure`,
-      turnId: turn.id,
-      kind: 'failure' as const,
-      status: 'failed' as const,
-      message: turn.error ?? summarizeTurnFailure(undefined),
-    }] : []),
-  ]);
-  const pendingApprovals = state?.pendingApprovals.map((approval) => projectApproval(
-    approval,
-    input.catalog,
-    session?.workspaceId,
-  )) ?? [];
-  const pendingInputs = state?.pendingInputs?.map(projectInput) ?? [];
+  if (input.chatUri !== previousChatUri || state?.turns !== previousTurns || activeId !== previousActiveId) {
+    history = Object.freeze(state === undefined
+      ? []
+      : state.turns.filter((turn) => turn.id !== activeId).map(projectCachedTurn));
+    previousTurns = state?.turns;
+    previousChatUri = input.chatUri;
+    previousActiveId = activeId;
+  }
+  const activeTurn = state?.activeTurn === undefined ? undefined : projectCachedTurn(state.activeTurn);
+  if (
+    state?.pendingApprovals !== previousApprovals
+    || input.catalog !== previousApprovalCatalog
+    || session?.workspaceId !== previousApprovalWorkspaceId
+  ) {
+    pendingApprovals = Object.freeze(state?.pendingApprovals.map((approval) => projectApproval(
+      approval,
+      input.catalog,
+      session?.workspaceId,
+    )) ?? []);
+    previousApprovals = state?.pendingApprovals;
+    previousApprovalCatalog = input.catalog;
+    previousApprovalWorkspaceId = session?.workspaceId;
+  }
+  if (state?.pendingInputs !== previousInputs) {
+    pendingInputs = Object.freeze(state?.pendingInputs?.map(projectInput) ?? []);
+    previousInputs = state?.pendingInputs;
+  }
   const status = state?.status ?? (session === undefined ? 'missing' : 'loading');
   const hostStatus = input.catalog?.connection.displayStatus ?? 'offline';
   const catalogModels = input.catalog?.models ?? [];
+  if (input.catalog?.models !== previousModels) {
+    models = Object.freeze(catalogModels.map((model) => Object.freeze({
+      id: model.id,
+      displayName: model.displayName,
+      ...(model.description === undefined ? {} : { description: model.description }),
+      supportedEffortLevels: resolveSupportedEffortLevels(model),
+    })));
+    previousModels = input.catalog?.models;
+  }
+  if (input.catalog?.permissionModes !== previousPermissionModes) {
+    permissionModes = Object.freeze([...(input.catalog?.permissionModes ?? [])]);
+    previousPermissionModes = input.catalog?.permissionModes;
+  }
   const resolvedModel = session?.modelId === undefined
     ? undefined
     : catalogModels.find((candidate) => candidate.id === session.modelId);
@@ -202,20 +260,21 @@ export function selectChatViewModel(input: ChatSelectorInput): ChatViewModel {
     ...(resolvedModel === undefined ? {} : { modelId: resolvedModel.id, modelDisplayName: resolvedModel.displayName }),
     ...(effort === undefined ? {} : { effort }),
     ...(session?.permissionMode === undefined ? {} : { permissionMode: session.permissionMode }),
-    models: Object.freeze(catalogModels.map((model) => Object.freeze({
-      id: model.id,
-      displayName: model.displayName,
-      ...(model.description === undefined ? {} : { description: model.description }),
-      supportedEffortLevels: resolveSupportedEffortLevels(model),
-    }))),
-    permissionModes: Object.freeze([...(input.catalog?.permissionModes ?? [])]),
-    history: Object.freeze(history),
+    models,
+    permissionModes,
+    history,
     ...(activeTurn === undefined ? {} : { activeTurn }),
-    transcript: Object.freeze(transcript),
     pendingApprovals: Object.freeze(pendingApprovals),
     pendingInputs: Object.freeze(pendingInputs),
     hasPendingInteraction: pendingApprovals.length > 0 || pendingInputs.length > 0,
   });
+  };
+}
+
+const defaultChatViewModelSelector = createChatViewModelSelector();
+
+export function selectChatViewModel(input: ChatSelectorInput): ChatViewModel {
+  return defaultChatViewModelSelector(input);
 }
 
 function resolveSupportedEffortLevels(
@@ -282,14 +341,17 @@ export function parseMarkdownBlocks(content: string): readonly MarkdownBlock[] {
   return Object.freeze(blocks);
 }
 
-function projectTurn(turn: HostTurn | HostActiveTurn): ChatTurnViewModel {
+function projectTurn(
+  turn: HostTurn | HostActiveTurn,
+  projectResponsePart: (part: HostPart) => ChatPartViewModel = projectPart,
+): ChatTurnViewModel {
   const completedAt = 'completedAt' in turn ? turn.completedAt : undefined;
   const error = 'error' in turn ? summarizeTurnFailure(turn.error) : undefined;
   return Object.freeze({
     id: turn.id,
     prompt: turn.prompt,
     status: turn.status === 'active' ? 'active' : turn.status,
-    parts: Object.freeze(turn.parts.map(projectPart)),
+    parts: Object.freeze(turn.parts.map(projectResponsePart)),
     startedAt: turn.startedAt,
     ...(completedAt === undefined ? {} : { completedAt }),
     ...(error === undefined ? {} : { error }),
@@ -333,9 +395,21 @@ export function formatTurnDuration(startedAt: string, completedAt: string): stri
 function projectPart(part: HostPart): ChatPartViewModel {
   switch (part.kind) {
     case 'markdown':
-      return Object.freeze({ kind: 'markdown', id: part.id, content: part.content, blocks: parseMarkdownBlocks(part.content) });
+      // Markdown is parsed only by the final-answer renderer. Partial deltas
+      // use a plain Text path, avoiding an unused full-document parse here.
+      return Object.freeze({ kind: 'markdown', id: part.id, content: part.content });
     case 'reasoning':
       return Object.freeze({ kind: 'reasoning', id: part.id, content: part.content, collapsed: true });
+    case 'system_message':
+      return Object.freeze({
+        kind: 'system',
+        id: part.id,
+        event: part.event,
+        title: part.title,
+        content: part.content,
+        level: part.level,
+        collapsed: true,
+      });
     case 'tool_call': {
       const tool = part.toolCall;
       const status = tool.status === 'started'

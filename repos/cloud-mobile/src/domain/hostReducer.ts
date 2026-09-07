@@ -11,7 +11,7 @@ type HostActiveTurn = NonNullable<HostChatState['activeTurn']>;
 type HostResponsePart = HostActiveTurn['parts'][number];
 
 function freezeArray<T>(values: readonly T[]): readonly T[] {
-  return Object.freeze([...values]);
+  return Object.isFrozen(values) ? values : Object.freeze([...values]);
 }
 
 export function createHostChatState(resource: ChatUri, modifiedAt = ''): HostChatState {
@@ -76,9 +76,17 @@ export function applyHostChatAction(state: HostChatState, action: HostChatAction
     }
     case 'chat/responsePartAdded': {
       const activeTurn = state.activeTurn;
-      if (activeTurn === undefined || activeTurn.parts.some((part) => part.id === action.part.id)) return state;
-      const parts = [...activeTurn.parts, action.part];
-      return updateActiveTurn(state, { ...activeTurn, parts: freezeArray(parts) }, action.timestamp);
+      if (activeTurn !== undefined) {
+        if (activeTurn.parts.some((part) => part.id === action.part.id)) return state;
+        const parts = [...activeTurn.parts, action.part];
+        return updateActiveTurn(state, { ...activeTurn, parts: freezeArray(parts) }, action.timestamp);
+      }
+      const turnIndex = state.turns.findIndex((turn) => turn.id === action.turnId);
+      const turn = state.turns[turnIndex];
+      if (turnIndex < 0 || turn === undefined || turn.parts.some((part) => part.id === action.part.id)) return state;
+      const turns = [...state.turns];
+      turns[turnIndex] = Object.freeze({ ...turn, parts: freezeArray([...turn.parts, action.part]) });
+      return freezeChat({ ...state, turns: freezeArray(turns), pendingInputs, modifiedAt: action.timestamp });
     }
     case 'chat/responsePartDelta': {
       const activeTurn = state.activeTurn;
@@ -225,6 +233,18 @@ export function applyHostChatAction(state: HostChatState, action: HostChatAction
       return completeActiveTurn(state, action.turnId, 'failed', action.timestamp, action.error);
     case 'chat/turnInterrupted':
       return completeActiveTurn(state, action.turnId, 'interrupted', action.timestamp);
+    case 'chat/rewound': {
+      const targetIndex = state.turns.findIndex((turn) => turn.id === action.targetTurnId);
+      if (targetIndex < 0 || state.activeTurn !== undefined) return state;
+      return freezeChat({
+        ...state,
+        status: 'idle',
+        turns: freezeArray(state.turns.slice(0, targetIndex)),
+        pendingApprovals: freezeArray([]),
+        pendingInputs: freezeArray([]),
+        modifiedAt: action.timestamp,
+      });
+    }
     case 'chat/turnsLoaded': {
       const existing = new Map(state.turns.map((turn) => [turn.id, turn]));
       for (const turn of action.turns) {
@@ -293,10 +313,14 @@ function hasPendingForTurn(
 
 function freezeChat(state: HostChatState): HostChatState {
   const pendingInputs = state.pendingInputs ?? [];
-  const activeTurn = state.activeTurn === undefined ? undefined : Object.freeze({
-    ...state.activeTurn,
-    parts: freezeArray(state.activeTurn.parts),
-  });
+  const activeTurn = state.activeTurn === undefined
+    ? undefined
+    : Object.isFrozen(state.activeTurn) && Object.isFrozen(state.activeTurn.parts)
+      ? state.activeTurn
+      : Object.freeze({
+          ...state.activeTurn,
+          parts: freezeArray(state.activeTurn.parts),
+        });
   return Object.freeze({
     ...state,
     ...(activeTurn === undefined ? { activeTurn: undefined } : { activeTurn }),

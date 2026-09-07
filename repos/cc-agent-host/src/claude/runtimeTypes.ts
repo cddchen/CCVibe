@@ -2,6 +2,7 @@ import type { UUID } from 'node:crypto';
 
 import type { PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
+import type { SystemMessage } from '../domain/chat.js';
 import type { TurnId } from '../domain/ids.js';
 
 export type ClaudeRuntimeState = 'starting' | 'running' | 'closing' | 'closed' | 'crashed';
@@ -43,6 +44,8 @@ export type ClaudeRuntimeSignal =
       readonly model: string;
       readonly permissionMode: PermissionMode;
       readonly capabilities?: ClaudeRuntimeCapabilities;
+      /** Sanitized domain projection; raw SDK init data stays in claude/. */
+      readonly systemMessage?: SystemMessage;
     }
   | {
       readonly type: 'runtime/message';

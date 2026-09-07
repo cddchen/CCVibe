@@ -147,6 +147,15 @@ const reasoningPartSchema = z.object({
   content: z.string(),
 }).strict();
 
+const systemMessagePartSchema = z.object({
+  kind: z.literal('system_message'),
+  id: opaqueIdSchema,
+  event: textSchema,
+  title: textSchema,
+  content: z.string(),
+  level: z.enum(['info', 'progress', 'success', 'warning', 'error']),
+}).strict();
+
 const toolCallPartSchema = z.object({
   kind: z.literal('tool_call'),
   id: opaqueIdSchema,
@@ -156,6 +165,7 @@ const toolCallPartSchema = z.object({
 const responsePartSchema = z.discriminatedUnion('kind', [
   markdownPartSchema,
   reasoningPartSchema,
+  systemMessagePartSchema,
   toolCallPartSchema,
 ]);
 
@@ -247,7 +257,11 @@ const catalogActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('catalog/chatRemoved'), chatUri: chatUriValueSchema, ...timestamped }).strict(),
 ]);
 
-const responsePartWithoutToolSchema = z.discriminatedUnion('kind', [markdownPartSchema, reasoningPartSchema]);
+const responsePartWithoutToolSchema = z.discriminatedUnion('kind', [
+  markdownPartSchema,
+  reasoningPartSchema,
+  systemMessagePartSchema,
+]);
 
 const chatActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat/turnStarted'), turnId: opaqueIdSchema, prompt: textSchema, ...timestamped }).strict(),
@@ -298,6 +312,7 @@ const chatActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat/turnFailed'), turnId: opaqueIdSchema, error: textSchema, ...timestamped }).strict(),
   z.object({ type: z.literal('chat/turnInterrupted'), turnId: opaqueIdSchema, ...timestamped }).strict(),
   z.object({ type: z.literal('chat/turnsLoaded'), turns: z.array(turnSchema).readonly(), ...timestamped }).strict(),
+  z.object({ type: z.literal('chat/rewound'), targetTurnId: opaqueIdSchema, ...timestamped }).strict(),
 ]);
 
 const chatInterruptActionSchema = z.object({
@@ -308,6 +323,11 @@ const chatInterruptActionSchema = z.object({
 export const clientChatActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat/send'), prompt: textSchema }).strict(),
   chatInterruptActionSchema,
+  z.object({
+    type: z.literal('chat/rewind'),
+    turnId: opaqueIdSchema,
+    mode: z.enum(['conversation', 'conversation_and_files']),
+  }).strict(),
 ]);
 
 const actionOriginSchema = z.object({

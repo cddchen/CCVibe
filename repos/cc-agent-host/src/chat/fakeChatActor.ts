@@ -29,6 +29,9 @@ export interface FakeChatActorDeps {
 const REJECTION_MESSAGES: Readonly<Record<FakeChatActorRejectionCode, string>> = Object.freeze({
   CHAT_BUSY: 'chat already has an active turn',
   TURN_NOT_ACTIVE: 'turn is not active',
+  TURN_NOT_FOUND: 'turn was not found',
+  REWIND_UNAVAILABLE: 'chat rewind is not configured',
+  REWIND_FAILED: 'chat rewind failed',
   RESOURCE_NOT_FOUND: 'chat resource was not found',
   INVALID_ACTION: 'invalid chat command',
   INTERACTION_NOT_CONFIGURED: 'chat interaction resolution is not configured',
@@ -89,6 +92,13 @@ function assertClientAction(action: ClientAction): void {
   ) {
     return;
   }
+
+  if (
+    candidate.type === 'chat/rewind' &&
+    typeof candidate.turnId === 'string' &&
+    (candidate.mode === 'conversation' || candidate.mode === 'conversation_and_files') &&
+    keys.length === 3 && keys.includes('type') && keys.includes('turnId') && keys.includes('mode')
+  ) return;
 
   if (
     candidate.type === 'chat/interrupt' &&
@@ -172,6 +182,8 @@ export class FakeChatActor implements ChatCommandActor {
         return this.dispatchSend(origin, channel, action.prompt, state.activeTurn !== undefined);
       case 'chat/interrupt':
         return this.dispatchInterrupt(origin, channel, action.turnId, state.activeTurn?.id);
+      case 'chat/rewind':
+        throw new FakeChatActorError('REWIND_UNAVAILABLE');
       default:
         throw new FakeChatActorError('INVALID_ACTION');
     }

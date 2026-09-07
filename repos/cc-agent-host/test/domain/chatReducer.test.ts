@@ -436,6 +436,22 @@ describe('chatReducer', () => {
     expect(state.turns[0]?.completedAt).toBe('interrupted');
   });
 
+  it('rewinds to the state before the selected user turn', () => {
+    const first: Turn = { id: turn, prompt: 'first', status: 'complete', parts: [], startedAt: 't1', completedAt: 't2' };
+    const second: Turn = { id: otherTurn, prompt: 'second', status: 'complete', parts: [], startedAt: 't3', completedAt: 't4' };
+    const state = createChatState({ turns: [first, second], modifiedAt: 't4' });
+
+    const rewound = chatReducer(state, {
+      type: 'chat/rewound',
+      targetTurnId: otherTurn,
+      timestamp: 't5',
+    });
+
+    expect(rewound.turns).toEqual([first]);
+    expect(rewound.status).toBe('idle');
+    expect(rewound.modifiedAt).toBe('t5');
+  });
+
   it('keeps structured input separate from approval and resolves the final blocker deterministically', () => {
     let state = chatReducer(createChatState({ modifiedAt: 'initial' }), start());
     state = chatReducer(state, {

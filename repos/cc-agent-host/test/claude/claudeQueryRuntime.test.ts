@@ -50,12 +50,13 @@ function deferred<T>(): Deferred<T> {
 
 type QueryTestSurface = Pick<
   Query,
-  'interrupt' | 'setModel' | 'setPermissionMode' | 'applyFlagSettings' | 'close'
+  'interrupt' | 'rewindFiles' | 'setModel' | 'setPermissionMode' | 'applyFlagSettings' | 'close'
 > & AsyncGenerator<SDKMessage, void>;
 
 class FakeQuery implements QueryTestSurface {
   public readonly calls: Array<
     | ['interrupt']
+    | ['rewindFiles', string]
     | ['setModel', string | undefined]
     | ['setPermissionMode', Parameters<Query['setPermissionMode']>[0]]
     | ['applyFlagSettings', Parameters<Query['applyFlagSettings']>[0]]
@@ -105,6 +106,11 @@ class FakeQuery implements QueryTestSurface {
   public interrupt(): Promise<SDKControlInterruptResponse | undefined> {
     this.calls.push(['interrupt']);
     return this.interruptGate;
+  }
+
+  public rewindFiles(userMessageId: string): ReturnType<Query['rewindFiles']> {
+    this.calls.push(['rewindFiles', userMessageId]);
+    return Promise.resolve({ canRewind: true, filesChanged: ['src/app.ts'] });
   }
 
   public async setModel(model?: string): Promise<void> {
@@ -359,6 +365,14 @@ function turn(value: string): TurnId {
 }
 
 describe('ClaudeQueryRuntime', () => {
+  it('forwards file rewind to the live SDK Query', async () => {
+    const { runtime, query } = makeHarness();
+    await expect(runtime.rewindFiles('user-message-1')).resolves.toEqual({
+      canRewind: true,
+      filesChanged: ['src/app.ts'],
+    });
+    expect(query.calls).toContainEqual(['rewindFiles', 'user-message-1']);
+  });
   it('uses one startup, one warm query, one queue, and reuses the Query for turns', async () => {
     const harness = makeHarness();
     await harness.runtime.start();
@@ -455,6 +469,12 @@ describe('ClaudeQueryRuntime', () => {
       model: 'claude-sonnet',
       permissionMode: 'default',
       capabilities: { interrupt_receipt_v1: true },
+      systemMessage: {
+        event: 'init',
+        title: '运行环境初始化',
+        level: 'info',
+        content: expect.stringContaining('claude-sonnet'),
+      },
     });
   });
 

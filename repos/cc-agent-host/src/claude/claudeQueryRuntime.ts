@@ -25,6 +25,7 @@ import type {
   ClaudeTurnHandle,
   ClaudeTurnOutcome,
 } from './runtimeTypes.js';
+import { projectClaudeSystemMessage } from './systemMessageProjection.js';
 import { createClaudeUserMessage } from './userMessage.js';
 
 export type ClaudeRuntimeSignalErrorReporter = (error: unknown) => unknown;
@@ -163,6 +164,20 @@ export class ClaudeQueryRuntime {
       throw new Error(RUNTIME_CLOSED_MESSAGE);
     }
     return Object.freeze(await query.supportedCommands());
+  }
+
+  public async rewindFiles(
+    userMessageId: string,
+  ): Promise<Awaited<ReturnType<Query['rewindFiles']>>> {
+    if (typeof userMessageId !== 'string' || userMessageId.length === 0) {
+      throw new TypeError('userMessageId must be a non-empty string');
+    }
+    await this.start();
+    const query = this.query;
+    if (query === undefined || this.closeRequested || this.terminalSignalSent) {
+      throw new Error(RUNTIME_CLOSED_MESSAGE);
+    }
+    return query.rewindFiles(userMessageId);
   }
 
   public send(
@@ -463,6 +478,7 @@ export class ClaudeQueryRuntime {
     const capabilities = message.capabilities === undefined
       ? undefined
       : Object.fromEntries(message.capabilities.map((capability) => [capability, true]));
+    const systemMessage = projectClaudeSystemMessage(message);
     const signal = {
       type: 'runtime/init' as const,
       generation: this.generation,
@@ -470,6 +486,7 @@ export class ClaudeQueryRuntime {
       model: message.model,
       permissionMode: message.permissionMode,
       ...(capabilities === undefined ? {} : { capabilities }),
+      ...(systemMessage === undefined ? {} : { systemMessage }),
     } satisfies ClaudeRuntimeSignal;
     await this.emitSignal(signal);
   }

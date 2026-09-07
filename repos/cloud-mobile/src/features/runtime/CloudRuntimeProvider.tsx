@@ -20,6 +20,7 @@ import {
 } from './runtimeStore';
 import type { AppLifecycleState } from '../../sync/connectionSupervisor';
 import { createSecureStoreTokenAdapter } from '../../storage/secureToken';
+import { subscribeOnFrame } from './frameSubscription';
 
 const RuntimeContext = createContext<CloudRuntime | null>(null);
 
@@ -80,6 +81,42 @@ export function useCloudSelector<T>(
   const subscribe = useCallback((onStoreChange: () => void) => (
     runtime.subscribe(() => onStoreChange())
   ), [runtime]);
+
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Coalesces high-frequency Host deltas to the display refresh boundary.
+ * Runtime state remains authoritative and current; only React notification is
+ * batched so a token burst cannot schedule more transcript renders than frames.
+ */
+export function useCloudFrameSelector<T>(
+  selector: (state: CloudRuntimeState) => T,
+  equality: (left: T, right: T) => boolean = Object.is,
+): T {
+  const runtime = useCloudRuntime();
+  const selected = useRef<{ readonly state: CloudRuntimeState; readonly value: T } | null>(null);
+
+  const getSnapshot = useCallback((): T => {
+    const state = runtime.getState();
+    const previous = selected.current;
+    if (previous?.state === state) return previous.value;
+    const next = selector(state);
+    if (previous !== null && equality(previous.value, next)) {
+      selected.current = { state, value: previous.value };
+      return previous.value;
+    }
+    selected.current = { state, value: next };
+    return next;
+  }, [equality, runtime, selector]);
+
+  const subscribe = useCallback((onStoreChange: () => void): (() => void) => {
+    return subscribeOnFrame(
+      (listener) => runtime.subscribe(listener),
+      onStoreChange,
+      { request: requestAnimationFrame, cancel: cancelAnimationFrame },
+    );
+  }, [runtime]);
 
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }

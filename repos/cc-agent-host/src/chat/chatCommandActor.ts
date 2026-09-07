@@ -19,6 +19,13 @@ export interface ChatCommandAcceptedValue {
   readonly turnId?: TurnId;
 }
 
+export type ChatRewindMode = 'conversation' | 'conversation_and_files';
+export type ChatRewindEffect = (
+  chatUri: ChatUri,
+  turnId: TurnId,
+  mode: ChatRewindMode,
+) => void | PromiseLike<void>;
+
 /** The common receipt returned by all transport-independent chat actors. */
 export type ChatCommandReceipt = CommandReceipt<ChatCommandAcceptedValue>;
 
@@ -120,6 +127,9 @@ export type ChatCommandActorReceipt = ChatCommandReceipt;
 export type ChatCommandRejectionCode =
   | 'CHAT_BUSY'
   | 'TURN_NOT_ACTIVE'
+  | 'TURN_NOT_FOUND'
+  | 'REWIND_UNAVAILABLE'
+  | 'REWIND_FAILED'
   | 'RESOURCE_NOT_FOUND'
   | 'INVALID_ACTION'
   | 'INTERACTION_NOT_CONFIGURED'

@@ -68,6 +68,25 @@ export function markChatBackingMaterialized(backing: ChatBacking): ChatBacking {
   });
 }
 
+/** Return a clean provisional backing after its SDK transcript was deleted. */
+export function resetChatBackingToProvisional(backing: ChatBacking): ChatBacking {
+  const normalized = validateBacking(backing);
+  return freezeBacking({
+    ...normalized,
+    lifecycle: 'provisional',
+  });
+}
+
+/** Point an existing product chat at a newly forked, materialized SDK transcript. */
+export function replaceChatBackingSession(backing: ChatBacking, sdkSessionId: string): ChatBacking {
+  const normalized = validateBacking(backing);
+  return freezeBacking({
+    ...normalized,
+    sdkSessionId: validateSdkSessionId(sdkSessionId),
+    lifecycle: 'materialized',
+  });
+}
+
 /** Return a new backing with a defensive snapshot of the desired config. */
 export function updateChatBackingConfig(
   backing: ChatBacking,

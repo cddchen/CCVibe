@@ -68,6 +68,16 @@ export interface ToolCall {
   readonly error?: string;
 }
 
+export type SystemMessageLevel = 'info' | 'progress' | 'success' | 'warning' | 'error';
+
+/** SDK-independent, display-safe projection of one provider system event. */
+export interface SystemMessage {
+  readonly event: string;
+  readonly title: string;
+  readonly content: string;
+  readonly level: SystemMessageLevel;
+}
+
 export type ResponsePart =
   | {
       readonly kind: 'markdown';
@@ -78,6 +88,14 @@ export type ResponsePart =
       readonly kind: 'reasoning';
       readonly id: PartId;
       readonly content: string;
+    }
+  | {
+      readonly kind: 'system_message';
+      readonly id: PartId;
+      readonly event: SystemMessage['event'];
+      readonly title: SystemMessage['title'];
+      readonly content: SystemMessage['content'];
+      readonly level: SystemMessage['level'];
     }
   | {
       readonly kind: 'tool_call';

@@ -95,7 +95,8 @@ URI segment 是不透明标识，不允许路径分隔符、查询/片段、`.`�
 | `ApprovalSuggestion` | `JsonObject` | 展示给客户端的权限/编辑建议。 |
 | `ApprovalMatchedAskRule` | `source`, `toolName`, 可选 `ruleContent` | 与审批匹配的规则来源。 |
 | `ToolCall` | `id`, `name`, `input`, `status`, `startedAt`, 可选 `readyAt/completedAt/result/error` | 模型调用工具的完整状态。 |
-| `ResponsePart` | `kind`、`id`；markdown/reasoning 有 `content`，tool_call 有 `toolCall` | 一个回复由多个可流式更新的块组成。 |
+| `SystemMessage` | `event`, `title`, `content`, `level` | SDK system event 的脱敏、限长、可展示投影。 |
+| `ResponsePart` | `kind`、`id`；markdown/reasoning 有 `content`，system_message 有归一化的系统内容，tool_call 有 `toolCall` | 一个回复由多个可流式更新或折叠展示的块组成。 |
 | `ActiveTurn` | `id`, `prompt`, 固定 `status: active`, `parts`, `startedAt` | 当前唯一进行中的轮次。 |
 | `Turn` | `id`, `prompt`, `status`, `parts`, `startedAt`, 可选 `completedAt/error` | 历史或终态轮次。 |
 | `PendingApproval` | `id`, `turnId`, 可选 `toolCallId`；工具、输入、标题、建议、请求标识、规则、`requestedAt` | 等待用户批准/拒绝的工具请求。 |
@@ -110,7 +111,7 @@ URI segment 是不透明标识，不允许路径分隔符、查询/片段、`.`�
 | 动作模型 | 专有字段 | 对 `ChatState` 的意义 |
 | --- | --- | --- |
 | `TurnStartedAction` | `turnId`, `prompt` | 创建 `activeTurn`。 |
-| `ResponsePartAddedAction` | `turnId`, `part` | 增加 markdown 或 reasoning 内容块。 |
+| `ResponsePartAddedAction` | `turnId`, `part` | 增加 markdown、reasoning 或 system_message 内容块；system tail event 可追加到已完成 turn。 |
 | `ResponsePartDeltaAction` | `turnId`, `partId`, `delta` | 追加流式文本。 |
 | `ToolCallStartedAction` | `turnId`, `partId`, `toolCallId`, `name`, 可选 `input` | 创建工具调用块。 |
 | `ToolCallInputDeltaAction` | `turnId`, `partId`, `toolCallId`, `delta` | 追加流式工具输入。 |
@@ -201,9 +202,9 @@ URI segment 是不透明标识，不允许路径分隔符、查询/片段、`.`�
 | `SubscribeParams` / `SubscribeResult` | `channel` / `snapshot` | 新订阅及其状态基线。 |
 | `UnsubscribeParams` / `UnsubscribeResult` | `channel` / `removed` | 取消订阅。 |
 | `ReconnectParams` | `channel`, `clientId`, `hostEpoch`, `lastSeenServerSeq`, `subscriptions` | 恢复逻辑客户端和状态。 |
-| `ClientAction` | `chat/send {prompt}` 或 `chat/interrupt {turnId}` | 客户端可发起的聊天动作。 |
+| `ClientAction` | `chat/send {prompt}`、`chat/interrupt {turnId}` 或 `chat/rewind {turnId, mode}` | 客户端可发起的聊天动作；rewind mode 区分仅会话与会话加 SDK 文件 checkpoint。 |
 | `DispatchActionParams` | `channel`, `clientSeq`, `commandId`, `action` | 带幂等与顺序信息的客户端命令。 |
-| `DispatchActionResult` | `receipt` | send/interrupt 结果。 |
+| `DispatchActionResult` | `receipt` | send/interrupt/rewind 结果。 |
 | `ResolveApprovalParams` | channel/client sequence/command/approval ID/decision；可选编辑、分类、消息、中断 | 审批决议 DTO。 |
 | `ResolveInputParams` | channel/client sequence/command/input ID；可选 answers | 结构化输入决议 DTO。 |
 | `InteractionResolutionResult` | `receipt` | 输入或审批决议回执。 |
@@ -374,4 +375,3 @@ URI segment 是不透明标识，不允许路径分隔符、查询/片段、`.`�
 | `ConnectionContext` | 一条 WebSocket 存活期间 | 保证单连接请求/响应顺序、订阅一致性和安全退出。 |
 | `ClaudeChatRegistry` | host 存活期间 | 保证 `ChatUri → sdkSessionId → runtime` 映射、懒启动与安全释放。 |
 | `ChatCommandActor` | host 存活期间 | 将已授权的客户端意图变成可幂等、按 chat 串行执行的聊天动作。 |
-

@@ -60,7 +60,13 @@ export function buildChatDispatchCommand(input: ChatDispatchCommandInput): ChatD
 
   const action = input.action.type === 'chat/send'
     ? { type: 'chat/send' as const, prompt: normalizePrompt(input.action.prompt) }
-    : { type: 'chat/interrupt' as const, turnId: assertOpaqueIdValue(input.action.turnId, 'turnId') };
+    : input.action.type === 'chat/interrupt'
+      ? { type: 'chat/interrupt' as const, turnId: assertOpaqueIdValue(input.action.turnId, 'turnId') }
+      : {
+          type: 'chat/rewind' as const,
+          turnId: assertOpaqueIdValue(input.action.turnId, 'turnId'),
+          mode: input.action.mode,
+        };
 
   return Object.freeze({
     method: 'dispatchAction' as const,

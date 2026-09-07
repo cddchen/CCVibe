@@ -356,6 +356,8 @@ export type {
 export {
   createChatBacking,
   markChatBackingMaterialized,
+  replaceChatBackingSession,
+  resetChatBackingToProvisional,
   updateChatBackingConfig,
 } from './claude/chatBacking.js';
 export type {
@@ -365,6 +367,8 @@ export type {
 } from './claude/chatBacking.js';
 export { ClaudeChatRegistry } from './claude/claudeChatRegistry.js';
 export type { ClaudeChatRegistrySnapshot } from './claude/claudeChatRegistry.js';
+export { resolveClaudeRewindPoint, resolveClaudeRewindPointAtTurn } from './claude/rewindPoint.js';
+export type { ClaudeRewindPoint } from './claude/rewindPoint.js';
 export { ClaudeRuntimeActionBridge } from './claude/runtimeActionBridge.js';
 export type {
   ClaudeLiveMapperDiagnostic,

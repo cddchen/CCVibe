@@ -59,6 +59,11 @@ expectTypeOf<DispatchActionParams['commandId']>().toEqualTypeOf<ReturnType<typeo
 expectTypeOf<ClientAction>().toMatchTypeOf<
   | { readonly type: 'chat/send'; readonly prompt: string }
   | { readonly type: 'chat/interrupt'; readonly turnId: ReturnType<typeof createTurnId> }
+  | {
+      readonly type: 'chat/rewind';
+      readonly turnId: ReturnType<typeof createTurnId>;
+      readonly mode: 'conversation' | 'conversation_and_files';
+    }
 >();
 
 if (false) {

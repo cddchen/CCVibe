@@ -17,6 +17,7 @@ export type ResourceAction =
   | 'send'
   | 'configure'
   | 'interrupt'
+  | 'rewind'
   | 'approve'
   | 'input'
   | 'resolveApproval'
@@ -31,6 +32,7 @@ export const RESOURCE_ACTIONS = Object.freeze({
   send: CAPABILITIES.send,
   configure: CAPABILITIES.configure,
   interrupt: CAPABILITIES.interrupt,
+  rewind: CAPABILITIES.configure,
   approve: CAPABILITIES.approve,
   // Input resolution is intentionally mapped to the same explicit approval
   // capability. Read/subscribe alone can never settle a pending input.

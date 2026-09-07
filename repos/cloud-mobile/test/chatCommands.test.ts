@@ -64,6 +64,19 @@ describe('chat command builders', () => {
     });
   });
 
+  it('builds the two rewind modes as typed Host intents', () => {
+    expect(buildChatDispatchCommand({
+      channel: chatUri,
+      action: { type: 'chat/rewind', turnId: 'turn-a', mode: 'conversation_and_files' },
+      clientSeq: 9,
+      commandId: 'rewind-9',
+    }).params.action).toEqual({
+      type: 'chat/rewind',
+      turnId: 'turn-a',
+      mode: 'conversation_and_files',
+    });
+  });
+
   it('builds allow and deny with optional SDK-free fields preserved', () => {
     expect(buildApprovalResolutionCommand({
       channel: chatUri,

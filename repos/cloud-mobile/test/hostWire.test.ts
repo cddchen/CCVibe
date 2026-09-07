@@ -136,6 +136,46 @@ describe('Host wire contract adapter', () => {
     }
   });
 
+  it('accepts normalized system-message parts in snapshots and actions', () => {
+    const systemPart = {
+      kind: 'system_message',
+      id: 'system-compact',
+      event: 'compact_boundary',
+      title: '上下文压缩',
+      content: '压缩完成',
+      level: 'success',
+    } as const;
+    const snapshot = parseHostStateSnapshot({
+      resource: chat,
+      state: {
+        ...chatState,
+        activeTurn: { ...chatState.activeTurn, parts: [systemPart] },
+      },
+      fromSeq: 3,
+    });
+    expect((snapshot.state as HostChatState).activeTurn?.parts[0]).toEqual(systemPart);
+
+    const replay = parseHostReconnectResult({
+      type: 'replay',
+      hostEpoch: 'epoch-1',
+      throughSeq: 4,
+      serverSeq: 4,
+      missing: [],
+      actions: [{
+        channel: chat,
+        serverSeq: 4,
+        serverTime: '2026-08-29T00:00:04.000Z',
+        action: {
+          type: 'chat/responsePartAdded',
+          turnId: 'turn-a',
+          part: systemPart,
+          timestamp: '2026-08-29T00:00:04.000Z',
+        },
+      }],
+    });
+    expect(replay.type).toBe('replay');
+  });
+
   it('parses the Host-resolved workspace returned by catalog/resolveWorkspace', () => {
     const workspace = parseHostResolveWorkspaceResult({
       workspace: {

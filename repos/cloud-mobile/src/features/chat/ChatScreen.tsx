@@ -1,7 +1,8 @@
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type JSX } from 'react';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentProps, type JSX, type RefObject } from 'react';
 import {
   AccessibilityInfo,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Keyboard,
@@ -21,11 +22,11 @@ import Markdown from 'react-native-markdown-display';
 import { GlassPanel } from '../../ui/glass/GlassPanel';
 import { GlassSurface } from '../../ui/glass/GlassSurface';
 import { BOTTOM_SHEET_BACKDROP_DURATION_MS, BOTTOM_SHEET_DISMISS_MS, BottomSheetFrame } from '../../ui/motion/BottomSheetMotion';
-import { useCloudActions, useCloudSelector } from '../runtime/CloudRuntimeProvider';
+import { useCloudActions, useCloudFrameSelector, useCloudSelector } from '../runtime/CloudRuntimeProvider';
 import { selectRootCatalog, type CloudRuntimeState } from '../runtime/runtimeStore';
 import {
   buildStructuredInputAnswers,
-  selectChatViewModel,
+  createChatViewModelSelector,
   type ChatPartViewModel,
   type ChatTurnViewModel,
   type ChatViewModel,
@@ -54,11 +55,13 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const theme = useTheme<MD3Theme>();
   const actions = useCloudActions();
-  const view = useCloudSelector((state) => selectChatViewModel({
-    chatUri: props.chatUri,
-    chatState: selectChatState(state, props.chatUri),
-    catalog: selectRootCatalog(state),
-  }));
+  const projectChat = useMemo(createChatViewModelSelector, []);
+  const selectChat = useCallback((state: CloudRuntimeState) => projectChat({
+      chatUri: props.chatUri,
+      chatState: selectChatState(state, props.chatUri),
+      catalog: selectRootCatalog(state),
+    }), [projectChat, props.chatUri]);
+  const view = useCloudFrameSelector(selectChat);
   const syncStatus = useCloudSelector((state) => state.sync.status);
   const chatOperationError = useCloudSelector((state) => state.chatOperationError);
   const subscribeError = useCloudSelector((state) => (
@@ -66,10 +69,13 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
       ? state.operationError
       : undefined
   ));
-  const [draft, setDraft] = useState('');
+  const draftRef = useRef('');
+  const hasDraftRef = useRef(false);
+  const [hasDraft, setHasDraft] = useState(false);
   const [sending, setSending] = useState(false);
   const [awaitingSince, setAwaitingSince] = useState<string | undefined>();
   const [stopping, setStopping] = useState(false);
+  const [rewindingTurnId, setRewindingTurnId] = useState<string | undefined>();
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [commands, setCommands] = useState<readonly HostSlashCommand[]>([]);
   const [commandsLoading, setCommandsLoading] = useState(false);
@@ -168,17 +174,20 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   }, [view.activeTurn]);
 
   const send = useCallback(async (): Promise<void> => {
-    const prompt = draft.trim();
+    const prompt = draftRef.current.trim();
     if (prompt.length === 0 || sending || syncStatus !== 'connected') return;
     setSending(true);
     try {
       const result = await actions.sendChat({ chatUri: props.chatUri, prompt });
       if (result.status === 'accepted') {
-        setDraft('');
+        draftRef.current = '';
+        hasDraftRef.current = false;
+        setHasDraft(false);
+        composerInputRef.current?.clear();
         setAwaitingSince(new Date().toISOString());
       }
     } finally { setSending(false); }
-  }, [actions, draft, props.chatUri, sending, syncStatus]);
+  }, [actions, props.chatUri, sending, syncStatus]);
 
   const stop = useCallback(async (): Promise<void> => {
     const turnId = view.activeTurn?.id;
@@ -186,6 +195,34 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
     setStopping(true);
     try { await actions.interruptChat({ chatUri: props.chatUri, turnId }); } finally { setStopping(false); }
   }, [actions, props.chatUri, stopping, view.activeTurn?.id]);
+
+  const rewind = useCallback((turn: ChatTurnViewModel): void => {
+    if (syncStatus !== 'connected' || sending || stopping || rewindingTurnId !== undefined || turn.status === 'active') return;
+    const applyRewind = async (mode: 'conversation' | 'conversation_and_files'): Promise<void> => {
+      setRewindingTurnId(turn.id);
+      try {
+        const result = await actions.rewindChat({ chatUri: props.chatUri, turnId: turn.id, mode });
+        if (result.status !== 'accepted') return;
+        draftRef.current = turn.prompt;
+        hasDraftRef.current = turn.prompt.trim().length > 0;
+        setHasDraft(hasDraftRef.current);
+        composerInputRef.current?.setNativeProps({ text: turn.prompt });
+        composerSelectionRef.current = { start: turn.prompt.length, end: turn.prompt.length };
+        composerInputRef.current?.focus();
+      } finally {
+        setRewindingTurnId(undefined);
+      }
+    };
+    Alert.alert(
+      '是否撤回到该消息？',
+      '该消息及其后的对话会被撤销，并将这条消息放回输入框。',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '撤回会话', onPress: () => void applyRewind('conversation') },
+        { text: '撤回消息和变更', style: 'destructive', onPress: () => void applyRewind('conversation_and_files') },
+      ],
+    );
+  }, [actions, props.chatUri, rewindingTurnId, sending, stopping, syncStatus]);
 
   const openCommands = useCallback(async (): Promise<void> => {
     if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current);
@@ -202,9 +239,6 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   }, [actions, commands.length, commandsLoading, props.chatUri]);
   const showNotice = useCallback((message: string): void => setNotice(message), []);
   const turns = useMemo(() => view.activeTurn === undefined ? view.history : [...view.history, view.activeTurn], [view.activeTurn, view.history]);
-  const renderItem = useCallback(({ item }: ListRenderItemInfo<ChatTurnViewModel>) => (
-    <TurnTranscriptItem reduceMotion={reduceMotion} turn={item} />
-  ), [reduceMotion]);
   const active = view.activeTurn !== undefined && view.status === 'in_progress';
   const canChangeComposer = !sending && !stopping && !active;
   const composerDisabled = sending || stopping;
@@ -295,17 +329,21 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const selectCommand = useCallback((command: HostSlashCommand): void => {
     if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current);
     commandTransitionTimerRef.current = undefined;
-    const insertion = insertSlashCommand(draft, composerSelectionRef.current, command);
+    const insertion = insertSlashCommand(draftRef.current, composerSelectionRef.current, command);
     setAttachmentMenuOpen(false);
-    setDraft(insertion.text);
+    draftRef.current = insertion.text;
+    const nextHasDraft = insertion.text.trim().length > 0;
+    hasDraftRef.current = nextHasDraft;
+    setHasDraft(nextHasDraft);
     composerSelectionRef.current = { start: insertion.cursor, end: insertion.cursor };
     requestAnimationFrame(() => {
       composerInputRef.current?.focus();
       composerInputRef.current?.setNativeProps({
+        text: insertion.text,
         selection: { start: insertion.cursor, end: insertion.cursor },
       });
     });
-  }, [draft]);
+  }, []);
   const selectedModel = view.models.find((model) => model.id === view.modelId);
   const pickerOptions = useMemo<readonly ConfigOption[]>(() => {
     if (configPicker === 'model') return view.models.map((model) => ({ id: model.id, title: model.displayName, ...(model.description === undefined ? {} : { description: model.description }) }));
@@ -326,6 +364,34 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
     });
     if (result.status === 'accepted') setNotice('会话配置已更新');
   }, [actions, configPicker, props.chatUri]);
+  const closeApproval = useCallback((): void => {
+    if (activeApproval !== undefined) setDismissedApprovalId(activeApproval.id);
+    setApprovalId(undefined);
+  }, [activeApproval]);
+  const resolveApproval = useCallback(async (decision: 'allow' | 'deny'): Promise<void> => {
+    if (activeApproval === undefined) return;
+    const result = decision === 'allow'
+      ? await actions.allowApproval({ channel: props.chatUri, approvalId: activeApproval.id, decision: 'allow', decisionClassification: 'user_temporary' })
+      : await actions.denyApproval({ channel: props.chatUri, approvalId: activeApproval.id, decision: 'deny', decisionClassification: 'user_reject', message: '用户拒绝执行此操作', interrupt: true });
+    if (result.status === 'accepted' || result.status === 'already_resolved') {
+      setDismissedApprovalId(activeApproval.id);
+      setApprovalId(undefined);
+      setNotice(result.status === 'already_resolved' ? '该权限请求已由其他客户端处理' : '权限决定已提交，等待 Host 确认');
+    }
+  }, [actions, activeApproval, props.chatUri]);
+  const closeInput = useCallback((): void => {
+    if (activeInput !== undefined) setDismissedInputId(activeInput.id);
+    setInputId(undefined);
+  }, [activeInput]);
+  const resolveInput = useCallback(async (answers: Readonly<Record<string, string>> | undefined): Promise<void> => {
+    if (activeInput === undefined) return;
+    const result = await actions.resolveInput({ channel: props.chatUri, inputId: activeInput.id, ...(answers === undefined ? {} : { answers }) });
+    if (result.status === 'accepted' || result.status === 'already_resolved') {
+      setDismissedInputId(activeInput.id);
+      setInputId(undefined);
+      setNotice(result.status === 'already_resolved' ? '该问题已由其他客户端处理' : '回答已提交，等待 Host 继续');
+    }
+  }, [actions, activeInput, props.chatUri]);
 
   return (
     <SafeAreaView edges={['left', 'right', 'bottom']} style={[styles.safe, { backgroundColor: theme.colors.background }]}>
@@ -363,29 +429,28 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
           {syncStatus !== 'connected' ? <View style={[styles.statusBanner, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="cloud-off-outline" size={18} /><Text style={[styles.statusBannerText, { color: theme.colors.onSurfaceVariant }]}>{syncStatus === 'reconnecting' ? '连接已断开，正在重新连接；当前内容保留在本机' : '当前未连接 Host，消息不会显示为已发送'}</Text><Button compact onPress={actions.retryConnection}>重试</Button></View> : null}
           {subscribeError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>无法载入这个会话（{subscribeError.code}）</Text><Button compact onPress={() => void actions.subscribeChat(props.chatUri)}>重试</Button><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearOperationError} size={22} /></View> : null}
           {chatOperationError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>操作未完成，请重试（{chatOperationError.code}）</Text><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearChatOperationError} size={22} /></View> : null}
-          <FlatList
-            contentContainerStyle={[styles.transcript, { paddingBottom: composerHeight + Math.max(insets.bottom, 10) + 20 }]}
-            data={turns}
-            keyExtractor={(item) => item.id}
-            keyboardShouldPersistTaps="handled"
-            ListEmptyComponent={awaitingSince === undefined ? <EmptyTranscript failed={subscribeError !== undefined} status={view.status} /> : null}
-            ListFooterComponent={awaitingSince === undefined ? null : <PendingThinking startedAt={awaitingSince} />}
+          <ChatTranscript
+            awaitingSince={awaitingSince}
+            bottomInset={Math.max(insets.bottom, 10)}
+            composerHeight={composerHeight}
+            failed={subscribeError !== undefined}
+            initializeMetrics={initializeTranscriptMetrics}
             onContentSizeChange={updateContentMetrics}
-            onLayout={(event) => initializeTranscriptMetrics(event.nativeEvent.layout.height)}
             onMomentumScrollBegin={beginUserScroll}
             onMomentumScrollEnd={endUserMomentum}
+            onRewind={rewind}
             onScroll={updateBottomState}
             onScrollBeginDrag={beginUserScroll}
             onScrollEndDrag={endUserDrag}
-            ref={transcriptRef}
-            renderItem={renderItem}
-            scrollEventThrottle={32}
-            showsVerticalScrollIndicator={false}
+            reduceMotion={reduceMotion}
+            status={view.status}
+            transcriptRef={transcriptRef}
+            turns={turns}
           />
           {showScrollToBottom ? <Pressable accessibilityLabel="回到最新消息" accessibilityRole="button" onPress={scrollToBottom} style={[styles.scrollToBottom, { bottom: Math.max(insets.bottom, 10) + composerHeight + 12, backgroundColor: theme.colors.secondaryContainer }]}><MaterialCommunityIcons color={theme.colors.onSecondaryContainer} name="arrow-down" size={22} /></Pressable> : null}
           <View onLayout={(event) => { const height = Math.ceil(event.nativeEvent.layout.height); setComposerHeight((current) => current === height ? current : height); }} style={[styles.composerDock, { bottom: Math.max(insets.bottom, 10) }]}>
             <GlassPanel blurIntensity={72} glassEffectStyle="regular" materialElevation={3} materialShape="extraLarge" style={styles.composerShell}>
-              <NativeTextInput accessibilityLabel="消息输入框" editable={!composerDisabled} maxLength={10000} multiline onChangeText={setDraft} onSelectionChange={(event) => { composerSelectionRef.current = event.nativeEvent.selection; }} onSubmitEditing={() => void send()} placeholder="给 Cloud 发送消息" placeholderTextColor={theme.colors.onSurfaceVariant} ref={composerInputRef} style={[styles.composerInput, { color: theme.colors.onSurface }]} value={draft} />
+              <NativeTextInput accessibilityLabel="消息输入框" editable={!composerDisabled} maxLength={10000} multiline onChangeText={(text) => { draftRef.current = text; const nextHasDraft = text.trim().length > 0; if (nextHasDraft !== hasDraftRef.current) { hasDraftRef.current = nextHasDraft; setHasDraft(nextHasDraft); } }} onSelectionChange={(event) => { composerSelectionRef.current = event.nativeEvent.selection; }} onSubmitEditing={() => void send()} placeholder="给 Cloud 发送消息" placeholderTextColor={theme.colors.onSurfaceVariant} ref={composerInputRef} style={[styles.composerInput, { color: theme.colors.onSurface }]} />
               <View style={styles.composerToolbar}>
                 <Pressable
                       accessibilityLabel="添加内容"
@@ -413,8 +478,8 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
                     {stopping && !reduceMotion ? <ActivityIndicator color={theme.colors.onError} size="small" /> : <MaterialCommunityIcons color={theme.colors.onError} name="stop" size={20} />}
                   </Pressable>
                 ) : (
-                  <Pressable accessibilityLabel="发送消息" accessibilityRole="button" accessibilityState={{ disabled: draft.trim().length === 0 || sending || syncStatus !== 'connected' }} disabled={draft.trim().length === 0 || sending || syncStatus !== 'connected'} onPress={() => void send()} style={({ pressed }) => [styles.sendButton, { backgroundColor: draft.trim().length === 0 || sending || syncStatus !== 'connected' ? theme.colors.outlineVariant : theme.colors.primary }, pressed && !reduceMotion ? styles.sendPressed : null]}>
-                    {sending && !reduceMotion ? <ActivityIndicator color={theme.colors.onPrimary} size="small" /> : <MaterialCommunityIcons color={draft.trim().length === 0 || sending || syncStatus !== 'connected' ? theme.colors.onSurfaceVariant : theme.colors.onPrimary} name={sending ? 'clock-outline' : 'arrow-up'} size={21} />}
+                  <Pressable accessibilityLabel="发送消息" accessibilityRole="button" accessibilityState={{ disabled: !hasDraft || sending || syncStatus !== 'connected' }} disabled={!hasDraft || sending || syncStatus !== 'connected'} onPress={() => void send()} style={({ pressed }) => [styles.sendButton, { backgroundColor: !hasDraft || sending || syncStatus !== 'connected' ? theme.colors.outlineVariant : theme.colors.primary }, pressed && !reduceMotion ? styles.sendPressed : null]}>
+                    {sending && !reduceMotion ? <ActivityIndicator color={theme.colors.onPrimary} size="small" /> : <MaterialCommunityIcons color={!hasDraft || sending || syncStatus !== 'connected' ? theme.colors.onSurfaceVariant : theme.colors.onPrimary} name={sending ? 'clock-outline' : 'arrow-up'} size={21} />}
                   </Pressable>
                 )}
               </View>
@@ -424,18 +489,8 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
       </KeyboardAvoidingView>
       <ComposerCommandPopover commands={commands} currentPermission={view.permissionModes.find((mode) => mode.id === view.permissionMode)?.displayName ?? view.permissionMode} loading={commandsLoading} onClose={closeComposerMenus} onCommand={selectCommand} onPermission={openPermissionPicker} reduceMotion={reduceMotion} visible={attachmentMenuOpen} />
       <ConfigChoiceSheet currentValue={currentPickerValue} onClose={() => setConfigPicker(undefined)} onSelect={selectConfig} options={pickerOptions} reduceMotion={reduceMotion} title={configPicker === 'model' ? '选择模型' : configPicker === 'effort' ? '选择思考强度' : '权限设置'} visible={configPicker !== undefined} />
-      <ApprovalSheet approval={requestSheet === 'approval' ? activeApproval : undefined} reduceMotion={reduceMotion} onClose={() => { if (activeApproval !== undefined) setDismissedApprovalId(activeApproval.id); setApprovalId(undefined); }} onResolve={async (decision) => {
-        if (activeApproval === undefined) return;
-        const result = decision === 'allow'
-          ? await actions.allowApproval({ channel: props.chatUri, approvalId: activeApproval.id, decision: 'allow', decisionClassification: 'user_temporary' })
-          : await actions.denyApproval({ channel: props.chatUri, approvalId: activeApproval.id, decision: 'deny', decisionClassification: 'user_reject', message: '用户拒绝执行此操作', interrupt: true });
-        if (result.status === 'accepted' || result.status === 'already_resolved') { setDismissedApprovalId(activeApproval.id); setApprovalId(undefined); setNotice(result.status === 'already_resolved' ? '该权限请求已由其他客户端处理' : '权限决定已提交，等待 Host 确认'); }
-      }} />
-      <InputSheet input={requestSheet === 'input' ? activeInput : undefined} reduceMotion={reduceMotion} onClose={() => { if (activeInput !== undefined) setDismissedInputId(activeInput.id); setInputId(undefined); }} onResolve={async (answers) => {
-        if (activeInput === undefined) return;
-        const result = await actions.resolveInput({ channel: props.chatUri, inputId: activeInput.id, ...(answers === undefined ? {} : { answers }) });
-        if (result.status === 'accepted' || result.status === 'already_resolved') { setDismissedInputId(activeInput.id); setInputId(undefined); setNotice(result.status === 'already_resolved' ? '该问题已由其他客户端处理' : '回答已提交，等待 Host 继续'); }
-      }} />
+      <ApprovalSheet approval={requestSheet === 'approval' ? activeApproval : undefined} reduceMotion={reduceMotion} onClose={closeApproval} onResolve={resolveApproval} />
+      <InputSheet input={requestSheet === 'input' ? activeInput : undefined} reduceMotion={reduceMotion} onClose={closeInput} onResolve={resolveInput} />
       {notice !== undefined ? (
         <Pressable accessibilityRole="button" accessibilityLabel="关闭提示" onPress={() => setNotice(undefined)} style={[styles.noticeToast, { top: insets.top + 54, backgroundColor: theme.colors.onSurface }]}>
           <MaterialCommunityIcons color={theme.colors.surface} name="information-outline" size={17} />
@@ -452,7 +507,61 @@ function selectChatState(state: CloudRuntimeState, chatUri: ChatUri) {
   return entry?.resource === chatUri && 'turns' in entry.state ? entry.state : undefined;
 }
 
-function TurnTranscriptItem({ turn, reduceMotion }: { readonly turn: ChatTurnViewModel; readonly reduceMotion: boolean }): JSX.Element {
+interface ChatTranscriptProps {
+  readonly awaitingSince?: string;
+  readonly bottomInset: number;
+  readonly composerHeight: number;
+  readonly failed: boolean;
+  readonly initializeMetrics: (height: number) => void;
+  readonly onContentSizeChange: (width: number, height: number) => void;
+  readonly onMomentumScrollBegin: () => void;
+  readonly onMomentumScrollEnd: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  readonly onRewind: (turn: ChatTurnViewModel) => void;
+  readonly onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  readonly onScrollBeginDrag: () => void;
+  readonly onScrollEndDrag: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  readonly reduceMotion: boolean;
+  readonly status: ChatViewModel['status'];
+  readonly transcriptRef: RefObject<FlatList<ChatTurnViewModel> | null>;
+  readonly turns: readonly ChatTurnViewModel[];
+}
+
+const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps): JSX.Element {
+  // Streaming can outpace the display refresh rate. React may discard stale
+  // intermediate projections while input and native scrolling stay urgent.
+  const deferredTurns = useDeferredValue(props.turns);
+  const renderItem = useCallback(({ item }: ListRenderItemInfo<ChatTurnViewModel>) => (
+    <TurnTranscriptItem onRewind={props.onRewind} reduceMotion={props.reduceMotion} turn={item} />
+  ), [props.onRewind, props.reduceMotion]);
+  return (
+    <FlatList
+      contentContainerStyle={[styles.transcript, { paddingBottom: props.composerHeight + props.bottomInset + 20 }]}
+      data={deferredTurns}
+      initialNumToRender={8}
+      keyExtractor={(item) => item.id}
+      keyboardShouldPersistTaps="handled"
+      ListEmptyComponent={props.awaitingSince === undefined ? <EmptyTranscript failed={props.failed} status={props.status} /> : null}
+      ListFooterComponent={props.awaitingSince === undefined ? null : <PendingThinking startedAt={props.awaitingSince} />}
+      maxToRenderPerBatch={6}
+      onContentSizeChange={props.onContentSizeChange}
+      onLayout={(event) => props.initializeMetrics(event.nativeEvent.layout.height)}
+      onMomentumScrollBegin={props.onMomentumScrollBegin}
+      onMomentumScrollEnd={props.onMomentumScrollEnd}
+      onScroll={props.onScroll}
+      onScrollBeginDrag={props.onScrollBeginDrag}
+      onScrollEndDrag={props.onScrollEndDrag}
+      ref={props.transcriptRef}
+      removeClippedSubviews={Platform.OS === 'android'}
+      renderItem={renderItem}
+      scrollEventThrottle={32}
+      showsVerticalScrollIndicator={false}
+      updateCellsBatchingPeriod={32}
+      windowSize={7}
+    />
+  );
+});
+
+const TurnTranscriptItem = memo(function TurnTranscriptItem({ turn, reduceMotion, onRewind }: { readonly turn: ChatTurnViewModel; readonly reduceMotion: boolean; readonly onRewind: (turn: ChatTurnViewModel) => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const markdownParts = turn.parts.filter((part): part is Extract<ChatPartViewModel, { kind: 'markdown' }> => part.kind === 'markdown');
   const hasStructuredProcess = turn.parts.some((part) => part.kind !== 'markdown');
@@ -470,7 +579,7 @@ function TurnTranscriptItem({ turn, reduceMotion }: { readonly turn: ChatTurnVie
   const hasProcess = processParts.length > 0 || turn.status === 'active';
   return (
     <View style={styles.turnBlock}>
-      <View style={styles.promptRow}><View style={[styles.promptBubble, { backgroundColor: theme.colors.onSurface }]}><Text style={[styles.promptText, { color: theme.colors.surface }]}>{turn.prompt}</Text></View></View>
+      <View style={styles.promptRow}><Pressable accessibilityActions={[{ name: 'activate', label: '撤回到此消息' }]} accessibilityHint="长按可撤回到这条消息" accessibilityRole="button" disabled={turn.status === 'active'} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'activate') onRewind(turn); }} onLongPress={() => onRewind(turn)} style={[styles.promptBubble, { backgroundColor: theme.colors.onSurface }]}><Text style={[styles.promptText, { color: theme.colors.surface }]}>{turn.prompt}</Text></Pressable></View>
       {hasProcess ? (
         <View style={styles.processBlock}>
           <Pressable accessibilityRole="button" accessibilityState={{ expanded: processOpen }} onPress={() => setProcessOpen((open) => !open)} style={({ pressed }) => [styles.processHeader, pressed && !reduceMotion ? styles.pressed : null]}>
@@ -489,11 +598,18 @@ function TurnTranscriptItem({ turn, reduceMotion }: { readonly turn: ChatTurnVie
           ) : null}
         </View>
       ) : null}
-      {answerParts.map((part) => <MarkdownAnswer key={part.id} content={part.content} />)}
+      {answerParts.map((part) => turn.status === 'active'
+        ? <StreamingAnswer key={part.id} content={part.content} />
+        : <MarkdownAnswer key={part.id} content={part.content} />)}
       {turn.status === 'failed' ? <FailureView message={turn.error ?? 'Host 未能完成这次请求，请稍后重试。'} /> : null}
     </View>
   );
-}
+});
+
+const StreamingAnswer = memo(function StreamingAnswer({ content }: { readonly content: string }): JSX.Element {
+  const theme = useTheme<MD3Theme>();
+  return <View style={styles.assistantBlock}><Text style={[styles.streamingText, { color: theme.colors.onSurface }]}>{content}</Text></View>;
+});
 
 function PendingThinking({ startedAt }: { readonly startedAt: string }): JSX.Element {
   const theme = useTheme<MD3Theme>();
@@ -515,54 +631,63 @@ function useElapsedLabel(startedAt: string, completedAt: string | undefined, run
   return `用时${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, '0')}秒`;
 }
 
-function MarkdownAnswer({ content }: { readonly content: string }): JSX.Element {
+const MarkdownAnswer = memo(function MarkdownAnswer({ content }: { readonly content: string }): JSX.Element {
   const theme = useTheme<MD3Theme>();
+  const markdownStyle = useMemo(() => ({
+    body: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25 },
+    heading1: { color: theme.colors.onSurface, fontSize: 26, fontWeight: '800' as const, lineHeight: 34, marginBottom: 8, marginTop: 12 },
+    heading2: { color: theme.colors.onSurface, fontSize: 22, fontWeight: '700' as const, lineHeight: 30, marginBottom: 7, marginTop: 10 },
+    heading3: { color: theme.colors.onSurface, fontSize: 19, fontWeight: '700' as const, lineHeight: 27, marginBottom: 6, marginTop: 8 },
+    paragraph: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25, marginBottom: 10, marginTop: 0 },
+    strong: { fontWeight: '800' as const },
+    em: { fontStyle: 'italic' as const },
+    s: { textDecorationLine: 'line-through' as const },
+    code_inline: { backgroundColor: theme.colors.surfaceVariant, borderRadius: 5, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 14, paddingHorizontal: 4 },
+    code_block: { backgroundColor: theme.colors.surfaceVariant, borderRadius: 12, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 20, padding: 12 },
+    fence: { backgroundColor: theme.colors.surfaceVariant, borderColor: theme.colors.outlineVariant, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 20, padding: 12 },
+    blockquote: { backgroundColor: theme.colors.surfaceVariant, borderLeftColor: theme.colors.primary, borderLeftWidth: 3, paddingHorizontal: 12, paddingVertical: 7 },
+    bullet_list: { marginBottom: 8 }, ordered_list: { marginBottom: 8 },
+    table: { borderColor: theme.colors.outlineVariant, borderWidth: StyleSheet.hairlineWidth },
+    tr: { borderBottomColor: theme.colors.outlineVariant, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row' as const },
+    th: { backgroundColor: theme.colors.surfaceVariant, flex: 1, fontWeight: '700' as const, padding: 7 },
+    td: { flex: 1, padding: 7 },
+    link: { color: theme.colors.primary, textDecorationLine: 'underline' as const },
+    hr: { backgroundColor: theme.colors.outlineVariant, height: StyleSheet.hairlineWidth },
+  }), [theme.colors]);
   return (
     <View style={styles.assistantBlock}>
       <Markdown
         mergeStyle={false}
-        style={{
-          body: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25 },
-          heading1: { color: theme.colors.onSurface, fontSize: 26, fontWeight: '800', lineHeight: 34, marginBottom: 8, marginTop: 12 },
-          heading2: { color: theme.colors.onSurface, fontSize: 22, fontWeight: '700', lineHeight: 30, marginBottom: 7, marginTop: 10 },
-          heading3: { color: theme.colors.onSurface, fontSize: 19, fontWeight: '700', lineHeight: 27, marginBottom: 6, marginTop: 8 },
-          paragraph: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25, marginBottom: 10, marginTop: 0 },
-          strong: { fontWeight: '800' },
-          em: { fontStyle: 'italic' },
-          s: { textDecorationLine: 'line-through' },
-          code_inline: { backgroundColor: theme.colors.surfaceVariant, borderRadius: 5, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 14, paddingHorizontal: 4 },
-          code_block: { backgroundColor: theme.colors.surfaceVariant, borderRadius: 12, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 20, padding: 12 },
-          fence: { backgroundColor: theme.colors.surfaceVariant, borderColor: theme.colors.outlineVariant, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 20, padding: 12 },
-          blockquote: { backgroundColor: theme.colors.surfaceVariant, borderLeftColor: theme.colors.primary, borderLeftWidth: 3, paddingHorizontal: 12, paddingVertical: 7 },
-          bullet_list: { marginBottom: 8 }, ordered_list: { marginBottom: 8 },
-          table: { borderColor: theme.colors.outlineVariant, borderWidth: StyleSheet.hairlineWidth },
-          tr: { borderBottomColor: theme.colors.outlineVariant, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row' },
-          th: { backgroundColor: theme.colors.surfaceVariant, flex: 1, fontWeight: '700', padding: 7 },
-          td: { flex: 1, padding: 7 },
-          link: { color: theme.colors.primary, textDecorationLine: 'underline' },
-          hr: { backgroundColor: theme.colors.outlineVariant, height: StyleSheet.hairlineWidth },
-        }}
+        style={markdownStyle}
       >{content}</Markdown>
     </View>
   );
-}
+});
 
 function ProcessPart({ part, open, onToggle }: { readonly part: ChatPartViewModel; readonly open: boolean; readonly onToggle: () => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const isTool = part.kind === 'tool';
-  const title = isTool ? part.name : part.kind === 'reasoning' ? '思考过程' : '过程说明';
-  const status = isTool ? toolStatusLabel(part.status) : undefined;
+  const isSystem = part.kind === 'system';
+  const title = isTool ? part.name : isSystem ? part.title : part.kind === 'reasoning' ? '思考过程' : '过程说明';
+  const status = isTool ? toolStatusLabel(part.status) : isSystem ? systemMessageLevelLabel(part.level) : undefined;
+  const icon: ComponentProps<typeof MaterialCommunityIcons>['name'] = isTool
+    ? 'wrench-outline'
+    : isSystem
+      ? systemMessageIcon(part.level)
+      : part.kind === 'reasoning' ? 'head-lightbulb-outline' : 'text-box-outline';
+  const accent = isSystem && part.level === 'error' ? theme.colors.error : theme.colors.onSurfaceVariant;
   return (
     <View style={[styles.processPart, { borderColor: theme.colors.outlineVariant, backgroundColor: theme.colors.surface }]}>
       <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle} style={styles.processPartHeader}>
-        <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name={isTool ? 'wrench-outline' : part.kind === 'reasoning' ? 'head-lightbulb-outline' : 'text-box-outline'} size={19} />
-        <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.processPartTitle, { color: theme.colors.onSurface }]}>{title}</Text>
+        <MaterialCommunityIcons color={accent} name={icon} size={19} />
+        <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.processPartTitle, { color: isSystem ? theme.colors.onSurfaceVariant : theme.colors.onSurface }]}>{title}</Text>
         <View style={styles.toolbarSpacer} />
         {status === undefined ? null : <Text style={[styles.processPartStatus, { color: theme.colors.onSurfaceVariant }]}>{status}</Text>}
         <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name={open ? 'chevron-up' : 'chevron-down'} size={19} />
       </Pressable>
       {open && part.kind === 'reasoning' ? <Text selectable style={[styles.reasoningText, { color: theme.colors.onSurfaceVariant }]}>{part.content}</Text> : null}
       {open && part.kind === 'markdown' ? <Text selectable style={[styles.reasoningText, { color: theme.colors.onSurfaceVariant }]}>{part.content}</Text> : null}
+      {open && part.kind === 'system' ? <Text selectable style={[styles.reasoningText, { color: part.level === 'error' ? theme.colors.error : theme.colors.onSurfaceVariant }]}>{part.content}</Text> : null}
       {open && part.kind === 'tool' && part.formattedInput.length > 0 ? <Text selectable style={[styles.toolInput, { backgroundColor: theme.colors.surfaceVariant, color: theme.colors.onSurfaceVariant }]}>{part.formattedInput}</Text> : null}
       {open && part.kind === 'tool' && part.output !== undefined ? <Text selectable style={[styles.toolOutput, { color: theme.colors.onSurface }]}>{part.output}</Text> : null}
       {open && part.kind === 'tool' && part.error !== undefined ? <Text selectable style={[styles.toolError, { color: theme.colors.error }]}>{part.error}</Text> : null}
@@ -629,25 +754,28 @@ function ConfigChoiceSheet(props: ConfigChoiceSheetProps): JSX.Element {
 }
 
 interface ApprovalSheetProps { readonly approval: PendingApprovalViewModel | undefined; readonly reduceMotion: boolean; readonly onClose: () => void; readonly onResolve: (decision: 'allow' | 'deny') => Promise<void> }
-function ApprovalSheet(props: ApprovalSheetProps): JSX.Element {
-  const theme = useTheme<MD3Theme>(); const [resolving, setResolving] = useState(false); const [cached, setCached] = useState(props.approval);
-  useEffect(() => { if (props.approval !== undefined) setCached(props.approval); }, [props.approval]);
+const ApprovalSheet = memo(function ApprovalSheet(props: ApprovalSheetProps): JSX.Element {
+  const theme = useTheme<MD3Theme>(); const [resolving, setResolving] = useState(false); const cachedRef = useRef(props.approval);
+  if (props.approval !== undefined) cachedRef.current = props.approval;
+  const cached = cachedRef.current;
   if (cached === undefined) return <></>;
   const resolve = async (decision: 'allow' | 'deny'): Promise<void> => { setResolving(true); try { await props.onResolve(decision); } finally { setResolving(false); } };
   return <BottomSheetFrame onClose={props.onClose} panelStyle={styles.sheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.approval !== undefined}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.sheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>权限请求</Text><Text style={[styles.sheetDescription, { color: theme.colors.onSurfaceVariant }]}>允许在 {cached.hostName} 上执行此工具？</Text><View style={[styles.requestIdentity, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.primary} name="wrench-outline" size={22} /><View style={styles.requestCopy}><Text style={styles.requestTool}>{cached.displayName}</Text><Text style={[styles.requestWorkspace, { color: theme.colors.onSurfaceVariant }]}>{cached.workspaceName}</Text></View></View><ScrollView bounces={false} style={[styles.requestInput, { backgroundColor: theme.colors.surfaceVariant }]}><Text selectable style={{ color: theme.colors.onSurfaceVariant }}>{cached.normalizedInput}</Text></ScrollView><View style={styles.sheetActions}><Button disabled={resolving} mode="outlined" onPress={() => void resolve('deny')} style={styles.sheetButton}>拒绝</Button><Button disabled={resolving} icon="check" mode="contained" onPress={() => void resolve('allow')} style={styles.sheetButton}>允许</Button></View></GlassPanel></BottomSheetFrame>;
-}
+});
 
 interface InputSheetProps { readonly input: PendingInputViewModel | undefined; readonly reduceMotion: boolean; readonly onClose: () => void; readonly onResolve: (answers: Readonly<Record<string, string>> | undefined) => Promise<void> }
-function InputSheet(props: InputSheetProps): JSX.Element {
+const InputSheet = memo(function InputSheet(props: InputSheetProps): JSX.Element {
   const theme = useTheme<MD3Theme>(); const [answers, setAnswers] = useState<Readonly<Record<string, readonly string[]>>>({}); const [custom, setCustom] = useState<Readonly<Record<string, string>>>({}); const [resolving, setResolving] = useState(false); const [cached, setCached] = useState(props.input);
   useEffect(() => { if (props.input !== undefined) { setCached(props.input); setAnswers({}); setCustom({}); } }, [props.input]);
   if (cached === undefined) return <></>;
   const toggle = (key: string, label: string, multi: boolean): void => setAnswers((current) => { const previous = current[key] ?? []; return { ...current, [key]: multi ? (previous.includes(label) ? previous.filter((value) => value !== label) : [...previous, label]) : [label] }; });
   const submit = async (): Promise<void> => { setResolving(true); try { await props.onResolve(buildStructuredInputAnswers(cached, answers, custom)); } finally { setResolving(false); } };
   return <BottomSheetFrame onClose={props.onClose} panelStyle={styles.sheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.input !== undefined}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.sheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>需要你的输入</Text><Text style={[styles.sheetDescription, { color: theme.colors.onSurfaceVariant }]}>Cloud 正在等待你回答以下问题</Text><ScrollView bounces={false} contentContainerStyle={styles.questionList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.boundedScroll}>{cached.questions.map((question, index) => <View key={`${cached.id}:question:${index}`} style={styles.questionBlock}><Text variant="labelLarge" style={{ color: theme.colors.primary }}>{question.header}</Text><Text style={styles.questionText}>{question.question}</Text>{question.options.map((option) => { const selected = answers[question.question]?.includes(option.label) === true; return <Pressable key={option.label} accessibilityRole={question.multiSelect ? 'checkbox' : 'radio'} accessibilityState={{ checked: selected }} onPress={() => toggle(question.question, option.label, question.multiSelect)} style={[styles.optionRow, selected ? { borderColor: theme.colors.primary, backgroundColor: theme.colors.primaryContainer } : { borderColor: theme.colors.outlineVariant }]}><MaterialCommunityIcons color={selected ? theme.colors.primary : theme.colors.outline} name={selected ? (question.multiSelect ? 'checkbox-marked' : 'radiobox-marked') : (question.multiSelect ? 'checkbox-blank-outline' : 'radiobox-blank')} size={22} /><View style={styles.optionCopy}><Text style={styles.optionLabel}>{option.label}</Text><Text style={[styles.optionDescription, { color: theme.colors.onSurfaceVariant }]}>{option.description}</Text></View></Pressable>; })}<NativeTextInput accessibilityLabel={`${question.header} 自由输入`} onChangeText={(value) => setCustom((current) => ({ ...current, [question.question]: value }))} placeholder="或输入自定义回答" placeholderTextColor={theme.colors.onSurfaceVariant} style={[styles.customInput, { borderColor: theme.colors.outlineVariant, color: theme.colors.onSurface }]} value={custom[question.question] ?? ''} /></View>)}</ScrollView><View style={styles.sheetActions}><Button disabled={resolving} mode="outlined" onPress={() => void props.onResolve(undefined)} style={styles.sheetButton}>取消</Button><Button disabled={resolving} icon="send" mode="contained" onPress={() => void submit()} style={styles.sheetButton}>提交回答</Button></View></GlassPanel></BottomSheetFrame>;
-}
+});
 
 function toolStatusLabel(status: Extract<ChatPartViewModel, { kind: 'tool' }>['status']): string { switch (status) { case 'running': return '运行中'; case 'ready': return '等待执行'; case 'success': return '已完成'; case 'error': return '失败'; } }
+function systemMessageLevelLabel(level: Extract<ChatPartViewModel, { kind: 'system' }>['level']): string { switch (level) { case 'progress': return '进行中'; case 'success': return '已完成'; case 'warning': return '注意'; case 'error': return '错误'; case 'info': return '系统'; } }
+function systemMessageIcon(level: Extract<ChatPartViewModel, { kind: 'system' }>['level']): ComponentProps<typeof MaterialCommunityIcons>['name'] { switch (level) { case 'progress': return 'progress-clock'; case 'success': return 'check-circle-outline'; case 'warning': return 'alert-outline'; case 'error': return 'alert-circle-outline'; case 'info': return 'information-outline'; } }
 function effortDisplayName(effort: ChatViewModel['effort']): string {
   switch (effort) {
     case undefined: return '默认';
@@ -683,6 +811,7 @@ const styles = StyleSheet.create({
   failureLabel: { fontSize: 15, fontWeight: '700' },
   failureMessage: { fontSize: 14, lineHeight: 21 },
   assistantBlock: { maxWidth: '88%', paddingHorizontal: 8, gap: 9 },
+  streamingText: { fontSize: 16, lineHeight: 25 },
   processBlock: { maxWidth: '92%', marginHorizontal: 8 },
   processHeader: { alignItems: 'center', flexDirection: 'row', gap: 8, minHeight: 46, paddingVertical: 7 },
   processTitle: { fontSize: 14, fontWeight: '600' },

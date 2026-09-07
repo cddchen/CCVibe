@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
+
 import type { ChatAction } from '../domain/actions.js';
 import type { ActiveTurn } from '../domain/chat.js';
-import type { ChatUri, TurnId } from '../domain/ids.js';
+import { createPartId, type ChatUri, type TurnId } from '../domain/ids.js';
 import { parseChatUri } from '../domain/resources.js';
 import type { HostStateManager } from '../host/hostStateManager.js';
 import type { ChatActionEnvelope } from '../protocol/types.js';
@@ -99,7 +101,7 @@ export class ClaudeRuntimeActionBridge {
 
     switch (runtimeSignal.type) {
       case 'runtime/init':
-        return EMPTY_ENVELOPES;
+        return this.handleInit(parsedChatUri, runtimeSignal);
       case 'runtime/message':
         return this.handleMessage(parsedChatUri, entry, runtimeSignal);
       case 'turn/result':
@@ -111,12 +113,53 @@ export class ClaudeRuntimeActionBridge {
     }
   }
 
+  private handleInit(
+    chatUri: ChatUri,
+    signal: Extract<ClaudeRuntimeSignal, { readonly type: 'runtime/init' }>,
+  ): readonly ChatActionEnvelope[] {
+    const activeTurn = this.activeTurn(chatUri);
+    const timestamp = this.timestamp();
+    if (activeTurn === undefined || timestamp === undefined) {
+      return EMPTY_ENVELOPES;
+    }
+
+    const seed = createHash('sha256')
+      .update(['ccvibe-runtime-init', chatUri, activeTurn.id, String(signal.generation)].join('|'), 'utf8')
+      .digest('hex')
+      .slice(0, 48);
+    const projected = signal.systemMessage ?? {
+      event: 'init',
+      title: '运行环境初始化',
+      content: JSON.stringify({
+        model: signal.model,
+        permissionMode: signal.permissionMode,
+        ...(signal.capabilities === undefined ? {} : { capabilities: signal.capabilities }),
+      }, undefined, 2),
+      level: 'info' as const,
+    };
+    const action: ChatAction = {
+      type: 'chat/responsePartAdded',
+      turnId: activeTurn.id,
+      part: {
+        kind: 'system_message',
+        id: createPartId(`part_${seed}`),
+        ...projected,
+      },
+      timestamp,
+    };
+    return this.dispatchActions(chatUri, [action]);
+  }
+
   private handleMessage(
     chatUri: ChatUri,
     entry: MapperEntry,
     signal: Extract<ClaudeRuntimeSignal, { readonly type: 'runtime/message' }>,
   ): readonly ChatActionEnvelope[] {
-    if (signal.phase !== 'active' || signal.turnId === undefined) {
+    if (
+      signal.phase === 'unmatched'
+      || signal.turnId === undefined
+      || (signal.phase === 'tail' && !isSystemMessage(signal.message))
+    ) {
       return EMPTY_ENVELOPES;
     }
 
@@ -335,6 +378,13 @@ export class ClaudeRuntimeActionBridge {
       // Diagnostics are observational and must never escape signal handling.
     }
   }
+}
+
+function isSystemMessage(value: unknown): boolean {
+  return typeof value === 'object'
+    && value !== null
+    && 'type' in value
+    && value.type === 'system';
 }
 
 function defaultLiveMapperFactory(

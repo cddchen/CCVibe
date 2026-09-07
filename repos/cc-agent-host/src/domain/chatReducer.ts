@@ -242,12 +242,44 @@ function isResponsePartAddedPart(value: unknown): value is ResponsePartAddedActi
     return false;
   }
 
-  const candidate = value as { readonly kind?: unknown; readonly id?: unknown; readonly content?: unknown };
+  const candidate = value as {
+    readonly kind?: unknown;
+    readonly id?: unknown;
+    readonly content?: unknown;
+    readonly event?: unknown;
+    readonly title?: unknown;
+    readonly level?: unknown;
+  };
   return (
-    (candidate.kind === 'markdown' || candidate.kind === 'reasoning') &&
+    (candidate.kind === 'markdown' || candidate.kind === 'reasoning' || candidate.kind === 'system_message') &&
     typeof candidate.id === 'string' &&
-    typeof candidate.content === 'string'
+    (candidate.kind === 'system_message'
+      ? isSystemMessagePart(candidate)
+      : typeof candidate.content === 'string')
   );
+}
+
+function isSystemMessagePart(
+  candidate: {
+    readonly event?: unknown;
+    readonly title?: unknown;
+    readonly content?: unknown;
+    readonly level?: unknown;
+  },
+): candidate is {
+  readonly event: string;
+  readonly title: string;
+  readonly content: string;
+  readonly level: 'info' | 'progress' | 'success' | 'warning' | 'error';
+} {
+  return typeof candidate.event === 'string'
+    && typeof candidate.title === 'string'
+    && typeof candidate.content === 'string'
+    && (candidate.level === 'info'
+      || candidate.level === 'progress'
+      || candidate.level === 'success'
+      || candidate.level === 'warning'
+      || candidate.level === 'error');
 }
 
 function findResponsePart(turn: ActiveTurn, partId: ResponsePart['id']): ResponsePart | undefined {
@@ -346,14 +378,27 @@ function reduceResponsePartAdded(state: ChatState, action: ResponsePartAddedActi
   }
 
   const activeTurn = getActiveTurn(state, action.turnId);
-  if (activeTurn === undefined || findResponsePart(activeTurn, action.part.id) !== undefined) {
+  if (activeTurn !== undefined) {
+    if (findResponsePart(activeTurn, action.part.id) !== undefined) {
+      return state;
+    }
+    const nextTurn: ActiveTurn = {
+      ...activeTurn,
+      parts: [...activeTurn.parts, cloneResponsePart(action.part)],
+    };
+    return updateActiveTurn(state, nextTurn, action.timestamp);
+  }
+
+  // Some SDK system events are emitted after the turn result. Preserve those
+  // tail events on their canonical completed turn instead of dropping them.
+  const turnIndex = state.turns.findIndex((turn) => turn.id === action.turnId);
+  const turn = state.turns[turnIndex];
+  if (turnIndex < 0 || turn === undefined || turn.parts.some((part) => part.id === action.part.id)) {
     return state;
   }
-  const nextTurn: ActiveTurn = {
-    ...activeTurn,
-    parts: [...activeTurn.parts, cloneResponsePart(action.part)],
-  };
-  return updateActiveTurn(state, nextTurn, action.timestamp);
+  const turns = [...state.turns];
+  turns[turnIndex] = { ...turn, parts: [...turn.parts, cloneResponsePart(action.part)] };
+  return { ...state, turns, modifiedAt: action.timestamp };
 }
 
 function reduceResponsePartDelta(state: ChatState, action: ResponsePartDeltaAction): ChatState {
@@ -672,6 +717,12 @@ function sameTurnValue(left: Turn, right: Turn): boolean {
     if (part.kind === 'reasoning' && other.kind === 'reasoning') {
       return part.content === other.content;
     }
+    if (part.kind === 'system_message' && other.kind === 'system_message') {
+      return part.event === other.event
+        && part.title === other.title
+        && part.content === other.content
+        && part.level === other.level;
+    }
     if (part.kind !== 'tool_call' || other.kind !== 'tool_call') {
       return false;
     }
@@ -698,6 +749,22 @@ function reduceTurnsLoaded(state: ChatState, action: TurnsLoadedAction): ChatSta
     return state;
   }
   return { ...state, turns, modifiedAt: action.timestamp };
+}
+
+function reduceChatRewound(
+  state: ChatState,
+  action: Extract<ChatAction, { readonly type: 'chat/rewound' }>,
+): ChatState {
+  const index = state.turns.findIndex((turn) => turn.id === action.targetTurnId);
+  if (index < 0 || state.activeTurn !== undefined) return state;
+  return {
+    ...state,
+    status: 'idle',
+    turns: state.turns.slice(0, index),
+    pendingApprovals: [],
+    pendingInputs: [],
+    modifiedAt: action.timestamp,
+  };
 }
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -730,6 +797,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return reduceTurnFailed(state, action);
     case 'chat/turnInterrupted':
       return reduceTurnInterrupted(state, action);
+    case 'chat/rewound':
+      return reduceChatRewound(state, action);
     case 'chat/turnsLoaded':
       return reduceTurnsLoaded(state, action);
     default:

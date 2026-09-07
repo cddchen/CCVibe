@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildStructuredInputAnswers,
+  createChatViewModelSelector,
   formatTurnDuration,
   parseMarkdownBlocks,
   selectChatViewModel,
@@ -148,7 +149,35 @@ describe('canonical chat selector', () => {
     expect(view.hostName).toBe('dev-host');
     expect(view.history.map((turn) => turn.id)).toEqual(['turn-old']);
     expect(view.activeTurn?.id).toBe('turn-active');
-    expect(view.transcript.filter((item) => item.turnId === 'turn-active')).toHaveLength(4);
+    expect(view.activeTurn?.parts).toHaveLength(3);
+  });
+
+  it('preserves completed turn projections while only the active stream changes', () => {
+    const selector = createChatViewModelSelector();
+    const first = selector({ chatUri, chatState, catalog: rootState });
+    const activeTurn = chatState.activeTurn;
+    if (activeTurn === undefined) throw new Error('fixture requires an active turn');
+    const streamed: HostChatState = {
+      ...chatState,
+      activeTurn: {
+        ...activeTurn,
+        parts: activeTurn.parts.map((part) => part.id === 'answer-a' && part.kind === 'markdown'
+          ? { ...part, content: `${part.content}\n新增流式内容` }
+          : part),
+      },
+      modifiedAt: '2026-08-29T09:04:01.000Z',
+    };
+
+    const second = selector({ chatUri, chatState: streamed, catalog: rootState });
+
+    expect(second.history).toBe(first.history);
+    expect(second.history[0]).toBe(first.history[0]);
+    expect(second.models).toBe(first.models);
+    expect(second.permissionModes).toBe(first.permissionModes);
+    expect(second.activeTurn).not.toBe(first.activeTurn);
+    expect(second.activeTurn?.parts[0]).toBe(first.activeTurn?.parts[0]);
+    expect(second.activeTurn?.parts[1]).toBe(first.activeTurn?.parts[1]);
+    expect(second.activeTurn?.parts[2]).not.toBe(first.activeTurn?.parts[2]);
   });
 
   it('keeps markdown, folds reasoning, and maps tool lifecycle into stable UI states', () => {
@@ -167,7 +196,36 @@ describe('canonical chat selector', () => {
     });
     expect(active?.parts.find((part) => part.kind === 'markdown')).toMatchObject({
       kind: 'markdown',
-      blocks: [{ kind: 'paragraph', text: '发现端口正常，下一步需要确认服务配置。' }],
+      content: '发现端口正常，下一步需要确认服务配置。',
+    });
+  });
+
+  it('projects system messages as collapsed secondary process parts', () => {
+    const activeTurn = chatState.activeTurn;
+    if (activeTurn === undefined) throw new Error('fixture requires an active turn');
+    const withSystemMessage: HostChatState = {
+      ...chatState,
+      activeTurn: {
+        ...activeTurn,
+        parts: [...activeTurn.parts, {
+          kind: 'system_message',
+          id: 'system-compact',
+          event: 'compact_boundary',
+          title: '上下文压缩',
+          content: '{"pre_tokens":4096,"post_tokens":1024}',
+          level: 'success',
+        }],
+      },
+    };
+
+    const system = selectChatViewModel({ chatUri, chatState: withSystemMessage, catalog: rootState })
+      .activeTurn?.parts.find((part) => part.kind === 'system');
+    expect(system).toMatchObject({
+      kind: 'system',
+      event: 'compact_boundary',
+      title: '上下文压缩',
+      level: 'success',
+      collapsed: true,
     });
   });
 
@@ -206,16 +264,6 @@ describe('canonical chat selector', () => {
 
     const view = selectChatViewModel({ chatUri, chatState: failedChatState, catalog: rootState });
 
-    expect(view.transcript).toEqual([
-      { key: 'turn-failed:prompt', turnId: 'turn-failed', kind: 'prompt', text: '诊断远程连接超时' },
-      {
-        key: 'turn-failed:failure',
-        turnId: 'turn-failed',
-        kind: 'failure',
-        status: 'failed',
-        message: 'API Error: upstream request failed',
-      },
-    ]);
     expect(view.history[0]).toMatchObject({
       id: 'turn-failed',
       status: 'failed',

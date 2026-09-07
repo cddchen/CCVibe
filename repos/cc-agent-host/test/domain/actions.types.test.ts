@@ -12,13 +12,14 @@ import {
 const turn = createTurnId('turn-1');
 const markdownPart = createPartId('part-markdown');
 const reasoningPart = createPartId('part-reasoning');
+const systemPart = createPartId('part-system');
 const toolPart = createPartId('part-tool');
 const toolCall = createToolCallId('tool-1');
 const approval = createApprovalId('approval-1');
 const input = createInputRequestId('input-1');
 
 describe('ResponsePartAddedAction', () => {
-  it('accepts markdown and reasoning response parts', () => {
+  it('accepts markdown, reasoning, and normalized system response parts', () => {
     const markdownAction: ResponsePartAddedAction = {
       type: 'chat/responsePartAdded',
       turnId: turn,
@@ -31,8 +32,25 @@ describe('ResponsePartAddedAction', () => {
       part: { kind: 'reasoning', id: reasoningPart, content: '' },
       timestamp: 'reasoning',
     };
+    const systemAction: ResponsePartAddedAction = {
+      type: 'chat/responsePartAdded',
+      turnId: turn,
+      part: {
+        kind: 'system_message',
+        id: systemPart,
+        event: 'compact_boundary',
+        title: '上下文压缩',
+        content: '压缩完成',
+        level: 'success',
+      },
+      timestamp: 'system',
+    };
 
-    expect([markdownAction.part.kind, reasoningAction.part.kind]).toEqual(['markdown', 'reasoning']);
+    expect([markdownAction.part.kind, reasoningAction.part.kind, systemAction.part.kind]).toEqual([
+      'markdown',
+      'reasoning',
+      'system_message',
+    ]);
   });
 
   it('rejects tool_call response parts at compile time', () => {

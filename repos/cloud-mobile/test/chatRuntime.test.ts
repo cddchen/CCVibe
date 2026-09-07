@@ -74,16 +74,18 @@ function dependencies(supervisor: RuntimeSupervisor): CloudRuntimeDependencies {
 }
 
 describe('Cloud runtime chat controller', () => {
-  it('routes send and interrupt through canonical Host actions without mutating transcript optimistically', async () => {
+  it('routes send, interrupt, and rewind through canonical Host actions without mutating transcript optimistically', async () => {
     const harness = createHarness();
     const runtime = new CloudRuntime(dependencies(harness.supervisor));
     runtime.hydrateForTest({ catalog: catalog(), chat: { resource: chatUri, state: chat() }, supervisor: harness.supervisor });
 
     await expect(runtime.actions.sendChat({ chatUri, prompt: '  继续检查  ' })).resolves.toMatchObject({ status: 'accepted', operation: 'send' });
     await expect(runtime.actions.interruptChat({ chatUri, turnId: 'turn-a' })).resolves.toMatchObject({ status: 'accepted', operation: 'interrupt' });
-    expect(harness.calls.map((call) => call.operation)).toEqual(['dispatch', 'dispatch']);
+    await expect(runtime.actions.rewindChat({ chatUri, turnId: 'turn-old', mode: 'conversation' })).resolves.toMatchObject({ status: 'accepted', operation: 'rewind' });
+    expect(harness.calls.map((call) => call.operation)).toEqual(['dispatch', 'dispatch', 'dispatch']);
     expect((harness.calls[0]?.params as { readonly action: unknown }).action).toEqual({ type: 'chat/send', prompt: '继续检查' });
     expect((harness.calls[1]?.params as { readonly action: unknown }).action).toEqual({ type: 'chat/interrupt', turnId: 'turn-a' });
+    expect((harness.calls[2]?.params as { readonly action: unknown }).action).toEqual({ type: 'chat/rewind', turnId: 'turn-old', mode: 'conversation' });
     expect(runtime.getState().sync.resources.find((entry) => entry.resource === chatUri)?.state).toEqual(chat());
   });
 

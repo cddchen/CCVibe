@@ -1,4 +1,4 @@
-import type { TurnStartedAction, TurnFailedAction } from '../domain/actions.js';
+import type { ChatRewoundAction, TurnStartedAction, TurnFailedAction } from '../domain/actions.js';
 import type { ActionOrigin } from '../protocol/types.js';
 import {
   clientActionSchema,
@@ -35,6 +35,7 @@ import type {
   ChatInteractionResolutionResult,
   ChatInteractionResolutionValue,
   ChatInteractionResolver,
+  ChatRewindEffect,
 } from './chatCommandActor.js';
 import { CommandDeduper, type CommandRejection } from './commandDeduper.js';
 import type { SequencerByKey } from './sequencer.js';
@@ -64,11 +65,15 @@ export interface ClaudeChatActorDeps {
   readonly interactionResolver?: ChatInteractionResolver;
   /** Optional root-catalog create effect; command dedupe remains actor-owned. */
   readonly createChat?: CatalogChatCreateEffect;
+  readonly rewindChat?: ChatRewindEffect;
 }
 
 const REJECTION_MESSAGES: Readonly<Record<ClaudeChatActorRejectionCode, string>> = Object.freeze({
   CHAT_BUSY: 'chat already has an active turn',
   TURN_NOT_ACTIVE: 'turn is not active',
+  TURN_NOT_FOUND: 'turn was not found',
+  REWIND_UNAVAILABLE: 'chat rewind is not configured',
+  REWIND_FAILED: 'chat rewind failed',
   RESOURCE_NOT_FOUND: 'chat resource was not found',
   INVALID_ACTION: 'invalid chat command',
   INTERACTION_NOT_CONFIGURED: 'chat interaction resolution is not configured',
@@ -122,6 +127,7 @@ export class ClaudeChatActor implements ChatCommandActor, CatalogChatCreator {
   private readonly allocateTurnId: () => TurnId;
   private readonly interactionResolver: ChatInteractionResolver | undefined;
   private readonly createChatEffect: CatalogChatCreateEffect | undefined;
+  private readonly rewindChatEffect: ChatRewindEffect | undefined;
 
   public constructor(deps: ClaudeChatActorDeps) {
     if (typeof deps !== 'object' || deps === null) {
@@ -154,6 +160,7 @@ export class ClaudeChatActor implements ChatCommandActor, CatalogChatCreator {
     });
     this.interactionResolver = deps.interactionResolver;
     this.createChatEffect = deps.createChat;
+    this.rewindChatEffect = deps.rewindChat;
   }
 
   public dispatch(
@@ -180,9 +187,18 @@ export class ClaudeChatActor implements ChatCommandActor, CatalogChatCreator {
       { clientId: parsedClientId, commandId: parsedCommandId },
       () => {
         const parsedAction = parseClientAction(action);
-        return parsedAction.type === 'chat/send'
-          ? this.sequencer.enqueue(parsedChannel, () => this.dispatchSend(origin, parsedChannel, parsedAction.prompt))
-          : this.dispatchInterrupt(parsedChannel, parsedAction.turnId);
+        if (parsedAction.type === 'chat/send') {
+          return this.sequencer.enqueue(parsedChannel, () => this.dispatchSend(origin, parsedChannel, parsedAction.prompt));
+        }
+        if (parsedAction.type === 'chat/interrupt') {
+          return this.dispatchInterrupt(parsedChannel, parsedAction.turnId);
+        }
+        return this.sequencer.enqueue(parsedChannel, () => this.dispatchRewind(
+          origin,
+          parsedChannel,
+          parsedAction.turnId,
+          parsedAction.mode,
+        ));
       },
       mapClaudeChatActorRejection,
     );
@@ -427,6 +443,35 @@ export class ClaudeChatActor implements ChatCommandActor, CatalogChatCreator {
     // resolves. This watermark therefore includes that action without the actor
     // duplicating it.
     return { acceptedAtSeq: this.hostStateManager.serverSeq };
+  }
+
+  private async dispatchRewind(
+    origin: ActionOrigin,
+    channel: ChatUri,
+    targetTurnId: TurnId,
+    mode: 'conversation' | 'conversation_and_files',
+  ): Promise<ClaudeChatActorAcceptedValue> {
+    const state = this.hostStateManager.getState(channel);
+    if (state === undefined) throw new ClaudeChatActorError('RESOURCE_NOT_FOUND');
+    if (state.activeTurn !== undefined) throw new ClaudeChatActorError('CHAT_BUSY');
+    if (!state.turns.some((turn) => turn.id === targetTurnId)) {
+      throw new ClaudeChatActorError('TURN_NOT_FOUND');
+    }
+    if (this.rewindChatEffect === undefined) throw new ClaudeChatActorError('REWIND_UNAVAILABLE');
+
+    try {
+      await this.rewindChatEffect(channel, targetTurnId, mode);
+    } catch {
+      throw new ClaudeChatActorError('REWIND_FAILED');
+    }
+    const action: ChatRewoundAction = {
+      type: 'chat/rewound',
+      targetTurnId,
+      timestamp: this.requireActionTimestamp(),
+    };
+    const envelope = this.hostStateManager.dispatch(channel, action, origin);
+    if (envelope === undefined) throw new ClaudeChatActorError('REWIND_FAILED');
+    return { acceptedAtSeq: envelope.serverSeq };
   }
 
   private failStartedTurn(channel: ChatUri, turnId: TurnId, origin: ActionOrigin): void {

@@ -55,6 +55,7 @@ describe('buildClaudeOptions session projection', () => {
       includePartialMessages: true,
       forwardSubagentText: true,
       enableFileCheckpointing: true,
+      extraArgs: { 'replay-user-messages': null },
       allowDangerouslySkipPermissions: true,
       disallowedTools: ['WebSearch'],
     });

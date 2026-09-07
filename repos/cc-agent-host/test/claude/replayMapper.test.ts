@@ -130,6 +130,24 @@ describe('ClaudeReplayMapper', () => {
     });
   });
 
+  it('restores recorded system messages inside their owning turn', () => {
+    const turns = mapClaudeHistory([
+      user('system-user', 'Run /compact', 't1'),
+      session('system', 'system-output', {
+        subtype: 'local_command_output',
+        content: 'Not enough messages to compact.',
+      }, 't2'),
+    ]);
+
+    expect(turns[0]?.parts).toContainEqual(expect.objectContaining({
+      kind: 'system_message',
+      event: 'local_command_output',
+      title: '命令输出',
+      content: 'Not enough messages to compact.',
+      level: 'info',
+    }));
+  });
+
   it('maps promptless assistant content before the first user prompt', () => {
     const turns = new ClaudeReplayMapper({ missingTimestamp: 'fallback' }).map([
       assistant('assistant-first', [{ type: 'text', text: 'Already here' }]),
@@ -233,7 +251,7 @@ describe('ClaudeReplayMapper', () => {
 
     expect(turns).toHaveLength(1);
     expect(turns[0]?.prompt).toBe('real prompt');
-    expect(diagnostics).toContainEqual({ code: 'unsupported_message', type: 'system' });
+    expect(diagnostics).not.toContainEqual({ code: 'unsupported_message', type: 'system' });
     expect(diagnostics).toContainEqual({ code: 'unsupported_message', type: 'future_message' });
     expect(diagnostics).toContainEqual({ code: 'unmatched_tool_result', type: 'tool_result' });
   });
@@ -353,4 +371,3 @@ describe('ClaudeReplayMapper', () => {
     expect(replay?.completedAt).toBe(live.completedAt);
   });
 });
-

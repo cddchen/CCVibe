@@ -229,4 +229,27 @@ describe('ClaudeChatActor', () => {
       expect.objectContaining({ id: send.value.turnId, status: 'interrupted' }),
     ]);
   });
+
+  it('runs the rewind effect before committing the canonical truncation action', async () => {
+    const { host, registry } = makeHarness();
+    const target = createTurnId('rewind-target');
+    host.dispatch(chat, { type: 'chat/turnStarted', turnId: target, prompt: 'retry me', timestamp: 't1' });
+    host.dispatch(chat, { type: 'chat/turnCompleted', turnId: target, timestamp: 't2' });
+    const calls: unknown[] = [];
+    const actor = new ClaudeChatActor({
+      hostStateManager: host,
+      registry,
+      sequencer: new SequencerByKey<ChatUri>(),
+      commandDeduper: new CommandDeduper({ capacity: 8 }),
+      nowAction: () => 'rewound-at',
+      allocateTurnId: () => createTurnId('unused'),
+      rewindChat: (chatUri, turnId, mode) => { calls.push({ chatUri, turnId, mode }); },
+    });
+
+    await expect(actor.dispatch(clientA, 3, createCommandId('rewind'), chat, {
+      type: 'chat/rewind', turnId: target, mode: 'conversation_and_files',
+    })).resolves.toEqual({ status: 'accepted', value: { acceptedAtSeq: 3 } });
+    expect(calls).toEqual([{ chatUri: chat, turnId: target, mode: 'conversation_and_files' }]);
+    expect(host.getState(chat)?.turns).toEqual([]);
+  });
 });

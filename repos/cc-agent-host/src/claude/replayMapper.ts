@@ -7,6 +7,7 @@ import { createPartId, createToolCallId, createTurnId } from '../domain/ids.js';
 import type { ResponsePart, ToolCall, Turn } from '../domain/chat.js';
 import type { HostStateManager } from '../host/hostStateManager.js';
 import type { ChatActionEnvelope } from '../protocol/types.js';
+import { projectRecordedSystemMessage } from './systemMessageProjection.js';
 
 const EMPTY_TURNS: readonly Turn[] = Object.freeze([]);
 const INCOMPLETE_TRANSCRIPT = 'incomplete transcript';
@@ -147,7 +148,7 @@ export class ClaudeReplayMapper {
             break;
           }
           case 'system':
-            this.emitDiagnostic('unsupported_message', 'system');
+            currentTurn = this.mapSystemMessage(record, index, timestamp, currentTurn);
             break;
           default:
             this.emitDiagnostic('unsupported_message', type ?? 'unknown');
@@ -320,6 +321,32 @@ export class ClaudeReplayMapper {
     }
 
     return { currentTurn: nextTurn };
+  }
+
+  private mapSystemMessage(
+    record: SafeRecord | undefined,
+    index: number,
+    timestamp: string,
+    currentTurn: MutableTurn | undefined,
+  ): MutableTurn | undefined {
+    const projected = projectRecordedSystemMessage(readProperty(record, 'message'));
+    if (projected === undefined) {
+      return currentTurn;
+    }
+    if (currentTurn === undefined) {
+      // Initialization and detached housekeeping do not fabricate an empty
+      // user turn. Live tail events are attached when a canonical owner exists.
+      this.emitDiagnostic('unmatched_system_message', projected.event);
+      return undefined;
+    }
+    currentTurn.parts.push(Object.freeze({
+      kind: 'system_message' as const,
+      id: makePartId(currentTurn.id, recordIdentity(record, index), 0, 'system_message', projected.event),
+      ...projected,
+    }));
+    currentTurn.lastAt = timestamp;
+    currentTurn.finalized = false;
+    return currentTurn;
   }
 
   private appendMarkdown(

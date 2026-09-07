@@ -74,6 +74,9 @@ export function buildClaudeOptions(input: BuildClaudeOptionsInput): Options {
     includePartialMessages: true,
     forwardSubagentText: true,
     enableFileCheckpointing: true,
+    // Required by the SDK checkpoint contract so user-message checkpoint UUIDs
+    // are surfaced consistently in non-interactive sessions.
+    extraArgs: { 'replay-user-messages': null },
     allowDangerouslySkipPermissions: true,
     permissionMode: input.permissionMode,
     canUseTool: input.canUseTool,

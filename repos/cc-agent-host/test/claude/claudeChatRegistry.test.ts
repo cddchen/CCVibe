@@ -50,6 +50,7 @@ class FakeRuntime implements ClaudeChatRuntime {
   public closeCalls = 0;
   public readonly sends: Array<{ readonly turnId: TurnId; readonly text: string }> = [];
   public readonly interrupts: TurnId[] = [];
+  public readonly rewindIds: string[] = [];
   public readonly appliedConfigs: ClaudeRuntimeConfig[] = [];
   public readonly startGate = deferred<void>();
   public startError: unknown;
@@ -105,6 +106,11 @@ class FakeRuntime implements ClaudeChatRuntime {
       : Promise.reject(this.applyError);
   }
 
+  public rewindFiles(userMessageId: string): Promise<{ canRewind: boolean; filesChanged: string[] }> {
+    this.rewindIds.push(userMessageId);
+    return Promise.resolve({ canRewind: true, filesChanged: ['src/app.ts'] });
+  }
+
   public close(): Promise<void> {
     this.closeCalls += 1;
     this.state = 'closed';
@@ -126,6 +132,9 @@ interface FactoryHarness {
 function makeRegistry(options: {
   readonly factory?: (input: ClaudeChatRuntimeFactoryInput, index: number) => FakeRuntime | Promise<FakeRuntime>;
   readonly onSignal?: (chatUri: ChatUri, signal: ClaudeRuntimeSignal) => void | Promise<void>;
+  readonly onBackingReset?: (backing: import('../../src/claude/chatBacking.js').ChatBacking) => void | Promise<void>;
+  readonly onBackingReplaced?: (backing: import('../../src/claude/chatBacking.js').ChatBacking) => void | Promise<void>;
+  readonly deleteSdkSession?: (sdkSessionId: string, cwd: string) => void | Promise<void>;
 } = {}): FactoryHarness {
   const calls: ClaudeChatRuntimeFactoryInput[] = [];
   const runtimes: FakeRuntime[] = [];
@@ -146,6 +155,9 @@ function makeRegistry(options: {
       return runtime;
     },
     ...(options.onSignal === undefined ? {} : { onSignal: options.onSignal }),
+    ...(options.onBackingReset === undefined ? {} : { onBackingReset: options.onBackingReset }),
+    ...(options.onBackingReplaced === undefined ? {} : { onBackingReplaced: options.onBackingReplaced }),
+    ...(options.deleteSdkSession === undefined ? {} : { deleteSdkSession: options.deleteSdkSession }),
   });
   return { registry, calls, runtimes };
 }
@@ -380,6 +392,52 @@ describe('ClaudeChatRegistry', () => {
     expect(events.indexOf('close-1')).toBeLessThan(events.indexOf('start-2'));
     expect(runtimes[0]?.closeCalls).toBe(1);
     expect(runtimes[1]?.startCalls).toBe(1);
+  });
+
+  it('rewinds SDK files at the user checkpoint and switches to a durable truncated fork', async () => {
+    const replaced: string[] = [];
+    const { registry, calls, runtimes } = makeRegistry({
+      factory: () => {
+        const runtime = new FakeRuntime();
+        runtime.startGate.resolve();
+        return runtime;
+      },
+      onBackingReplaced: (backing) => { replaced.push(backing.sdkSessionId); },
+    });
+    create(registry, chatA, 'sdk-a');
+    await registry.materialize(chatA);
+
+    await expect(registry.rewindFiles(chatA, 'user-message-2')).resolves.toMatchObject({ canRewind: true });
+    await registry.replaceSession(chatA, 'sdk-fork');
+
+    expect(runtimes[0]?.rewindIds).toEqual(['user-message-2']);
+    expect(replaced).toEqual(['sdk-fork']);
+    expect(registry.snapshot(chatA)?.sdkSessionId).toBe('sdk-fork');
+    await registry.materialize(chatA);
+    expect(calls[1]?.session).toEqual({ kind: 'resume', sessionId: 'sdk-fork' });
+  });
+
+  it('resets the first-prompt rewind to a persisted provisional backing', async () => {
+    const events: unknown[] = [];
+    const { registry } = makeRegistry({
+      factory: () => {
+        const runtime = new FakeRuntime();
+        runtime.startGate.resolve();
+        return runtime;
+      },
+      deleteSdkSession: (sdkSessionId, cwd) => { events.push(['delete', sdkSessionId, cwd]); },
+      onBackingReset: (backing) => { events.push(['persist', backing.lifecycle]); },
+    });
+    create(registry, chatA, 'sdk-a');
+    await registry.materialize(chatA);
+
+    await registry.resetSession(chatA);
+
+    expect(events).toEqual([
+      ['delete', 'sdk-a', '/workspace/project'],
+      ['persist', 'provisional'],
+    ]);
+    expect(registry.snapshot(chatA)?.lifecycle).toBe('provisional');
   });
 
   it('does not let a stale terminal signal delete a newer generation', async () => {

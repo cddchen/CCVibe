@@ -24,6 +24,7 @@ export const CHAT_ACTION_TYPES = {
   turnCompleted: 'chat/turnCompleted',
   turnFailed: 'chat/turnFailed',
   turnInterrupted: 'chat/turnInterrupted',
+  rewound: 'chat/rewound',
   turnsLoaded: 'chat/turnsLoaded',
 } as const;
 
@@ -41,7 +42,7 @@ export interface TurnStartedAction extends ChatActionBase<'chat/turnStarted'> {
 
 export interface ResponsePartAddedAction extends ChatActionBase<'chat/responsePartAdded'> {
   readonly turnId: TurnId;
-  readonly part: Extract<ResponsePart, { readonly kind: 'markdown' | 'reasoning' }>;
+  readonly part: Extract<ResponsePart, { readonly kind: 'markdown' | 'reasoning' | 'system_message' }>;
 }
 
 export interface ResponsePartDeltaAction extends ChatActionBase<'chat/responsePartDelta'> {
@@ -147,6 +148,11 @@ export interface TurnInterruptedAction extends ChatActionBase<'chat/turnInterrup
   readonly turnId: TurnId;
 }
 
+/** Remove the selected user turn and every turn after it. */
+export interface ChatRewoundAction extends ChatActionBase<'chat/rewound'> {
+  readonly targetTurnId: TurnId;
+}
+
 export interface TurnsLoadedAction extends ChatActionBase<'chat/turnsLoaded'> {
   readonly turns: readonly Turn[];
 }
@@ -166,6 +172,7 @@ export type ChatAction =
   | TurnCompletedAction
   | TurnFailedAction
   | TurnInterruptedAction
+  | ChatRewoundAction
   | TurnsLoadedAction;
 
 export type ActionOf<TType extends ChatActionType> = Extract<ChatAction, { type: TType }>;

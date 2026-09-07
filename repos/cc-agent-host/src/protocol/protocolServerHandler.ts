@@ -877,7 +877,9 @@ export class ProtocolServerHandler {
     const clientId = this.requireCurrentClient(context);
     const requiredAction: AuthorizationAction = params.action.type === 'chat/send'
       ? 'send'
-      : 'interrupt';
+      : params.action.type === 'chat/interrupt'
+        ? 'interrupt'
+        : 'rewind';
     this.requireAuthorized(context, requiredAction, params.channel);
     this.requireSubscribedChannel(context, params.channel);
 

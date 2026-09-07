@@ -2,8 +2,12 @@ import type { UUID } from 'node:crypto';
 
 import type {
   SDKAssistantMessage,
+  SDKCompactBoundaryMessage,
+  SDKInformationalMessage,
+  SDKLocalCommandOutputMessage,
   SDKMessage,
   SDKPartialAssistantMessage,
+  SDKSystemMessage,
   SDKUserMessage,
   SDKUserMessageReplay,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -290,6 +294,88 @@ describe('ClaudeLiveMapper', () => {
     });
     expect(result[0]).not.toHaveProperty('result');
     expect(mapper.mapMessage(userMessage([{ type: 'tool_result', tool_use_id: 'raw-error-tool', is_error: true, content: 'duplicate' }]), TURN_ID, 'duplicate')).toEqual([]);
+  });
+
+  it('projects SDK system events as collapsed-message domain parts', () => {
+    const mapper = new ClaudeLiveMapper({ generation: 6 });
+    const compact = {
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: { trigger: 'manual', pre_tokens: 4_096, post_tokens: 1_024, duration_ms: 250 },
+      uuid: '00000000-0000-4000-8000-000000000021',
+      session_id: SESSION_ID,
+    } satisfies SDKCompactBoundaryMessage;
+    const output = {
+      type: 'system',
+      subtype: 'local_command_output',
+      content: 'Not enough messages to compact.',
+      uuid: '00000000-0000-4000-8000-000000000022',
+      session_id: SESSION_ID,
+    } satisfies SDKLocalCommandOutputMessage;
+    const warning = {
+      type: 'system',
+      subtype: 'informational',
+      content: 'A hook prevented continuation.',
+      level: 'warning',
+      prevent_continuation: true,
+      uuid: '00000000-0000-4000-8000-000000000023',
+      session_id: SESSION_ID,
+    } satisfies SDKInformationalMessage;
+
+    const actions = mapSequence(mapper, [compact, output, warning]);
+
+    expect(actions).toHaveLength(3);
+    expect(actions[0]).toMatchObject({
+      type: 'chat/responsePartAdded',
+      part: {
+        kind: 'system_message',
+        event: 'compact_boundary',
+        title: '上下文压缩',
+        level: 'success',
+      },
+    });
+    expect(actions[1]).toMatchObject({
+      part: { kind: 'system_message', title: '命令输出', content: 'Not enough messages to compact.' },
+    });
+    expect(actions[2]).toMatchObject({
+      part: { kind: 'system_message', title: '系统提示', level: 'warning' },
+    });
+    expect(new Set(actions.map((action) => action.type))).toEqual(new Set(['chat/responsePartAdded']));
+  });
+
+  it('maps the SDK init message without exposing its session identity', () => {
+    const mapper = new ClaudeLiveMapper({ generation: 7 });
+    const init = {
+      type: 'system',
+      subtype: 'init',
+      apiKeySource: 'user',
+      claude_code_version: '2.1.220',
+      cwd: '/tmp/project',
+      tools: ['Read'],
+      mcp_servers: [{ name: 'local', status: 'connected' }],
+      model: 'claude-sonnet',
+      permissionMode: 'default',
+      slash_commands: ['/compact'],
+      output_style: 'default',
+      skills: ['review'],
+      plugins: [],
+      uuid: '00000000-0000-4000-8000-000000000024',
+      session_id: SESSION_ID,
+    } satisfies SDKSystemMessage;
+
+    const actions = mapper.mapMessage(init, TURN_ID, 'init-time');
+
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      type: 'chat/responsePartAdded',
+      part: {
+        kind: 'system_message',
+        event: 'init',
+        title: '运行环境初始化',
+        content: expect.stringContaining('claude-sonnet'),
+      },
+    });
+    expect(JSON.stringify(actions)).not.toContain(SESSION_ID);
   });
 
   it('uses different deterministic ids when a block index is reused by another message', () => {

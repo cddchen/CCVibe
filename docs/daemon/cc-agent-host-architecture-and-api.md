@@ -98,6 +98,12 @@ dispatchAction(chat/send)
 
 `dispatchAction` 的成功仅表示命令已被 host 接受；模型完成由之后的 `chat/turnCompleted`、`chat/turnFailed` 或 `chat/turnInterrupted` 通知表示。
 
+### 3.3 回退到一条用户消息之前
+
+`chat/rewind` 只能在会话空闲时执行。Host 从 Claude transcript 解析两个不同的 SDK 锚点：目标用户消息 UUID 用于 `Query.rewindFiles()`，目标之前最近一条顶层 assistant UUID 用于 `forkSession({upToMessageId})`。Host 先把 product backing 原子切换到截断后的新 SDK transcript，再提交 `chat/rewound`，从权威 `ChatState` 删除目标 turn 及其后的内容；所有订阅客户端据此收敛，Host 重启后也只会加载新分支。若目标是首条消息，Host 关闭 Query、删除 SDK transcript，并把原产品 chat backing 恢复为 provisional。两条路径都保留同一个产品 `chatUri`。
+
+`conversation_and_files` 依赖 `enableFileCheckpointing`，只保证恢复 SDK checkpoint 覆盖的文件编辑；shell、外部服务、副作用以及 SDK 明确跳过的链接安全路径不在“文件变更”保证内。SDK 回退完成前不会广播 `chat/rewound`，失败返回 `REWIND_FAILED`，客户端不得乐观删除历史。
+
 ## 4. 资源、状态与消息信封
 
 ### 4.1 资源 URI
@@ -150,8 +156,8 @@ URI segment 为不透明 ID，不能含空白、`/`、`?`、`#`、反斜杠、`.
 
 `origin` 仅在由客户端命令引起的动作上存在。`action.type` 当前包括：
 
-- turn：`chat/turnStarted`、`chat/turnCompleted`、`chat/turnFailed`、`chat/turnInterrupted`、`chat/turnsLoaded`
-- 文本/推理：`chat/responsePartAdded`、`chat/responsePartDelta`
+- turn：`chat/turnStarted`、`chat/turnCompleted`、`chat/turnFailed`、`chat/turnInterrupted`、`chat/turnsLoaded`、`chat/rewound`
+- 文本/推理/系统次消息：`chat/responsePartAdded`、`chat/responsePartDelta`。SDK system event 先归一化为 `system_message` part，原始 SDK 类型不进入协议
 - 工具：`chat/toolCallStarted`、`chat/toolCallInputDelta`、`chat/toolCallReady`、`chat/toolCallCompleted`
 - 交互：`chat/approvalRequested`、`chat/approvalResolved`、`chat/inputRequested`、`chat/inputResolved`
 
@@ -236,8 +242,9 @@ Bearer 只允许 `Authorization: Bearer <token>`；URL 中 `token`、`access_tok
 | --- | --- | --- |
 | `chat/send` | `prompt`，最大 256 KiB | `acceptedAtSeq`、`turnId` |
 | `chat/interrupt` | `turnId` | `acceptedAtSeq` |
+| `chat/rewind` | `turnId`、`mode`（`conversation` / `conversation_and_files`） | `acceptedAtSeq` |
 
-成功格式：`{ "receipt": { "status":"accepted", "value": { ... } } }`。拒绝格式为 `{ "receipt": { "status":"rejected", "code":"CHAT_BUSY", "message":"..." } }`；常见 code：`CHAT_BUSY`、`TURN_NOT_ACTIVE`、`RESOURCE_NOT_FOUND`、`INVALID_ACTION`、`INTERNAL_ERROR`。
+成功格式：`{ "receipt": { "status":"accepted", "value": { ... } } }`。拒绝格式为 `{ "receipt": { "status":"rejected", "code":"CHAT_BUSY", "message":"..." } }`；常见 code：`CHAT_BUSY`、`TURN_NOT_ACTIVE`、`TURN_NOT_FOUND`、`REWIND_UNAVAILABLE`、`REWIND_FAILED`、`RESOURCE_NOT_FOUND`、`INVALID_ACTION`、`INTERNAL_ERROR`。
 
 #### `chat/resolveApproval`
 
@@ -369,4 +376,3 @@ SQLite schema 当前版本为 3，含三张表：
 4. 断线后以相同 `clientId` 调用 `reconnect`；对 replay 追加，对 snapshot 覆盖。
 5. 收到 `approvalRequested` / `inputRequested` 时显示 UI，并使用返回的 ID 仅决议一次；可能得到 `already_resolved`。
 6. 收到 `client/replaced` 或 socket `4001` 时停止旧连接的所有写入与 UI 状态推进。
-

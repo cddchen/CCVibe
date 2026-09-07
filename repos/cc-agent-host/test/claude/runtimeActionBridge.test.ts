@@ -131,7 +131,33 @@ describe('ClaudeRuntimeActionBridge', () => {
     });
   });
 
-  it('ignores stale generations and tail or unmatched messages without consuming Host sequences', () => {
+  it('commits system tail events to the completed turn', () => {
+    const host = makeHost();
+    const bridge = new ClaudeRuntimeActionBridge({ hostStateManager: host, nowAction: () => 'action-time' });
+    bridge.handle(chat, {
+      type: 'turn/result',
+      generation: 1,
+      turnId: turn,
+      outcome: { status: 'completed', resultSubtype: 'success' },
+    });
+
+    const envelopes = bridge.handle(chat, runtimeMessage({
+      type: 'system',
+      subtype: 'local_command_output',
+      content: 'Command completed.',
+      uuid: '00000000-0000-4000-8000-000000000031',
+      session_id: 'sdk-session',
+    }, { phase: 'tail' }));
+
+    expect(envelopes).toHaveLength(1);
+    expect(host.getState(chat)?.turns[0]?.parts).toContainEqual(expect.objectContaining({
+      kind: 'system_message',
+      event: 'local_command_output',
+      content: 'Command completed.',
+    }));
+  });
+
+  it('projects runtime init and ignores stale generations and non-system tail or unmatched messages', () => {
     const host = makeHost();
     const bridge = new ClaudeRuntimeActionBridge({ hostStateManager: host, nowAction: () => 'unused' });
     const startSeq = host.serverSeq;
@@ -156,8 +182,15 @@ describe('ClaudeRuntimeActionBridge', () => {
       { generation: 2, phase: 'unmatched', omitTurnId: true },
     ));
 
-    expect(host.serverSeq).toBe(startSeq);
-    expect(host.getState(chat)?.activeTurn?.parts).toEqual([]);
+    expect(host.serverSeq).toBe(startSeq + 1);
+    expect(host.getState(chat)?.activeTurn?.parts).toEqual([
+      expect.objectContaining({
+        kind: 'system_message',
+        event: 'init',
+        title: '运行环境初始化',
+        content: expect.stringContaining('claude-sonnet'),
+      }),
+    ]);
   });
 
   it('maps a terminal signal once and uses a canonical safe crash error', () => {

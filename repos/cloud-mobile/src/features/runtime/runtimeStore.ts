@@ -82,7 +82,7 @@ export interface RuntimeOperationError extends HomeSelectorError {
 }
 
 export interface ChatOperationError {
-  readonly operation: 'send' | 'interrupt' | 'approval' | 'input' | 'configure';
+  readonly operation: 'send' | 'interrupt' | 'rewind' | 'approval' | 'input' | 'configure';
   readonly code: string;
   readonly chatUri: ChatUri;
 }
@@ -143,6 +143,12 @@ export interface SendChatInput {
 export interface InterruptChatInput {
   readonly chatUri: ChatUri;
   readonly turnId: string;
+}
+
+export interface RewindChatInput {
+  readonly chatUri: ChatUri;
+  readonly turnId: string;
+  readonly mode: 'conversation' | 'conversation_and_files';
 }
 
 export type ResolveApprovalInput = Omit<HostResolveApprovalParams, 'clientSeq' | 'commandId'>;
@@ -252,6 +258,7 @@ export class CloudRuntime {
       supportedCommands: (chatUri: ChatUri) => this.supportedCommands(chatUri),
       configureChat: (input: HostConfigureChatParams) => this.configureChat(input),
       interruptChat: (input: InterruptChatInput) => this.interruptChat(input),
+      rewindChat: (input: RewindChatInput) => this.rewindChat(input),
       allowApproval: (input: ResolveApprovalInput) => this.resolveApproval({ ...input, decision: 'allow' }),
       denyApproval: (input: ResolveApprovalInput) => this.resolveApproval({ ...input, decision: 'deny' }),
       resolveInput: (input: ResolveInputActionInput) => this.resolveInput(input),
@@ -865,6 +872,27 @@ export class CloudRuntime {
     }
   }
 
+  private async rewindChat(input: RewindChatInput): Promise<ChatActionResult> {
+    const supervisor = this.requireConnectedSupervisor();
+    if (supervisor === undefined) return this.failChatOperation('rewind', input.chatUri, 'NOT_CONNECTED');
+    try {
+      const command = buildChatDispatchCommand({
+        channel: input.chatUri,
+        action: { type: 'chat/rewind', turnId: input.turnId, mode: input.mode },
+        clientSeq: this.nextClientSeq(),
+        commandId: this.nextCommandId('rewind'),
+      });
+      const result = await supervisor.dispatchAction(command.params);
+      if (result.receipt.status === 'rejected') {
+        return this.failChatOperation('rewind', input.chatUri, result.receipt.code);
+      }
+      this.setState({ chatOperationError: undefined });
+      return { status: 'accepted', operation: 'rewind', chatUri: input.chatUri };
+    } catch (error) {
+      return this.failChatOperation('rewind', input.chatUri, errorCode(error));
+    }
+  }
+
   private async resolveApproval(input: ResolveApprovalInput): Promise<ChatActionResult> {
     const supervisor = this.requireConnectedSupervisor();
     if (supervisor === undefined) return this.failChatOperation('approval', input.channel, 'NOT_CONNECTED');
@@ -997,7 +1025,7 @@ export class CloudRuntime {
         clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
         clientInfo: {
           name: 'Cloud',
-          version: '0.6.0',
+          version: '0.7.0',
           platform: this.dependencies.platform ?? 'unknown',
         },
         store: syncStore,
@@ -1203,6 +1231,7 @@ export interface CloudRuntimeActions {
   supportedCommands(chatUri: ChatUri): Promise<readonly HostSlashCommand[]>;
   configureChat(input: HostConfigureChatParams): Promise<ChatActionResult>;
   interruptChat(input: InterruptChatInput): Promise<ChatActionResult>;
+  rewindChat(input: RewindChatInput): Promise<ChatActionResult>;
   allowApproval(input: ResolveApprovalInput): Promise<ChatActionResult>;
   denyApproval(input: ResolveApprovalInput): Promise<ChatActionResult>;
   resolveInput(input: ResolveInputActionInput): Promise<ChatActionResult>;

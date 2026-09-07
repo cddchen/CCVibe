@@ -23,6 +23,7 @@ import {
   type ToolCallId,
   type TurnId,
 } from '../domain/ids.js';
+import { projectClaudeSystemMessage } from './systemMessageProjection.js';
 
 export interface ClaudeLiveMapperDiagnostic {
   readonly code: string;
@@ -42,7 +43,7 @@ export interface ClaudeLiveMapperOptions {
   readonly diagnostic?: ClaudeLiveMapperDiagnosticCallback;
 }
 
-type BlockKind = 'markdown' | 'reasoning' | 'tool_call';
+type BlockKind = 'markdown' | 'reasoning' | 'system_message' | 'tool_call';
 type BlockState = 'active' | 'stopped' | 'ready';
 
 interface ActiveBlock {
@@ -118,6 +119,8 @@ export class ClaudeLiveMapper {
         return this.mapUserMessage(message, timestamp);
       case 'assistant':
         return this.mapCanonicalAssistantMessage(message.parent_tool_use_id);
+      case 'system':
+        return this.mapSystemMessage(message, turnId, timestamp);
       default:
         this.emitDiagnostic('unsupported_message', message.type);
         return EMPTY_ACTIONS;
@@ -435,6 +438,29 @@ export class ClaudeLiveMapper {
     // matching partial frame it is still safer to defer/drop than to duplicate
     // content when both forms are delivered by the SDK.
     return EMPTY_ACTIONS;
+  }
+
+  private mapSystemMessage(
+    message: Extract<SDKMessage, { readonly type: 'system' }>,
+    turnId: TurnId,
+    timestamp: string,
+  ): readonly ChatAction[] {
+    const projected = projectClaudeSystemMessage(message);
+    if (projected === undefined) {
+      return EMPTY_ACTIONS;
+    }
+    const partId = this.createPartId(turnId, message.uuid, 0, 'system_message', projected.event);
+    const action: ResponsePartAddedAction = Object.freeze({
+      type: 'chat/responsePartAdded',
+      turnId,
+      part: Object.freeze({
+        kind: 'system_message' as const,
+        id: partId,
+        ...projected,
+      }),
+      timestamp,
+    });
+    return freezeActions([action]);
   }
 
   private createPartId(

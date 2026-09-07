@@ -56,6 +56,7 @@ import {
 import { ClaudeQueryRuntime } from './claudeQueryRuntime.js';
 import { buildClaudeOptions } from './options.js';
 import { hydrateClaudeHistory } from './replayMapper.js';
+import { resolveClaudeRewindPoint, resolveClaudeRewindPointAtTurn } from './rewindPoint.js';
 import { ClaudeRuntimeActionBridge } from './runtimeActionBridge.js';
 import type { ClaudeRuntimeConfig } from './runtimeConfig.js';
 import type {
@@ -165,13 +166,15 @@ export interface ClaudeAgentHostSdkService {
   startup(...args: never[]): unknown;
   listSessions?(...args: never[]): unknown;
   getSessionMessages(...args: never[]): unknown;
+  deleteSession?(...args: never[]): unknown;
+  forkSession?(...args: never[]): unknown;
   /** Optional SDK Query catalog probe; absent in lightweight test adapters. */
   listSupportedModels?(...args: never[]): unknown;
 }
 
 type InternalClaudeAgentHostSdkService = Pick<
   ClaudeAgentSdkService,
-  'startup' | 'listSessions' | 'getSessionMessages' | 'listSupportedModels'
+  'startup' | 'listSessions' | 'getSessionMessages' | 'listSupportedModels' | 'deleteSession' | 'forkSession'
 >;
 
 /** SDK-free registry view exposed by a composed host. */
@@ -187,6 +190,10 @@ export type ClaudeAgentHostChatRegistry = Pick<
   | 'discardProvisional'
   | 'send'
   | 'interrupt'
+  | 'sdkUserMessageId'
+  | 'rewindFiles'
+  | 'resetSession'
+  | 'replaceSession'
   | 'setRuntimeConfig'
   | 'rebind'
   | 'release'
@@ -203,6 +210,7 @@ export type ClaudeAgentHostChatRegistry = Pick<
 export interface ClaudeAgentHostRuntimeSession {
   readonly kind: 'new' | 'resume';
   readonly sessionId: string;
+  readonly resumeSessionAt?: string;
 }
 
 /**
@@ -218,6 +226,7 @@ export interface ClaudeAgentHostRuntime {
     options?: Readonly<{ readonly steering?: boolean }>,
   ): ClaudeTurnHandle;
   interrupt(turnId: TurnId): Promise<unknown | undefined>;
+  rewindFiles?(userMessageId: string): Promise<unknown>;
   applyRuntimeConfig(config: ClaudeRuntimeConfig): Promise<void>;
   close(): Promise<void>;
 }
@@ -258,6 +267,7 @@ export interface ClaudeAgentHostOverlayRepository {
   updateChatBacking?(
     chatUri: string,
     patch: Readonly<{
+      readonly sdkSessionId?: string;
       readonly lifecycle?: 'provisional' | 'materialized';
       readonly model?: string;
       readonly effort?: string;
@@ -456,6 +466,66 @@ export async function createClaudeAgentHost(
         await overlayRepository.saveChatBacking(writeInput);
       });
     };
+  const onBackingReset = overlayRepository === undefined
+    ? undefined
+    : async (backing: ChatBacking): Promise<void> => {
+      if (!persistedChatUris.has(backing.chatUri)) return;
+      await enqueuePersistence(async () => {
+        if (!persistedChatUris.has(backing.chatUri)) return;
+        if (overlayRepository.updateChatBacking !== undefined) {
+          const persisted = await overlayRepository.updateChatBacking(backing.chatUri, {
+            lifecycle: 'provisional',
+          });
+          if (persisted === undefined) {
+            throw new Error('persisted chat backing was not found during rewind');
+          }
+          return;
+        }
+        const metadata = persistedChatMetadata.get(backing.chatUri);
+        await overlayRepository.saveChatBacking({
+          backing,
+          ...(metadata?.title === undefined ? {} : { title: metadata.title }),
+          ...(metadata === undefined ? {} : { archived: metadata.archived }),
+        });
+      });
+    };
+  const onBackingReplaced = async (backing: ChatBacking): Promise<void> => {
+      if (overlayRepository !== undefined && persistedChatUris.has(backing.chatUri)) {
+        await enqueuePersistence(async () => {
+          if (!persistedChatUris.has(backing.chatUri)) return;
+          if (overlayRepository.updateChatBacking !== undefined) {
+            const persisted = await overlayRepository.updateChatBacking(backing.chatUri, {
+              sdkSessionId: backing.sdkSessionId,
+              lifecycle: 'materialized',
+            });
+            if (persisted === undefined) {
+              throw new Error('persisted chat backing was not found during rewind');
+            }
+            return;
+          }
+          const metadata = persistedChatMetadata.get(backing.chatUri);
+          await overlayRepository.saveChatBacking({
+            backing,
+            ...(metadata?.title === undefined ? {} : { title: metadata.title }),
+            ...(metadata === undefined ? {} : { archived: metadata.archived }),
+          });
+        });
+      }
+      const catalog = hostStateManager.getCatalogState(rootCatalog.resource);
+      const session = catalog?.sessions.find((candidate) => candidate.chatUri === backing.chatUri);
+      if (catalog !== undefined && session !== undefined) {
+        const timestamp = options.nowAction();
+        hostStateManager.dispatchCatalog(rootCatalog.resource, {
+          type: CATALOG_ACTION_TYPES.chatUpdated,
+          session: createCatalogSession({
+            ...session,
+            sdkSessionRef: backing.sdkSessionId,
+            updatedAt: timestamp,
+          }),
+          timestamp,
+        });
+      }
+  };
   const registry = new ClaudeChatRegistry({
     sequencer: new SequencerByKey<ChatUri>(),
     runtimeFactory: createRuntimeFactory({
@@ -510,6 +580,14 @@ export async function createClaudeAgentHost(
         }
       : {}),
     ...(onBackingMaterialized === undefined ? {} : { onBackingMaterialized }),
+    ...(onBackingReset === undefined ? {} : { onBackingReset }),
+    onBackingReplaced,
+    ...(typeof sdkService.deleteSession !== 'function'
+      ? {}
+      : {
+          deleteSdkSession: (sdkSessionId: string, cwd: string) =>
+            sdkService.deleteSession(sdkSessionId, { dir: cwd }),
+        }),
   });
 
   const createChatFromCatalog = (
@@ -607,6 +685,55 @@ export async function createClaudeAgentHost(
     allocateTurnId: () => createTurnId(randomUUID()),
     interactionResolver,
     createChat: createChatFromCatalog,
+    rewindChat: async (chatUri, turnId, mode): Promise<void> => {
+      const backing = registry.getBacking(chatUri);
+      if (backing === undefined) throw new Error('chat backing was not found');
+      const targetTurnIndex = hostStateManager.getState(chatUri)?.turns.findIndex(
+        (turn) => turn.id === turnId,
+      ) ?? -1;
+      const userMessageUuid = registry.sdkUserMessageId(chatUri, turnId);
+      const messages = await sdkService.getSessionMessages(backing.sdkSessionId, {
+        dir: backing.cwd,
+        includeSystemMessages: true,
+      });
+      const point = resolveClaudeRewindPoint(messages, userMessageUuid)
+        ?? resolveClaudeRewindPointAtTurn(messages, targetTurnIndex);
+      if (point === undefined) {
+        throw new Error('target user message was not found in the SDK transcript');
+      }
+
+      if (mode === 'conversation_and_files') {
+        const result = await registry.rewindFiles(chatUri, point.userMessageUuid);
+        if (!result.canRewind) {
+          throw new Error(result.error ?? 'SDK file rewind is unavailable');
+        }
+      }
+
+      if (point.previousAssistantUuid === undefined) {
+        await registry.resetSession(chatUri);
+      } else {
+        if (typeof sdkService.forkSession !== 'function') {
+          throw new Error('SDK session fork is unavailable');
+        }
+        const forked = await sdkService.forkSession(backing.sdkSessionId, {
+          dir: backing.cwd,
+          upToMessageId: point.previousAssistantUuid,
+        });
+        try {
+          await registry.replaceSession(chatUri, forked.sessionId);
+        } catch (error) {
+          if (typeof sdkService.deleteSession === 'function') {
+            await sdkService.deleteSession(forked.sessionId, { dir: backing.cwd }).catch(() => undefined);
+          }
+          throw error;
+        }
+        if (typeof sdkService.deleteSession === 'function') {
+          // The backing now points at the durable truncated fork. Source
+          // cleanup is best-effort and cannot undo that committed switch.
+          await sdkService.deleteSession(backing.sdkSessionId, { dir: backing.cwd }).catch(() => undefined);
+        }
+      }
+    },
   });
   const configureChat = async (
     chatUri: ChatUri,
@@ -1205,7 +1332,13 @@ function buildRuntimeOptions(
     abortController,
     session: runtimeInput.session.kind === 'new'
       ? { kind: 'new', sessionId: runtimeInput.session.sessionId }
-      : { kind: 'resume', sessionId: runtimeInput.session.sessionId },
+      : {
+          kind: 'resume',
+          sessionId: runtimeInput.session.sessionId,
+          ...(runtimeInput.session.resumeSessionAt === undefined
+            ? {}
+            : { resumeSessionAt: runtimeInput.session.resumeSessionAt }),
+        },
     ...(config.model === undefined ? {} : { model: config.model }),
     ...(config.effort === undefined ? {} : { effort: config.effort }),
     permissionMode: config.permissionMode,

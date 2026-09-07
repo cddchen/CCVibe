@@ -51,6 +51,20 @@ describe('resource ACL policy', () => {
     expect(authorizeResource(approver, 'resolveInput', chat, policy)).toEqual({ kind: 'allow' });
   });
 
+  it('requires configure capability for destructive conversation rewind', () => {
+    const sender = createPrincipal({ principalId: 'alice', tenantId: 'tenant-a', capabilities: ['send'] });
+    const configurator = createPrincipal({ principalId: 'alice', tenantId: 'tenant-a', capabilities: ['configure'] });
+    const policy = createResourceAcl({
+      resource: chat,
+      tenantId: 'tenant-a',
+      grants: [{ principalId: 'alice', capabilities: ['send', 'configure'] }],
+    });
+    expect(authorizeResource(sender, 'rewind', chat, policy)).toEqual({
+      kind: 'deny', reason: 'capability_not_granted',
+    });
+    expect(authorizeResource(configurator, 'rewind', chat, policy)).toEqual({ kind: 'allow' });
+  });
+
   it('denies cross-tenant access even when the principal id and SDK-like id match', () => {
     const principal = createPrincipal({
       principalId: 'same-sdk-session-id',

@@ -1,8 +1,10 @@
-import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, RewindFilesResult } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeQueryRuntime, ClaudeSendOptions } from './claudeQueryRuntime.js';
 import {
   createChatBacking,
   markChatBackingMaterialized,
+  resetChatBackingToProvisional,
+  replaceChatBackingSession,
   updateChatBackingConfig,
   type ChatBacking,
   type CreateChatBackingInput,
@@ -22,6 +24,7 @@ export interface ClaudeChatRuntime extends Pick<
   ClaudeQueryRuntime,
   'start' | 'send' | 'interrupt' | 'applyRuntimeConfig' | 'close' | 'state'
 > {
+  rewindFiles?(userMessageId: string): Promise<RewindFilesResult>;
   supportedCommands?(): Promise<readonly ClaudeSupportedCommand[]>;
 }
 
@@ -35,6 +38,7 @@ export interface ClaudeSupportedCommand {
 export interface ClaudeChatRuntimeSession {
   readonly kind: 'new' | 'resume';
   readonly sessionId: string;
+  readonly resumeSessionAt?: string;
 }
 
 export interface ClaudeChatRuntimeFactoryInput {
@@ -66,6 +70,12 @@ export interface ClaudeChatRegistryOptions {
   readonly onBackingMaterialized?: (
     backing: ChatBacking,
   ) => void | PromiseLike<void>;
+  /** Commit the materialized -> provisional transition before it becomes visible. */
+  readonly onBackingReset?: (backing: ChatBacking) => void | PromiseLike<void>;
+  /** Commit an SDK transcript identity replacement before publishing it in memory. */
+  readonly onBackingReplaced?: (backing: ChatBacking) => void | PromiseLike<void>;
+  /** Delete the SDK transcript after the live Query has fully closed. */
+  readonly deleteSdkSession?: (sdkSessionId: string, cwd: string) => void | PromiseLike<void>;
   /** Construct one SDK callback per chat; the turn resolver stays registry-owned. */
   readonly createCanUseTool?: (
     chatUri: ChatUri,
@@ -109,6 +119,9 @@ export class ClaudeChatRegistry {
   private readonly runtimeFactory: ClaudeChatRuntimeFactory;
   private readonly onSignal: ClaudeChatSignalObserver | undefined;
   private readonly onBackingMaterialized: ClaudeChatRegistryOptions['onBackingMaterialized'];
+  private readonly onBackingReset: ClaudeChatRegistryOptions['onBackingReset'];
+  private readonly onBackingReplaced: ClaudeChatRegistryOptions['onBackingReplaced'];
+  private readonly deleteSdkSession: ClaudeChatRegistryOptions['deleteSdkSession'];
   private readonly createCanUseTool: ClaudeChatRegistryOptions['createCanUseTool'];
   private readonly backings = new Map<ChatUri, ChatBacking>();
   private readonly runtimes = new Map<string, RuntimeEntry>();
@@ -121,6 +134,7 @@ export class ClaudeChatRegistry {
   private readonly releaseRequested = new Set<ChatUri>();
   private readonly disposeRequested = new Set<ChatUri>();
   private readonly activeTurnIds = new Map<ChatUri, TurnId>();
+  private readonly sdkUserMessageIds = new Map<ChatUri, Map<TurnId, string>>();
 
   private generationCounter = 0;
   private shuttingDown = false;
@@ -142,11 +156,23 @@ export class ClaudeChatRegistry {
     if (options.onBackingMaterialized !== undefined && typeof options.onBackingMaterialized !== 'function') {
       throw new TypeError('onBackingMaterialized must be a function when provided');
     }
+    if (options.onBackingReset !== undefined && typeof options.onBackingReset !== 'function') {
+      throw new TypeError('onBackingReset must be a function when provided');
+    }
+    if (options.onBackingReplaced !== undefined && typeof options.onBackingReplaced !== 'function') {
+      throw new TypeError('onBackingReplaced must be a function when provided');
+    }
+    if (options.deleteSdkSession !== undefined && typeof options.deleteSdkSession !== 'function') {
+      throw new TypeError('deleteSdkSession must be a function when provided');
+    }
 
     this.sequencer = options.sequencer;
     this.runtimeFactory = options.runtimeFactory;
     this.onSignal = options.onSignal;
     this.onBackingMaterialized = options.onBackingMaterialized;
+    this.onBackingReset = options.onBackingReset;
+    this.onBackingReplaced = options.onBackingReplaced;
+    this.deleteSdkSession = options.deleteSdkSession;
     this.createCanUseTool = options.createCanUseTool;
   }
 
@@ -326,13 +352,37 @@ export class ClaudeChatRegistry {
       }
       this.activeTurnIds.set(parsedChatUri, turnId);
       try {
-        return await entry.runtime.send(turnId, text, options);
+        const handle = await entry.runtime.send(turnId, text, options);
+        let mappings = this.sdkUserMessageIds.get(parsedChatUri);
+        if (mappings === undefined) {
+          mappings = new Map<TurnId, string>();
+          this.sdkUserMessageIds.set(parsedChatUri, mappings);
+        }
+        mappings.set(turnId, handle.sdkUuid);
+        return handle;
       } catch (error) {
         if (this.activeTurnIds.get(parsedChatUri) === turnId) {
           this.activeTurnIds.delete(parsedChatUri);
         }
         throw error;
       }
+    });
+  }
+
+  public sdkUserMessageId(chatUri: ChatUri, turnId: TurnId): string {
+    const parsedChatUri = parseChatUriValue(chatUri);
+    return this.sdkUserMessageIds.get(parsedChatUri)?.get(turnId) ?? turnId;
+  }
+
+  public rewindFiles(chatUri: ChatUri, userMessageId: string): Promise<RewindFilesResult> {
+    const parsedChatUri = parseChatUriValue(chatUri);
+    return this.sequencer.enqueue(parsedChatUri, async () => {
+      if (this.activeTurnIds.has(parsedChatUri)) throw new Error('chat has an active turn');
+      const entry = await this.ensureMaterializationStarted(parsedChatUri);
+      if (entry.runtime.rewindFiles === undefined) {
+        throw new Error('SDK file rewind is unavailable');
+      }
+      return entry.runtime.rewindFiles(userMessageId);
     });
   }
 
@@ -393,7 +443,7 @@ export class ClaudeChatRegistry {
   }
 
   /** Rebuild one runtime after the old one has completely drained. */
-  public rebind(chatUri: ChatUri): Promise<void> {
+  public rebind(chatUri: ChatUri, resumeSessionAt?: string): Promise<void> {
     const parsedChatUri = parseChatUriValue(chatUri);
     if (this.shuttingDown) {
       return Promise.reject(new Error(REGISTRY_SHUTDOWN_MESSAGE));
@@ -437,6 +487,7 @@ export class ClaudeChatRegistry {
       const session: ClaudeChatRuntimeSession = {
         kind: 'resume',
         sessionId: latest.sdkSessionId,
+        ...(resumeSessionAt === undefined ? {} : { resumeSessionAt }),
       };
       await this.beginRebind(latest, session);
     });
@@ -454,6 +505,55 @@ export class ClaudeChatRegistry {
       },
     );
     return flight;
+  }
+
+  /** Delete a transcript and retain the same product chat + opaque SDK id. */
+  public resetSession(chatUri: ChatUri): Promise<void> {
+    const parsedChatUri = parseChatUriValue(chatUri);
+    if (this.shuttingDown) return Promise.reject(new Error(REGISTRY_SHUTDOWN_MESSAGE));
+    return this.sequencer.enqueue(parsedChatUri, async () => {
+      if (this.activeTurnIds.has(parsedChatUri)) throw new Error('chat has an active turn');
+      const current = this.requireBacking(parsedChatUri);
+      const entry = this.runtimes.get(current.sdkSessionId);
+      if (entry !== undefined) {
+        await this.closeRuntime(entry.runtime);
+        this.removeMatchingEntry(entry);
+      }
+      const materialize = this.materializeFlights.get(current.sdkSessionId);
+      if (materialize !== undefined) await materialize.catch(() => undefined);
+      this.removeEntryForChat(current.sdkSessionId, parsedChatUri);
+      if (this.deleteSdkSession === undefined) throw new Error('SDK session deletion is not configured');
+      await this.deleteSdkSession(current.sdkSessionId, current.cwd);
+      const reset = resetChatBackingToProvisional(current);
+      if (this.onBackingReset !== undefined) await this.onBackingReset(reset);
+      this.backings.set(parsedChatUri, reset);
+      this.sdkUserMessageIds.delete(parsedChatUri);
+    });
+  }
+
+  /** Atomically switch a product chat to a transcript created by SDK forkSession(). */
+  public replaceSession(chatUri: ChatUri, sdkSessionId: string): Promise<void> {
+    const parsedChatUri = parseChatUriValue(chatUri);
+    if (this.shuttingDown) return Promise.reject(new Error(REGISTRY_SHUTDOWN_MESSAGE));
+    return this.sequencer.enqueue(parsedChatUri, async () => {
+      if (this.activeTurnIds.has(parsedChatUri)) throw new Error('chat has an active turn');
+      const current = this.requireBacking(parsedChatUri);
+      if ([...this.backings.values()].some((candidate) => (
+        candidate.chatUri !== parsedChatUri && candidate.sdkSessionId === sdkSessionId
+      ))) throw new Error('sdkSessionId is already registered');
+      const entry = this.runtimes.get(current.sdkSessionId);
+      if (entry !== undefined) {
+        await this.closeRuntime(entry.runtime);
+        this.removeMatchingEntry(entry);
+      }
+      const materialize = this.materializeFlights.get(current.sdkSessionId);
+      if (materialize !== undefined) await materialize.catch(() => undefined);
+      this.removeEntryForChat(current.sdkSessionId, parsedChatUri);
+      const replaced = replaceChatBackingSession(current, sdkSessionId);
+      if (this.onBackingReplaced !== undefined) await this.onBackingReplaced(replaced);
+      this.backings.set(parsedChatUri, replaced);
+      this.sdkUserMessageIds.delete(parsedChatUri);
+    });
   }
 
   /** Close a live runtime while retaining the materialized backing identity. */
