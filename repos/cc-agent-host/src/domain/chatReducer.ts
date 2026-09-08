@@ -13,6 +13,7 @@ import type {
   TurnCompletedAction,
   TurnFailedAction,
   TurnInterruptedAction,
+  TurnActivityChangedAction,
   TurnStartedAction,
   TurnsLoadedAction,
 } from './actions.js';
@@ -286,6 +287,17 @@ function findResponsePart(turn: ActiveTurn, partId: ResponsePart['id']): Respons
   return turn.parts.find((part) => part.id === partId);
 }
 
+function sameSystemMessagePart(
+  left: Extract<ResponsePart, { readonly kind: 'system_message' }>,
+  right: Extract<ResponsePart, { readonly kind: 'system_message' }>,
+): boolean {
+  return left.id === right.id
+    && left.event === right.event
+    && left.title === right.title
+    && left.content === right.content
+    && left.level === right.level;
+}
+
 function hasToolCall(turn: ActiveTurn, toolCallId: ToolCall['id']): boolean {
   return turn.parts.some((part) => part.kind === 'tool_call' && part.toolCall.id === toolCallId);
 }
@@ -370,6 +382,19 @@ function reduceTurnStarted(state: ChatState, action: TurnStartedAction): ChatSta
   return { ...state, activeTurn, status: 'in_progress', modifiedAt: action.timestamp };
 }
 
+function reduceTurnActivityChanged(state: ChatState, action: TurnActivityChangedAction): ChatState {
+  const activeTurn = getActiveTurn(state, action.turnId);
+  if (activeTurn === undefined
+    || (action.activity !== null && action.activity !== 'requesting_model' && action.activity !== 'compacting_context')
+    || activeTurn.activity === action.activity
+    || (action.activity === null && activeTurn.activity === undefined)) return state;
+  if (action.activity === null) {
+    const { activity: _activity, ...withoutActivity } = activeTurn;
+    return updateActiveTurn(state, withoutActivity, action.timestamp);
+  }
+  return updateActiveTurn(state, { ...activeTurn, activity: action.activity }, action.timestamp);
+}
+
 function reduceResponsePartAdded(state: ChatState, action: ResponsePartAddedAction): ChatState {
   // Keep the runtime boundary aligned with the type-level lifecycle boundary.
   // Casted JavaScript values must not inject a tool part outside tool actions.
@@ -379,12 +404,24 @@ function reduceResponsePartAdded(state: ChatState, action: ResponsePartAddedActi
 
   const activeTurn = getActiveTurn(state, action.turnId);
   if (activeTurn !== undefined) {
-    if (findResponsePart(activeTurn, action.part.id) !== undefined) {
+    const existingIndex = activeTurn.parts.findIndex((part) => part.id === action.part.id);
+    if (existingIndex < 0) {
+      const nextTurn: ActiveTurn = {
+        ...activeTurn,
+        parts: [...activeTurn.parts, cloneResponsePart(action.part)],
+      };
+      return updateActiveTurn(state, nextTurn, action.timestamp);
+    }
+    const existing = activeTurn.parts[existingIndex];
+    if (existing === undefined || existing.kind !== 'system_message' || action.part.kind !== 'system_message') {
       return state;
     }
+    if (sameSystemMessagePart(existing, action.part)) return state;
+    const parts = [...activeTurn.parts];
+    parts[existingIndex] = cloneResponsePart(action.part);
     const nextTurn: ActiveTurn = {
       ...activeTurn,
-      parts: [...activeTurn.parts, cloneResponsePart(action.part)],
+      parts,
     };
     return updateActiveTurn(state, nextTurn, action.timestamp);
   }
@@ -393,8 +430,21 @@ function reduceResponsePartAdded(state: ChatState, action: ResponsePartAddedActi
   // tail events on their canonical completed turn instead of dropping them.
   const turnIndex = state.turns.findIndex((turn) => turn.id === action.turnId);
   const turn = state.turns[turnIndex];
-  if (turnIndex < 0 || turn === undefined || turn.parts.some((part) => part.id === action.part.id)) {
+  if (turnIndex < 0 || turn === undefined) {
     return state;
+  }
+  const existingIndex = turn.parts.findIndex((part) => part.id === action.part.id);
+  if (existingIndex >= 0) {
+    const existing = turn.parts[existingIndex];
+    if (existing === undefined || existing.kind !== 'system_message' || action.part.kind !== 'system_message') {
+      return state;
+    }
+    if (sameSystemMessagePart(existing, action.part)) return state;
+    const parts = [...turn.parts];
+    parts[existingIndex] = cloneResponsePart(action.part);
+    const turns = [...state.turns];
+    turns[turnIndex] = { ...turn, parts };
+    return { ...state, turns, modifiedAt: action.timestamp };
   }
   const turns = [...state.turns];
   turns[turnIndex] = { ...turn, parts: [...turn.parts, cloneResponsePart(action.part)] };
@@ -771,6 +821,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case 'chat/turnStarted':
       return reduceTurnStarted(state, action);
+    case 'chat/turnActivityChanged':
+      return reduceTurnActivityChanged(state, action);
     case 'chat/responsePartAdded':
       return reduceResponsePartAdded(state, action);
     case 'chat/responsePartDelta':

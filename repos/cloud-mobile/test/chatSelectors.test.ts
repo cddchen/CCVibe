@@ -152,6 +152,18 @@ describe('canonical chat selector', () => {
     expect(view.activeTurn?.parts).toHaveLength(3);
   });
 
+  it('projects transient activity only from the active turn', () => {
+    const activeTurn = chatState.activeTurn;
+    if (activeTurn === undefined) throw new Error('fixture requires an active turn');
+    const withActivity: HostChatState = {
+      ...chatState,
+      activeTurn: { ...activeTurn, activity: 'compacting_context' },
+    };
+    const view = selectChatViewModel({ chatUri, chatState: withActivity, catalog: rootState });
+    expect(view.activeTurn?.activity).toBe('compacting_context');
+    expect(view.history[0]).not.toHaveProperty('activity');
+  });
+
   it('preserves completed turn projections while only the active stream changes', () => {
     const selector = createChatViewModelSelector();
     const first = selector({ chatUri, chatState, catalog: rootState });
@@ -207,14 +219,25 @@ describe('canonical chat selector', () => {
       ...chatState,
       activeTurn: {
         ...activeTurn,
-        parts: [...activeTurn.parts, {
-          kind: 'system_message',
-          id: 'system-compact',
-          event: 'compact_boundary',
-          title: '上下文压缩',
-          content: '{"pre_tokens":4096,"post_tokens":1024}',
-          level: 'success',
-        }],
+        parts: [
+          ...activeTurn.parts,
+          {
+            kind: 'system_message',
+            id: 'system-compact',
+            event: 'compact_boundary',
+            title: '上下文压缩',
+            content: '{"pre_tokens":4096,"post_tokens":1024}',
+            level: 'success',
+          },
+          {
+            kind: 'system_message',
+            id: 'system-status',
+            event: 'status',
+            title: '运行状态',
+            content: '{"status":"compacting"}',
+            level: 'progress',
+          },
+        ],
       },
     };
 
@@ -225,6 +248,14 @@ describe('canonical chat selector', () => {
       event: 'compact_boundary',
       title: '上下文压缩',
       level: 'success',
+      collapsed: true,
+    });
+    const status = selectChatViewModel({ chatUri, chatState: withSystemMessage, catalog: rootState })
+      .activeTurn?.parts.find((part) => part.kind === 'system' && part.event === 'status');
+    expect(status).toMatchObject({
+      kind: 'system',
+      title: '运行状态',
+      level: 'progress',
       collapsed: true,
     });
   });

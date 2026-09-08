@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  parseHostActionEnvelope,
   parseHostReconnectResult,
+  parseHostCatalogRefreshResult,
   parseHostResolveWorkspaceResult,
   parseHostStateSnapshot,
   type HostChatState,
@@ -61,6 +63,61 @@ const chatState = {
 } as const;
 
 describe('Host wire contract adapter', () => {
+  it('accepts normalized turn activity and rejects raw SDK status values', () => {
+    const base = { channel: chat, serverSeq: 1, serverTime: 't1' };
+    expect(parseHostActionEnvelope({
+      ...base,
+      action: { type: 'chat/turnActivityChanged', turnId: 'turn-a', activity: 'requesting_model', timestamp: 't1' },
+    }).action).toMatchObject({ activity: 'requesting_model' });
+    expect(() => parseHostActionEnvelope({
+      ...base,
+      action: { type: 'chat/turnActivityChanged', turnId: 'turn-a', activity: 'requesting', timestamp: 't1' },
+    })).toThrow();
+  });
+
+  it('accepts a normalized status system part and rejects a raw SDK status envelope', () => {
+    const base = {
+      channel: chat,
+      serverSeq: 1,
+      serverTime: 't1',
+    };
+    expect(parseHostActionEnvelope({
+      ...base,
+      action: {
+        type: 'chat/responsePartAdded',
+        turnId: 'turn-a',
+        part: {
+          kind: 'system_message',
+          id: 'part-status',
+          event: 'status',
+          title: '运行状态',
+          content: '{"status":"requesting"}',
+          level: 'progress',
+        },
+        timestamp: 't1',
+      },
+    }).action).toMatchObject({ type: 'chat/responsePartAdded', part: { event: 'status' } });
+    expect(() => parseHostActionEnvelope({
+      ...base,
+      action: { type: 'system', subtype: 'status', status: 'requesting' },
+    })).toThrow();
+  });
+
+  it('parses only a canonical root snapshot for catalog/refresh', () => {
+    const result = parseHostCatalogRefreshResult({
+      snapshot: { resource: root, state: rootState, fromSeq: 9 },
+    });
+    expect(result.snapshot.resource).toBe(root);
+    expect(result.snapshot.fromSeq).toBe(9);
+    expect(() => parseHostCatalogRefreshResult({
+      snapshot: { resource: root, state: rootState, fromSeq: 9 },
+      extra: true,
+    })).toThrow();
+    expect(() => parseHostCatalogRefreshResult({
+      snapshot: { resource: chat, state: chatState, fromSeq: 9 },
+    })).toThrow();
+  });
+
   it('accepts the real RootCatalogState shape and projects it separately for UI', () => {
     const snapshot = parseHostStateSnapshot({ resource: root, state: rootState, fromSeq: 4 });
 

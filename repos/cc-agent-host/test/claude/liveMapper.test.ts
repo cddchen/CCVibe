@@ -7,7 +7,13 @@ import type {
   SDKLocalCommandOutputMessage,
   SDKMessage,
   SDKPartialAssistantMessage,
+  SDKStatusMessage,
+  SDKBackgroundTasksChangedMessage,
   SDKSystemMessage,
+  SDKTaskNotificationMessage,
+  SDKTaskProgressMessage,
+  SDKTaskStartedMessage,
+  SDKTaskUpdatedMessage,
   SDKUserMessage,
   SDKUserMessageReplay,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -187,6 +193,20 @@ function canonicalAssistant(parentToolUseId: string | null = null): SDKAssistant
   } satisfies SDKAssistantMessage;
 }
 
+function statusMessage(
+  status: SDKStatusMessage['status'],
+  extras: Pick<SDKStatusMessage, 'compact_result' | 'compact_error'> = {},
+): SDKStatusMessage {
+  return {
+    type: 'system',
+    subtype: 'status',
+    status,
+    uuid: '00000000-0000-4000-8000-000000000014',
+    session_id: SESSION_ID,
+    ...extras,
+  };
+}
+
 function mapSequence(
   mapper: ClaudeLiveMapper,
   messages: readonly SDKMessage[],
@@ -341,6 +361,141 @@ describe('ClaudeLiveMapper', () => {
       part: { kind: 'system_message', title: '系统提示', level: 'warning' },
     });
     expect(new Set(actions.map((action) => action.type))).toEqual(new Set(['chat/responsePartAdded']));
+  });
+
+  it('maps SDK status to transient turn activity and only persists compaction failures', () => {
+    const mapper = new ClaudeLiveMapper({ generation: 5 });
+
+    const requesting = mapper.mapMessage(statusMessage('requesting'), TURN_ID, 'requesting');
+    expect(requesting).toEqual([expect.objectContaining({
+      type: 'chat/turnActivityChanged',
+      turnId: TURN_ID,
+      timestamp: 'requesting',
+      activity: 'requesting_model',
+    })]);
+    const compacting = mapper.mapMessage(statusMessage('compacting'), TURN_ID, 'compacting');
+    expect(compacting).toEqual([expect.objectContaining({
+      type: 'chat/turnActivityChanged', activity: 'compacting_context',
+    })]);
+
+    const success = mapper.mapMessage(statusMessage(null, { compact_result: 'success' }), TURN_ID, 'success');
+    expect(success).toEqual([expect.objectContaining({
+      type: 'chat/turnActivityChanged', activity: null,
+    })]);
+
+    const failure = mapper.mapMessage(statusMessage(null, {
+      compact_result: 'failed',
+      compact_error: `Bearer super-secret-token ${'x'.repeat(4_100)}`,
+    }), TURN_ID, 'failure');
+    expect(failure).toHaveLength(2);
+    expect(failure[0]).toMatchObject({ type: 'chat/turnActivityChanged', activity: null });
+    expect(failure[1]).toMatchObject({
+      type: 'chat/responsePartAdded',
+      part: { kind: 'system_message', event: 'compact_error', title: '上下文压缩失败', level: 'error' },
+    });
+    const part = (failure[1] as Extract<ChatAction, { type: 'chat/responsePartAdded' }>).part;
+    expect(part.kind === 'system_message' ? part.content : '').not.toContain('super-secret-token');
+    expect(part.kind === 'system_message' ? part.content.length : 0).toBeLessThanOrEqual(4_000);
+  });
+
+  it('coalesces one background task lifecycle to one stable system part', () => {
+    const mapper = new ClaudeLiveMapper({ generation: 61 });
+    const taskId = 'task-live-1';
+    const started = {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: taskId,
+      description: 'Index the repository',
+      uuid: '00000000-0000-4000-8000-000000000061',
+      session_id: SESSION_ID,
+    } satisfies SDKTaskStartedMessage;
+    const progress = {
+      type: 'system',
+      subtype: 'task_progress',
+      task_id: taskId,
+      description: 'Reading files',
+      usage: { total_tokens: 12, tool_uses: 1, duration_ms: 20 },
+      uuid: '00000000-0000-4000-8000-000000000062',
+      session_id: SESSION_ID,
+    } satisfies SDKTaskProgressMessage;
+    const updated = {
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: taskId,
+      patch: { status: 'running', description: 'Parsing files' },
+      uuid: '00000000-0000-4000-8000-000000000063',
+      session_id: SESSION_ID,
+    } satisfies SDKTaskUpdatedMessage;
+    const notification = {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: taskId,
+      status: 'completed',
+      output_file: '',
+      summary: 'Indexed 10 files',
+      uuid: '00000000-0000-4000-8000-000000000064',
+      session_id: SESSION_ID,
+    } satisfies SDKTaskNotificationMessage;
+    const otherTask = {
+      ...progress,
+      task_id: 'task-live-2',
+      uuid: '00000000-0000-4000-8000-000000000065',
+    } satisfies SDKTaskProgressMessage;
+    const levelSignal = {
+      type: 'system',
+      subtype: 'background_tasks_changed',
+      tasks: [{ task_id: taskId, task_type: 'subagent', description: 'Index the repository' }],
+      uuid: '00000000-0000-4000-8000-000000000066',
+      session_id: SESSION_ID,
+    } satisfies SDKBackgroundTasksChangedMessage;
+
+    const actions = [started, progress, updated, notification, otherTask, levelSignal]
+      .flatMap((message, index) => mapper.mapMessage(message, TURN_ID, `task-${index}`));
+    const parts = actions.map((action) => {
+      if (action.type !== 'chat/responsePartAdded' || action.part.kind !== 'system_message') {
+        throw new Error('expected system message action');
+      }
+      return action.part;
+    });
+
+    expect(parts).toHaveLength(6);
+    expect(new Set(parts.slice(0, 4).map((part) => part.id)).size).toBe(1);
+    expect(parts.slice(0, 4).map((part) => ({ title: part.title, level: part.level }))).toEqual([
+      { title: '后台任务进度', level: 'progress' },
+      { title: '后台任务进度', level: 'progress' },
+      { title: '后台任务进度', level: 'progress' },
+      { title: '后台任务进度', level: 'success' },
+    ]);
+    expect(parts[0]).not.toHaveProperty('taskId');
+    expect(parts[4]?.id).not.toBe(parts[0]?.id);
+    expect(parts[5]?.title).toBe('后台任务变化');
+    expect(parts[5]?.id).not.toBe(parts[0]?.id);
+  });
+
+  it('uses turn identity and maps failed or stopped task notifications to non-success levels', () => {
+    const mapper = new ClaudeLiveMapper({ generation: 62 });
+    const notification = (taskId: string, status: 'failed' | 'stopped', uuid: UUID): SDKTaskNotificationMessage => ({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: taskId,
+      status,
+      output_file: '',
+      summary: status,
+      uuid,
+      session_id: SESSION_ID,
+    });
+    const failed = mapper.mapMessage(notification('task-failed', 'failed', '00000000-0000-4000-8000-000000000067'), TURN_ID, 'failed');
+    const stopped = mapper.mapMessage(notification('task-stopped', 'stopped', '00000000-0000-4000-8000-000000000068'), TURN_ID, 'stopped');
+    const otherTurn = mapper.mapMessage(notification('task-failed', 'failed', '00000000-0000-4000-8000-000000000069'), createTurnId('turn-live-other'), 'other-turn');
+
+    const part = (actions: readonly ChatAction[]): Extract<ChatAction, { type: 'chat/responsePartAdded' }>['part'] => {
+      const action = actions[0];
+      if (action?.type !== 'chat/responsePartAdded') throw new Error('expected task notification action');
+      return action.part;
+    };
+    expect(part(failed)).toMatchObject({ level: 'error', title: '后台任务进度' });
+    expect(part(stopped)).toMatchObject({ level: 'warning', title: '后台任务进度' });
+    expect(part(otherTurn).id).not.toBe(part(failed).id);
   });
 
   it('maps the SDK init message without exposing its session identity', () => {

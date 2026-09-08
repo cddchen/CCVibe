@@ -118,6 +118,54 @@ function initializeResult(): JsonValue {
 }
 
 describe('connection supervisor', () => {
+  it('refreshes the Host root catalog and applies the returned snapshot before resolving', async () => {
+    const timer = new ManualTimer();
+    const appState = new FakeAppState();
+    const store = createSyncStore({ address: 'wss://cloud.example.test', subscriptions: ['agent-root://'] });
+    const transport = new FakeTransport();
+    const supervisor = new ConnectionSupervisor({
+      config: { connectionId: createConnectionId('connection-refresh'), address: 'wss://cloud.example.test', token: 'secret', mode: 'production' },
+      clientId: 'client-refresh',
+      clientInfo: { name: 'Cloud', version: '0.1.0', platform: 'ios' },
+      store,
+      timer,
+      appState,
+      transportFactory: () => transport,
+    });
+
+    supervisor.start();
+    transport.resolveOpen();
+    await flush();
+    transport.resolveRequest(initializeResult());
+    await flush();
+    const refresh = supervisor.refreshCatalog();
+    expect(transport.requests[1]).toEqual({ method: 'catalog/refresh', params: { channel: 'agent-root://' } });
+    transport.resolveRequest({
+      snapshot: {
+        resource: 'agent-root://',
+        state: {
+          ...(initializeResult() as { snapshots: Array<{ state: Record<string, unknown> }> }).snapshots[0]?.state,
+          sessions: [{
+            chatUri: 'agent-chat://workspace-a/chat-a',
+            sdkSessionRef: 'sdk-a',
+            workspaceId: 'workspace-a',
+            title: 'New session',
+            updatedAt: '2026-09-08T00:00:00.000Z',
+            status: 'idle',
+            archived: false,
+          }],
+        },
+        fromSeq: 3,
+      },
+    } as JsonValue);
+    const result = await refresh;
+
+    expect(result.snapshot.fromSeq).toBe(3);
+    expect(store.getState().lastSeenServerSeq).toBe(3);
+    expect((store.getState().resources[0]?.state as { sessions: readonly unknown[] }).sessions).toHaveLength(1);
+    supervisor.stop();
+  });
+
   it('initializes, reconnects with epoch/seq/subscriptions, and exposes client replacement', async () => {
     const timer = new ManualTimer();
     const appState = new FakeAppState();

@@ -51,7 +51,7 @@ SDK raw union 只存在于 `src/claude/`，不得进入 JSON-RPC/client protocol
   - input_json_delta -> `chat/toolCallInputDelta`
   - tool stop -> `chat/toolCallReady`
 - user tool_result -> `chat/toolCallCompleted`；仅投影 text content。
-- system event -> 脱敏、限长的 `system_message` part；移动端以次要折叠块展示，完成后的 tail event 仍归属原 turn。
+- system event -> 脱敏、限长的 `system_message` part；移动端以次要折叠块展示，完成后的 tail event 仍归属原 turn。SDK `status` 的 `requesting/compacting/null` 改投影为 active turn 瞬时 activity，replay 忽略；只有压缩失败保留 error part。
 - runtime `init` 在继续更新运行配置的同时，会把经过脱敏的初始化摘要附加到当前 turn；没有当前 turn 时不凭空创建 transcript 内容。
 - unsupported blocks/delta no-op，并可通过 injected diagnostic 回报类型名。
 - mapper 纯决定 action；timestamp 显式参数，不读时钟。

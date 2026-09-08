@@ -173,6 +173,7 @@ const activeTurnSchema = z.object({
   id: opaqueIdSchema,
   prompt: textSchema,
   status: z.literal('active'),
+  activity: z.enum(['requesting_model', 'compacting_context']).optional(),
   parts: z.array(responsePartSchema).readonly(),
   startedAt: textSchema,
 }).strict();
@@ -265,6 +266,7 @@ const responsePartWithoutToolSchema = z.discriminatedUnion('kind', [
 
 const chatActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat/turnStarted'), turnId: opaqueIdSchema, prompt: textSchema, ...timestamped }).strict(),
+  z.object({ type: z.literal('chat/turnActivityChanged'), turnId: opaqueIdSchema, activity: z.enum(['requesting_model', 'compacting_context']).nullable(), ...timestamped }).strict(),
   z.object({ type: z.literal('chat/responsePartAdded'), turnId: opaqueIdSchema, part: responsePartWithoutToolSchema, ...timestamped }).strict(),
   z.object({ type: z.literal('chat/responsePartDelta'), turnId: opaqueIdSchema, partId: opaqueIdSchema, delta: z.string(), ...timestamped }).strict(),
   z.object({ type: z.literal('chat/toolCallStarted'), turnId: opaqueIdSchema, partId: opaqueIdSchema, toolCallId: opaqueIdSchema, name: textSchema, input: textSchema.optional(), ...timestamped }).strict(),
@@ -420,6 +422,20 @@ export interface HostResolveWorkspaceParams {
 
 export interface HostResolveWorkspaceResult {
   readonly workspace: HostRootCatalogState['workspaces'][number];
+}
+
+export interface HostCatalogRefreshParams {
+  readonly channel: RootUri;
+}
+
+export interface HostCatalogRefreshResult {
+  readonly snapshot: Extract<HostStateSnapshot, { readonly resource: RootUri }>;
+}
+
+function isRootStateSnapshot(
+  snapshot: HostStateSnapshot,
+): snapshot is Extract<HostStateSnapshot, { readonly resource: RootUri }> {
+  return snapshot.resource === 'agent-root://';
 }
 
 export type HostPermissionMode = z.infer<typeof permissionModeSchema>;
@@ -685,6 +701,15 @@ export function parseHostResolveWorkspaceResult(value: unknown): HostResolveWork
   return parseWithSchema(resolveWorkspaceResultSchema, value, 'catalog/resolveWorkspace result');
 }
 
+export function parseHostCatalogRefreshResult(value: unknown): HostCatalogRefreshResult {
+  const base = parseWithSchema(z.object({ snapshot: z.unknown() }).strict(), value, 'catalog/refresh result');
+  const snapshot = parseHostStateSnapshot(base.snapshot);
+  if (!isRootStateSnapshot(snapshot)) {
+    throw new TypeError('catalog/refresh result must contain a root snapshot');
+  }
+  return deepFreeze({ snapshot });
+}
+
 export function parseHostDispatchActionResult(value: unknown): HostDispatchActionResult {
   const base = parseWithSchema(z.object({ receipt: commandReceiptSchema }).strict(), value, 'dispatchAction result');
   if (base.receipt.status === 'rejected') {
@@ -770,6 +795,8 @@ export function parseHostRpcResult(method: string, value: unknown): unknown {
       return parseHostCreateChatResult(value);
     case 'catalog/resolveWorkspace':
       return parseHostResolveWorkspaceResult(value);
+    case 'catalog/refresh':
+      return parseHostCatalogRefreshResult(value);
     case 'dispatchAction':
       return parseHostDispatchActionResult(value);
     case 'chat/supportedCommands':

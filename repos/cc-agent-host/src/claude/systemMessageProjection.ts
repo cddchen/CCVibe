@@ -5,9 +5,21 @@ import { redactStructuredLog } from '../security/redaction.js';
 
 type ClaudeSystemMessage = Extract<SDKMessage, { readonly type: 'system' }>;
 type ClaudeSystemSubtype = ClaudeSystemMessage['subtype'];
+type BackgroundTaskEvent = 'task_notification' | 'task_progress' | 'task_started' | 'task_updated';
+type ClaudeBackgroundTaskMessage = Extract<ClaudeSystemMessage, { readonly subtype: BackgroundTaskEvent }>;
+
+/**
+ * Claude-layer-only metadata used to coalesce background task edge events.
+ * `taskId` is deliberately removed before a domain action is built so it can
+ * never become part of the public response-part or wire shape.
+ */
+interface ClaudeSystemMessageProjection extends SystemMessage {
+  readonly taskId?: string;
+}
 
 const MAX_SYSTEM_CONTENT_LENGTH = 24_000;
-const OMITTED_FIELDS = new Set(['type', 'subtype', 'uuid', 'session_id']);
+const MAX_COMPACT_ERROR_LENGTH = 4_000;
+const OMITTED_FIELDS = new Set(['type', 'subtype', 'uuid', 'session_id', 'task_id']);
 const SENSITIVE_FIELD = /^(?:authorization|proxy_authorization|cookie|set_cookie|bearer|access_token|refresh_token|id_token|secret|password|credentials?|api_key|apikey|private_key|client_secret)$/iu;
 
 const SYSTEM_TITLES = {
@@ -42,33 +54,54 @@ const SYSTEM_TITLES = {
 } satisfies Record<ClaudeSystemSubtype, string>;
 
 /** Convert a live SDK event into the stable, textual domain projection. */
-export function projectClaudeSystemMessage(message: ClaudeSystemMessage): SystemMessage | undefined {
-  return projectSystemRecord(message);
+export function projectClaudeSystemMessage(message: ClaudeSystemMessage): ClaudeSystemMessageProjection | undefined {
+  // Keep the live path tied to the installed SDK union: task_id is an
+  // official field on each of the four edge message variants, not an ad-hoc
+  // field copied into a parallel provider type.
+  const taskId = isBackgroundTaskMessage(message) ? message.task_id : undefined;
+  return projectSystemRecord(message, taskId);
 }
 
 /** Convert a transcript system payload without trusting its SDK-private shape. */
-export function projectRecordedSystemMessage(value: unknown): SystemMessage | undefined {
+export function projectRecordedSystemMessage(value: unknown): ClaudeSystemMessageProjection | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return undefined;
   }
   return projectSystemRecord(value);
 }
 
-function projectSystemRecord(record: object): SystemMessage | undefined {
+function projectSystemRecord(record: object, taskIdOverride?: string): ClaudeSystemMessageProjection | undefined {
   const event = readString(record, 'subtype');
   if (event === undefined || event.length === 0) {
     return undefined;
   }
-
-  return Object.freeze({
+  if (event === 'status') {
+    const compactResult = readString(record, 'compact_result');
+    const compactError = readString(record, 'compact_error');
+    if (compactResult !== 'failed' && compactError === undefined) return undefined;
+    return Object.freeze({
+      event: 'compact_error',
+      title: '上下文压缩失败',
+      content: clipText(redactStructuredLog(compactError ?? '上下文压缩失败。'), MAX_COMPACT_ERROR_LENGTH),
+      level: 'error',
+    });
+  }
+  const projection = {
     event,
     title: titleFor(event),
     content: clipContent(redactStructuredLog(contentFor(record, event))),
     level: levelFor(record, event),
-  });
+  } satisfies SystemMessage;
+  const taskId = isBackgroundTaskEvent(event) ? taskIdOverride ?? readString(record, 'task_id') : undefined;
+  return taskId === undefined || taskId.length === 0
+    ? Object.freeze(projection)
+    : Object.freeze({ ...projection, taskId });
 }
 
 function titleFor(event: string): string {
+  if (isBackgroundTaskEvent(event)) {
+    return '后台任务进度';
+  }
   return Object.entries(SYSTEM_TITLES).find(([candidate]) => candidate === event)?.[1]
     ?? `系统事件 · ${event}`;
 }
@@ -137,7 +170,8 @@ function levelFor(record: object, event: string): SystemMessageLevel {
     return status === 'failed' ? 'error' : status === 'installed' || status === 'completed' ? 'success' : 'progress';
   }
   if (event === 'task_notification') {
-    return readString(record, 'status') === 'completed' ? 'success' : 'warning';
+    const status = readString(record, 'status');
+    return status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'warning';
   }
   if (event === 'status') {
     const compactResult = readString(record, 'compact_result');
@@ -170,6 +204,17 @@ function levelFor(record: object, event: string): SystemMessageLevel {
     return 'progress';
   }
   return 'info';
+}
+
+function isBackgroundTaskEvent(event: string): event is BackgroundTaskEvent {
+  return event === 'task_notification'
+    || event === 'task_progress'
+    || event === 'task_started'
+    || event === 'task_updated';
+}
+
+function isBackgroundTaskMessage(message: ClaudeSystemMessage): message is ClaudeBackgroundTaskMessage {
+  return isBackgroundTaskEvent(message.subtype);
 }
 
 function detailsFor(record: object): string {
@@ -208,6 +253,10 @@ function joinNonEmpty(values: readonly (string | undefined)[]): string | undefin
 }
 
 function clipContent(value: string): string {
-  if (value.length <= MAX_SYSTEM_CONTENT_LENGTH) return value;
-  return `${value.slice(0, MAX_SYSTEM_CONTENT_LENGTH - 1)}…`;
+  return clipText(value, MAX_SYSTEM_CONTENT_LENGTH);
+}
+
+function clipText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1)}…`;
 }

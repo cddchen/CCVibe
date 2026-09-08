@@ -643,6 +643,51 @@ describe('createClaudeAgentHost', () => {
     }
   });
 
+  it('single-flights concurrent catalog refreshes and exposes the same operation over RPC', async () => {
+    const harness = serviceHarness();
+    const workspace = createWorkspace({
+      id: createWorkspaceId('workspace-single-flight'),
+      path: '/tmp/single-flight-project',
+      displayName: 'Single Flight Project',
+    });
+    const pendingSessions = deferred<CatalogListSessionsResult>();
+    let listSessionsCalls = 0;
+    const catalogSource: CatalogSource = {
+      load: () => ({ workspaces: [workspace], models: [] }),
+      listSessions: () => {
+        listSessionsCalls += 1;
+        return listSessionsCalls === 1 ? pendingSessions.promise : [];
+      },
+    };
+    const host = await createClaudeAgentHost({
+      ...baseOptions(harness.service),
+      catalogSource,
+    });
+    const client = await openClient(await listen(host));
+
+    try {
+      const first = host.refreshCatalog();
+      const second = host.refreshCatalog();
+      expect(second).toBe(first);
+      await Promise.resolve();
+      expect(listSessionsCalls).toBe(1);
+      pendingSessions.resolve([]);
+      await Promise.all([first, second]);
+      expect(listSessionsCalls).toBe(1);
+
+      await expect(call(client, 'initialize', 'initialize', {
+        ...initializeParams(),
+        initialSubscriptions: [root],
+      })).resolves.toMatchObject({ result: { snapshots: [{ resource: root }] } });
+      const refreshed = await call(client, 'refresh', 'catalog/refresh', { channel: root });
+      expect(refreshed).toMatchObject({ result: { snapshot: { resource: root } } });
+      expect(listSessionsCalls).toBe(2);
+    } finally {
+      await closeClient(client);
+      await host.shutdown();
+    }
+  });
+
   it('discovers the default catalog from SDK sessions and Query models', async () => {
     const harness = serviceHarness();
     const sdkSessions = [{

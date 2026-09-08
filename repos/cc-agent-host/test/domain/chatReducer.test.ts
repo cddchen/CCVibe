@@ -183,6 +183,86 @@ describe('chatReducer', () => {
     expect(first.modifiedAt).toBe('third');
   });
 
+  it('updates and clears only active turn activity and drops it at completion', () => {
+    const started = chatReducer(createChatState({ modifiedAt: 'initial' }), start('t1'));
+    const requesting = chatReducer(started, {
+      type: 'chat/turnActivityChanged', turnId: turn, activity: 'requesting_model', timestamp: 't2',
+    });
+    expect(requesting.activeTurn?.activity).toBe('requesting_model');
+    expect(chatReducer(requesting, {
+      type: 'chat/turnActivityChanged', turnId: turn, activity: 'requesting_model', timestamp: 'duplicate',
+    })).toBe(requesting);
+    const compacting = chatReducer(requesting, {
+      type: 'chat/turnActivityChanged', turnId: turn, activity: 'compacting_context', timestamp: 't3',
+    });
+    expect(compacting.activeTurn?.activity).toBe('compacting_context');
+    expect(chatReducer(compacting, {
+      type: 'chat/turnActivityChanged', turnId: otherTurn, activity: null, timestamp: 'wrong',
+    })).toBe(compacting);
+    const cleared = chatReducer(compacting, {
+      type: 'chat/turnActivityChanged', turnId: turn, activity: null, timestamp: 't4',
+    });
+    expect(cleared.activeTurn).not.toHaveProperty('activity');
+    const completed = chatReducer(compacting, {
+      type: 'chat/turnCompleted', turnId: turn, timestamp: 't5',
+    });
+    expect(completed.turns[0]).not.toHaveProperty('activity');
+  });
+
+  it('upserts changed system messages in place and keeps identical repeats idempotent', () => {
+    const initial = chatReducer(createChatState({ modifiedAt: 'initial' }), start('turn-start'));
+    const first = chatReducer(initial, {
+      type: 'chat/responsePartAdded',
+      turnId: turn,
+      part: {
+        kind: 'system_message',
+        id: markdownPart,
+        event: 'task_started',
+        title: '后台任务进度',
+        content: 'Indexing',
+        level: 'progress',
+      },
+      timestamp: 'task-start',
+    });
+    const repeated = chatReducer(first, {
+      type: 'chat/responsePartAdded',
+      turnId: turn,
+      part: {
+        kind: 'system_message',
+        id: markdownPart,
+        event: 'task_started',
+        title: '后台任务进度',
+        content: 'Indexing',
+        level: 'progress',
+      },
+      timestamp: 'duplicate',
+    });
+    const updated = chatReducer(repeated, {
+      type: 'chat/responsePartAdded',
+      turnId: turn,
+      part: {
+        kind: 'system_message',
+        id: markdownPart,
+        event: 'task_notification',
+        title: '后台任务进度',
+        content: 'Done',
+        level: 'success',
+      },
+      timestamp: 'task-done',
+    });
+
+    expect(repeated).toBe(first);
+    expect(updated.activeTurn?.parts).toEqual([{
+      kind: 'system_message',
+      id: markdownPart,
+      event: 'task_notification',
+      title: '后台任务进度',
+      content: 'Done',
+      level: 'success',
+    }]);
+    expect(updated.modifiedAt).toBe('task-done');
+  });
+
   it('returns the same state for invalid targets and refuses a second active turn', () => {
     const started = chatReducer(createChatState({ modifiedAt: 'initial' }), start());
     const invalidDelta = chatReducer(started, {

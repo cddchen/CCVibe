@@ -12,9 +12,10 @@ import {
   parseTurnId,
   parseWorkspaceId,
 } from '../domain/ids.js';
-import type { ChatUri, TurnId } from '../domain/ids.js';
+import type { ChatUri, RootUri, TurnId } from '../domain/ids.js';
 import type { JsonValue } from '../domain/chat.js';
 import type { ChatState } from '../domain/chat.js';
+import type { HostState } from '../host/hostStateManager.js';
 import {
   parseChatUri,
   parseResourceUri,
@@ -278,6 +279,13 @@ export const resolveWorkspaceParamsSchema = z
   })
   .strict();
 
+/** Refreshing the catalog is a root-scoped operation; no client cache fields are accepted. */
+export const catalogRefreshParamsSchema = z
+  .object({
+    channel: rootUriSchema,
+  })
+  .strict();
+
 export const dispatchActionParamsSchema = z
   .object({
     channel: chatUriSchema,
@@ -338,6 +346,7 @@ export const subscribeSchema = subscribeParamsSchema;
 export const unsubscribeSchema = unsubscribeParamsSchema;
 export const reconnectSchema = reconnectParamsSchema;
 export const resolveWorkspaceSchema = resolveWorkspaceParamsSchema;
+export const catalogRefreshSchema = catalogRefreshParamsSchema;
 export const dispatchActionSchema = dispatchActionParamsSchema;
 export const catalogCreateChatSchema = catalogCreateChatParamsSchema;
 export const createChatParamsSchema = catalogCreateChatParamsSchema;
@@ -350,6 +359,7 @@ export type SubscribeParams = z.infer<typeof subscribeParamsSchema>;
 export type UnsubscribeParams = z.infer<typeof unsubscribeParamsSchema>;
 export type ReconnectParams = z.infer<typeof reconnectParamsSchema>;
 export type ResolveWorkspaceParams = z.infer<typeof resolveWorkspaceParamsSchema>;
+export type CatalogRefreshParams = z.infer<typeof catalogRefreshParamsSchema>;
 export type DispatchActionParams = z.infer<typeof dispatchActionParamsSchema>;
 export type SupportedCommandsParams = z.infer<typeof supportedCommandsParamsSchema>;
 export type CatalogCreateChatParams = z.infer<typeof catalogCreateChatParamsSchema>;
@@ -386,6 +396,10 @@ export interface CatalogCreateChatResult {
 
 export interface ResolveWorkspaceResult {
   readonly workspace: import('../catalog/types.js').CatalogWorkspace;
+}
+
+export interface CatalogRefreshResult<S = HostState> {
+  readonly snapshot: StateSnapshot<S, RootUri>;
 }
 
 export interface InteractionResolutionResult {

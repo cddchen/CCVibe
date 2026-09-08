@@ -31,6 +31,7 @@ import type {
   HostConfigureChatParams,
   HostConfigureChatResult,
   HostPermissionMode,
+  HostCatalogRefreshResult,
 } from '../../protocol/hostWire';
 import {
   createAsyncStorageHostPreferencesAdapter,
@@ -77,7 +78,7 @@ export interface PendingSend {
 }
 
 export interface RuntimeOperationError extends HomeSelectorError {
-  readonly operation: 'create' | 'subscribe' | 'send' | 'workspace';
+  readonly operation: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh';
   readonly chatUri?: ChatUri;
 }
 
@@ -103,6 +104,7 @@ export interface CloudRuntimeState {
   readonly pendingSend?: PendingSend;
   readonly operationError?: RuntimeOperationError;
   readonly chatOperationError?: ChatOperationError;
+  readonly refreshingSessions: boolean;
 }
 
 export type NewChatResult =
@@ -161,6 +163,10 @@ export type ConnectionActionResult =
 /** Result shared by save-only and connection actions so UI can surface field errors. */
 export type ConnectionSaveResult = ConnectionActionResult;
 
+export type SessionRefreshResult =
+  | { readonly status: 'accepted'; readonly snapshot: HostCatalogRefreshResult['snapshot'] }
+  | { readonly status: 'error'; readonly operation: 'refresh'; readonly code: string; readonly message?: string };
+
 export type DeleteConnectionResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly errors: Readonly<Partial<Record<'hostUrl', string>>> };
@@ -178,6 +184,7 @@ export interface RuntimeSupervisor {
   resolveApproval?(params: HostResolveApprovalParams): Promise<HostInteractionResolutionResult>;
   resolveInput?(params: HostResolveInputParams): Promise<HostInteractionResolutionResult>;
   resolveWorkspace?(params: HostResolveWorkspaceParams): Promise<HostResolveWorkspaceResult>;
+  refreshCatalog?(): Promise<HostCatalogRefreshResult>;
 }
 
 export interface CloudRuntimeDependencies {
@@ -216,6 +223,7 @@ export class CloudRuntime {
   private clientSeq = 0;
   private disposed = false;
   private connectionOperationGeneration = 0;
+  private sessionRefreshFlight: Promise<SessionRefreshResult> | undefined;
 
   public constructor(dependencies: CloudRuntimeDependencies) {
     this.dependencies = dependencies;
@@ -235,6 +243,7 @@ export class CloudRuntime {
       tokenAvailable: false,
       tokenAvailability: {},
       selection: {},
+      refreshingSessions: false,
     });
     this.actionsValue = Object.freeze({
       connect: (values: ConnectionFormValues, connectionId?: ConnectionId | string | null) => this.connect(values, connectionId),
@@ -249,6 +258,7 @@ export class CloudRuntime {
       subscribeChat: (chatUri: ChatUri) => this.subscribeChat(chatUri),
       setWorkspace: (workspaceId: string) => this.setWorkspace(workspaceId),
       resolveWorkspace: (path: string) => this.resolveWorkspace(path),
+      refreshSessions: () => this.refreshSessions(),
       setModel: (modelId: string) => this.setModel(modelId),
       setEffort: (effort: RuntimeSelection['effort']) => this.setEffort(effort),
       setPermissionMode: (permissionMode: HostPermissionMode) => this.setPermissionMode(permissionMode),
@@ -716,6 +726,47 @@ export class CloudRuntime {
     }
   }
 
+  private async refreshSessions(): Promise<SessionRefreshResult> {
+    if (this.sessionRefreshFlight !== undefined) {
+      return this.sessionRefreshFlight;
+    }
+    const flight = this.performSessionRefresh();
+    this.sessionRefreshFlight = flight;
+    void flight.then(
+      () => {
+        if (this.sessionRefreshFlight === flight) this.sessionRefreshFlight = undefined;
+      },
+      () => {
+        if (this.sessionRefreshFlight === flight) this.sessionRefreshFlight = undefined;
+      },
+    );
+    return flight;
+  }
+
+  private async performSessionRefresh(): Promise<SessionRefreshResult> {
+    const supervisor = this.requireConnectedSupervisor();
+    if (supervisor?.refreshCatalog === undefined) {
+      return this.failSessionRefresh('NOT_CONNECTED');
+    }
+
+    this.setState({ refreshingSessions: true, operationError: undefined });
+    try {
+      const result = await supervisor.refreshCatalog();
+      this.setState({ refreshingSessions: false, operationError: undefined });
+      return { status: 'accepted', snapshot: result.snapshot };
+    } catch (error) {
+      return this.failSessionRefresh(errorCode(error));
+    }
+  }
+
+  private failSessionRefresh(code: string, message?: string): SessionRefreshResult {
+    this.setState({
+      refreshingSessions: false,
+      operationError: { operation: 'refresh', code, ...(message === undefined ? {} : { message }) },
+    });
+    return { status: 'error', operation: 'refresh', code, ...(message === undefined ? {} : { message }) };
+  }
+
   private setModel(modelId: string): void {
     this.setState({ selection: { ...this.state.selection, modelId } });
     void this.persistSelection({ modelId });
@@ -1025,7 +1076,7 @@ export class CloudRuntime {
         clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
         clientInfo: {
           name: 'Cloud',
-          version: '0.7.0',
+          version: '0.8.0',
           platform: this.dependencies.platform ?? 'unknown',
         },
         store: syncStore,
@@ -1222,6 +1273,7 @@ export interface CloudRuntimeActions {
   subscribeChat(chatUri: ChatUri): Promise<boolean>;
   setWorkspace(workspaceId: string): void;
   resolveWorkspace(path: string): Promise<WorkspaceResolutionResult>;
+  refreshSessions(): Promise<SessionRefreshResult>;
   setModel(modelId: string): void;
   setEffort(effort: RuntimeSelection['effort']): void;
   setPermissionMode(permissionMode: HostPermissionMode): void;

@@ -50,6 +50,8 @@ export default function HomeScreen(): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const view = useCloudSelector(selectHomeView);
   const pendingSend = useCloudSelector((state) => state.pendingSend);
+  const canRefreshSessions = useCloudSelector((state) => state.sync.status === 'connected');
+  const refreshingSessions = useCloudSelector((state) => state.refreshingSessions);
   const selectedEffort = useCloudSelector((state) => state.selection.effort);
   const selectedPermissionMode = useCloudSelector((state) => state.selection.permissionMode);
   const actions = useCloudActions();
@@ -101,11 +103,13 @@ export default function HomeScreen(): JSX.Element {
             ListHeaderComponent={(
               <HomeHeader
                 actions={actions}
+                canRefreshSessions={canRefreshSessions}
                 onOpenChat={openChat}
                 onOpenConnection={openConnection}
                 pendingSend={pendingSend}
                 selectedEffort={selectedEffort}
                 selectedPermissionMode={selectedPermissionMode}
+                refreshingSessions={refreshingSessions}
                 view={view}
               />
             )}
@@ -149,11 +153,13 @@ const COMPACT_HEADER_CONTENT_HEIGHT = 58;
 
 interface HomeHeaderProps {
   readonly actions: CloudRuntimeActions;
+  readonly canRefreshSessions: boolean;
   readonly onOpenChat: (chatUri: HomeSessionItem['chatUri']) => void;
   readonly onOpenConnection: () => void;
   readonly pendingSend: PendingSend | undefined;
   readonly selectedEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined;
   readonly selectedPermissionMode: HostPermissionMode | undefined;
+  readonly refreshingSessions: boolean;
   readonly view: HomeViewModel;
 }
 
@@ -315,7 +321,7 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
         <StateBanner actionLabel="重新连接" icon="alert-circle-outline" onAction={props.onOpenConnection} text="读取 Host 数据失败" tone="error" />
       ) : null}
 
-      {props.view.operationError !== undefined ? (
+      {props.view.operationError !== undefined && props.view.operationError.operation !== 'refresh' ? (
         <GlassSurface
           dynamicScheme={{ surfaceContainerHigh: theme.colors.errorContainer }}
           materialElevation={1}
@@ -405,7 +411,21 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
 
       <View style={styles.sectionHeading}>
         <Text allowFontScaling style={[styles.sectionTitle, { color: theme.colors.onBackground }]}>最近会话</Text>
+        <GlassPressable
+          accessibilityHint="从 Host 重新读取最新会话"
+          accessibilityLabel="刷新最近会话"
+          disabled={props.refreshingSessions || !props.canRefreshSessions}
+          onPress={() => void props.actions.refreshSessions()}
+          style={styles.refreshButton}
+        >
+          {props.refreshingSessions
+            ? <ActivityIndicator color={theme.colors.onSurfaceVariant} size="small" />
+            : <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="refresh" size={22} />}
+        </GlassPressable>
       </View>
+      {props.view.operationError?.operation === 'refresh' ? (
+        <Text accessibilityRole="alert" style={[styles.refreshError, { color: theme.colors.error }]}>最近会话刷新失败，请重试</Text>
+      ) : null}
       <HomeChoiceSheet
         currentValue={pickerValue}
         onClose={() => setPicker(undefined)}
@@ -655,7 +675,8 @@ function effortLabel(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undef
   }
 }
 
-function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | 'send' | 'workspace' | undefined, message?: string): string {
+function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh' | undefined, message?: string): string {
+  if (operation === 'refresh') return '最近会话刷新失败，请重试';
   if (operation === 'workspace') return message ?? '工作区路径校验失败，请重试';
   if (operation === 'send') {
     switch (code) {
@@ -724,8 +745,10 @@ const styles = StyleSheet.create({
   workspacePathInput: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, fontSize: 16, minHeight: 48, paddingHorizontal: 14, paddingVertical: 10 },
   workspaceResolveButton: { alignItems: 'center', borderRadius: 14, justifyContent: 'center', minHeight: 48, paddingHorizontal: 14 },
   workspaceResolverError: { fontSize: 13, lineHeight: 19 },
-  sectionHeading: { alignItems: 'center', minHeight: 52, paddingHorizontal: 2, paddingTop: 8 },
-  sectionTitle: { fontSize: 28, fontWeight: '800', letterSpacing: -0.6, lineHeight: 36, width: '100%' },
+  sectionHeading: { alignItems: 'center', flexDirection: 'row', minHeight: 52, paddingHorizontal: 2, paddingTop: 8 },
+  sectionTitle: { flex: 1, fontSize: 28, fontWeight: '800', letterSpacing: -0.6, lineHeight: 36 },
+  refreshButton: { alignItems: 'center', borderRadius: 22, height: 44, justifyContent: 'center', width: 44 },
+  refreshError: { fontSize: 13, lineHeight: 19, marginTop: -7, paddingHorizontal: 2 },
   compactHeader: { left: 0, position: 'absolute', right: 0, top: 0, zIndex: 10 },
   compactHeaderMaterial: { ...StyleSheet.absoluteFillObject },
   compactHeaderContent: { flex: 1, justifyContent: 'center', paddingHorizontal: 20 },

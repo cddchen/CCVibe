@@ -6,11 +6,13 @@ import type {
   InputQuestion,
   ResponsePart,
   Turn,
+  TurnActivity,
 } from './chat.js';
 import type { ApprovalId, InputRequestId, PartId, ToolCallId, TurnId } from './ids.js';
 
 export const CHAT_ACTION_TYPES = {
   turnStarted: 'chat/turnStarted',
+  turnActivityChanged: 'chat/turnActivityChanged',
   responsePartAdded: 'chat/responsePartAdded',
   responsePartDelta: 'chat/responsePartDelta',
   toolCallStarted: 'chat/toolCallStarted',
@@ -38,6 +40,11 @@ interface ChatActionBase<TType extends ChatActionType> {
 export interface TurnStartedAction extends ChatActionBase<'chat/turnStarted'> {
   readonly turnId: TurnId;
   readonly prompt: string;
+}
+
+export interface TurnActivityChangedAction extends ChatActionBase<'chat/turnActivityChanged'> {
+  readonly turnId: TurnId;
+  readonly activity: TurnActivity | null;
 }
 
 export interface ResponsePartAddedAction extends ChatActionBase<'chat/responsePartAdded'> {
@@ -159,6 +166,7 @@ export interface TurnsLoadedAction extends ChatActionBase<'chat/turnsLoaded'> {
 
 export type ChatAction =
   | TurnStartedAction
+  | TurnActivityChangedAction
   | ResponsePartAddedAction
   | ResponsePartDeltaAction
   | ToolCallStartedAction

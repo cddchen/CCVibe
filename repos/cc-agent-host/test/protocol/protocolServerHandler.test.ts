@@ -241,6 +241,153 @@ describe('ProtocolServerHandler', () => {
     });
   });
 
+  it('refreshes a subscribed root catalog through the SDK-free composition port', async () => {
+    const host = new HostStateManager({ now: () => 'server-time', replayCapacity: 8 });
+    host.registerCatalog(root, createRootCatalogState({
+      resource: root,
+      host: { id: 'host-a', displayName: 'Host A' },
+      modifiedAt: 'catalog-0',
+    }));
+    const provider = new HostStateProvider(host, 'epoch-1');
+    const registry = new LogicalClientRegistry();
+    const actor = new FakeChatActor({
+      hostStateManager: host,
+      sequencer: new SequencerByKey(),
+      commandDeduper: new CommandDeduper({ capacity: 8 }),
+      nowAction: () => 'action-time',
+      allocateTurnId: () => createTurnId('root-refresh-turn'),
+    });
+    const refresh = vi.fn(async (channel: typeof root) => {
+      host.dispatchCatalog(channel, {
+        type: 'catalog/workspacesReplaced',
+        workspaces: [createWorkspace({
+          id: createWorkspaceId('refresh-workspace'),
+          path: '/tmp/refresh-workspace',
+          displayName: 'Refresh Workspace',
+        })],
+        timestamp: 'catalog-refresh',
+      });
+      const state = host.getCatalogState(channel);
+      if (state === undefined) throw new Error('root catalog missing');
+      return { resource: channel, state, fromSeq: host.serverSeq };
+    });
+    const handler = new ProtocolServerHandler({
+      hostEpoch: 'epoch-1',
+      stateProvider: provider,
+      clientRegistry: registry,
+      chatActor: actor,
+      catalogRefresher: refresh,
+    });
+    const connection = new MemoryConnection();
+
+    await initialize(handler, connection, clientA, [root]);
+    connection.sent.length = 0;
+    await handler.handle(connection, request('refresh', 'catalog/refresh', { channel: root }));
+
+    expect(refresh).toHaveBeenCalledWith(root);
+    expect(connection.lastResponse()).toMatchObject({
+      id: 'refresh',
+      result: { snapshot: { resource: root, fromSeq: 1, state: { resource: root } } },
+    });
+  });
+
+  it('strictly validates catalog refresh params and requires configure authorization', async () => {
+    const principal = createPrincipal({ principalId: 'alice', tenantId: 'tenant-a', capabilities: ['subscribe'] });
+    const acl = createAccessControlList([{
+      resource: root,
+      tenantId: 'tenant-a',
+      grants: [{ principalId: 'alice', capabilities: ['subscribe'] }],
+    }]);
+    const host = new HostStateManager({ now: () => 'server-time', replayCapacity: 8 });
+    host.registerCatalog(root, createRootCatalogState({
+      resource: root,
+      host: { id: 'host-a', displayName: 'Host A' },
+      modifiedAt: 'catalog-0',
+    }));
+    const provider = new HostStateProvider(host, 'epoch-1');
+    const registry = new LogicalClientRegistry();
+    const actor = new FakeChatActor({
+      hostStateManager: host,
+      sequencer: new SequencerByKey(),
+      commandDeduper: new CommandDeduper({ capacity: 8 }),
+      nowAction: () => 'action-time',
+      allocateTurnId: () => createTurnId('root-refresh-auth-turn'),
+    });
+    const refresh = vi.fn(async (channel: typeof root) => {
+      const state = host.getCatalogState(channel);
+      if (state === undefined) throw new Error('root catalog missing');
+      return { resource: channel, state, fromSeq: host.serverSeq };
+    });
+    const handler = new ProtocolServerHandler({
+      hostEpoch: 'epoch-1',
+      stateProvider: provider,
+      clientRegistry: registry,
+      chatActor: actor,
+      catalogRefresher: refresh,
+      acl,
+    });
+    const connection = new AuthenticatedConnection(principal);
+
+    await initialize(handler, connection, clientA, [root]);
+    await handler.handle(connection, request('unknown-field', 'catalog/refresh', { channel: root, extra: true }));
+    expect(connection.lastResponse()).toMatchObject({ id: 'unknown-field', error: { code: -32602 } });
+
+    await handler.handle(connection, request('wrong-resource', 'catalog/refresh', { channel: chat }));
+    expect(connection.lastResponse()).toMatchObject({ id: 'wrong-resource', error: { code: -32602 } });
+
+    await handler.handle(connection, request('denied', 'catalog/refresh', { channel: root }));
+    expect(connection.lastResponse()).toMatchObject({ id: 'denied', error: { code: -32007 } });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('rejects catalog refresh before initialization or without a root subscription', async () => {
+    const host = new HostStateManager({ now: () => 'server-time', replayCapacity: 8 });
+    host.registerCatalog(root, createRootCatalogState({
+      resource: root,
+      host: { id: 'host-a', displayName: 'Host A' },
+      modifiedAt: 'catalog-0',
+    }));
+    const provider = new HostStateProvider(host, 'epoch-1');
+    const registry = new LogicalClientRegistry();
+    const actor = new FakeChatActor({
+      hostStateManager: host,
+      sequencer: new SequencerByKey(),
+      commandDeduper: new CommandDeduper({ capacity: 8 }),
+      nowAction: () => 'action-time',
+      allocateTurnId: () => createTurnId('root-refresh-subscription-turn'),
+    });
+    const refresh = vi.fn(async (channel: typeof root) => {
+      const state = host.getCatalogState(channel);
+      if (state === undefined) throw new Error('root catalog missing');
+      return { resource: channel, state, fromSeq: host.serverSeq };
+    });
+    const handler = new ProtocolServerHandler({
+      hostEpoch: 'epoch-1',
+      stateProvider: provider,
+      clientRegistry: registry,
+      chatActor: actor,
+      catalogRefresher: refresh,
+    });
+    const connection = new MemoryConnection();
+
+    await handler.handle(connection, request('not-initialized', 'catalog/refresh', { channel: root }));
+    expect(connection.lastResponse()).toMatchObject({ id: 'not-initialized', error: { code: -32001 } });
+    await initialize(handler, connection, clientA, [chat]);
+    await handler.handle(connection, request('not-subscribed', 'catalog/refresh', { channel: root }));
+    expect(connection.lastResponse()).toMatchObject({ id: 'not-subscribed', error: { code: -32005 } });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('returns method-not-found when catalog refresh is not composed', async () => {
+    const { handler } = createRootHarness();
+    const connection = new MemoryConnection();
+
+    await initialize(handler, connection, clientA, [root]);
+    await handler.handle(connection, request('missing-port', 'catalog/refresh', { channel: root }));
+
+    expect(connection.lastResponse()).toMatchObject({ id: 'missing-port', error: { code: -32601 } });
+  });
+
   it('routes catalog/createChat and publishes the accepted chat to root subscribers', async () => {
     const host = new HostStateManager({ now: () => 'server-time', replayCapacity: 8 });
     host.registerCatalog(root, createRootCatalogState({

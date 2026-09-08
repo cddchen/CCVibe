@@ -97,7 +97,7 @@ URI segment 是不透明标识，不允许路径分隔符、查询/片段、`.`�
 | `ToolCall` | `id`, `name`, `input`, `status`, `startedAt`, 可选 `readyAt/completedAt/result/error` | 模型调用工具的完整状态。 |
 | `SystemMessage` | `event`, `title`, `content`, `level` | SDK system event 的脱敏、限长、可展示投影。 |
 | `ResponsePart` | `kind`、`id`；markdown/reasoning 有 `content`，system_message 有归一化的系统内容，tool_call 有 `toolCall` | 一个回复由多个可流式更新或折叠展示的块组成。 |
-| `ActiveTurn` | `id`, `prompt`, 固定 `status: active`, `parts`, `startedAt` | 当前唯一进行中的轮次。 |
+| `ActiveTurn` | `id`, `prompt`, 固定 `status: active`, `parts`, `startedAt`，可选 `activity` | 当前唯一进行中的轮次；activity 只承载请求模型/压缩上下文等瞬时状态，不进入终态历史。 |
 | `Turn` | `id`, `prompt`, `status`, `parts`, `startedAt`, 可选 `completedAt/error` | 历史或终态轮次。 |
 | `PendingApproval` | `id`, `turnId`, 可选 `toolCallId`；工具、输入、标题、建议、请求标识、规则、`requestedAt` | 等待用户批准/拒绝的工具请求。 |
 | `PendingInputRequest` | `id`, `turnId`, `questions`, `requestedAt` | 等待用户回答的结构化问题。 |
@@ -111,6 +111,7 @@ URI segment 是不透明标识，不允许路径分隔符、查询/片段、`.`�
 | 动作模型 | 专有字段 | 对 `ChatState` 的意义 |
 | --- | --- | --- |
 | `TurnStartedAction` | `turnId`, `prompt` | 创建 `activeTurn`。 |
+| `TurnActivityChangedAction` | `turnId`, `activity` | 设置或清除 active turn 的瞬时 SDK activity；终态 turn 不接受该动作。 |
 | `ResponsePartAddedAction` | `turnId`, `part` | 增加 markdown、reasoning 或 system_message 内容块；system tail event 可追加到已完成 turn。 |
 | `ResponsePartDeltaAction` | `turnId`, `partId`, `delta` | 追加流式文本。 |
 | `ToolCallStartedAction` | `turnId`, `partId`, `toolCallId`, `name`, 可选 `input` | 创建工具调用块。 |

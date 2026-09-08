@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { createRootUri, type ChatUri } from '../src/protocol/resourceUri';
+import { createChatUri, createRootUri, type ChatUri } from '../src/protocol/resourceUri';
+import type { HostRootCatalogState } from '../src/protocol/hostWire';
 import {
   CloudRuntime,
   type CloudRuntimeDependencies,
@@ -8,7 +9,7 @@ import {
 } from '../src/features/runtime/runtimeStore';
 import { TransportRpcError } from '../src/sync/transport';
 
-function createCatalog() {
+function createCatalog(): HostRootCatalogState {
   return {
     resource: createRootUri(),
     host: { id: 'host-a', displayName: 'Host A' },
@@ -84,6 +85,74 @@ function dependencies(supervisor: RuntimeSupervisor): CloudRuntimeDependencies {
 }
 
 describe('Cloud runtime new-chat flow', () => {
+  it('refreshes sessions through the connected supervisor and keeps the Host snapshot authoritative', async () => {
+    const harness = createSupervisorHarness();
+    let refreshCalls = 0;
+    const supervisor: RuntimeSupervisor = {
+      ...harness.supervisor,
+      refreshCatalog: async () => {
+        refreshCalls += 1;
+        return {
+          snapshot: {
+            resource: createRootUri(),
+            state: createCatalog(),
+            fromSeq: 4,
+          },
+        };
+      },
+    };
+    const runtime = new CloudRuntime(dependencies(supervisor));
+    runtime.hydrateForTest({ catalog: createCatalog(), syncStatus: 'connected', supervisor });
+
+    const result = await runtime.actions.refreshSessions();
+
+    expect(result.status).toBe('accepted');
+    expect(refreshCalls).toBe(1);
+    expect(runtime.getState().refreshingSessions).toBe(false);
+    expect(runtime.getState().operationError).toBeUndefined();
+  });
+
+  it('normalizes refresh failures while preserving last-known-good sessions', async () => {
+    const harness = createSupervisorHarness();
+    const previous = {
+      ...createCatalog(),
+      sessions: [{
+        chatUri: createChatUri('session-a', 'chat-a'),
+        sdkSessionRef: 'sdk-a',
+        workspaceId: 'workspace-a',
+        title: 'Existing session',
+        updatedAt: '2026-09-08T00:00:00.000Z',
+        status: 'idle' as const,
+        archived: false,
+      }],
+    };
+    const supervisor: RuntimeSupervisor = {
+      ...harness.supervisor,
+      refreshCatalog: async () => {
+        throw new TransportRpcError({ code: -32005, message: 'Command rejected' });
+      },
+    };
+    const runtime = new CloudRuntime(dependencies(supervisor));
+    runtime.hydrateForTest({ catalog: previous, syncStatus: 'connected', supervisor });
+
+    const result = await runtime.actions.refreshSessions();
+
+    expect(result).toMatchObject({ status: 'error', operation: 'refresh', code: 'RPC_ERROR' });
+    expect(runtime.getState().refreshingSessions).toBe(false);
+    expect(runtime.getState().operationError).toMatchObject({ operation: 'refresh', code: 'RPC_ERROR' });
+    expect(runtime.getState().sync.resources[0]).toMatchObject({ state: { sessions: previous.sessions } });
+  });
+
+  it('does not issue a refresh request while disconnected', async () => {
+    const harness = createSupervisorHarness();
+    const runtime = new CloudRuntime(dependencies(harness.supervisor));
+
+    const result = await runtime.actions.refreshSessions();
+
+    expect(result).toEqual({ status: 'error', operation: 'refresh', code: 'NOT_CONNECTED' });
+    expect(runtime.getState().operationError).toEqual({ operation: 'refresh', code: 'NOT_CONNECTED' });
+  });
+
   it('creates, subscribes, sends with independent command identities, and preserves a failed send for retry', async () => {
     const harness = createSupervisorHarness();
     const runtime = new CloudRuntime(dependencies(harness.supervisor));

@@ -833,6 +833,18 @@ export async function createClaudeAgentHost(
     supportedCommandsProvider: (chatUri) => registry.supportedCommands(chatUri),
     chatConfigurator: configureChat,
     workspaceResolver: resolveWorkspace,
+    catalogRefresher: async (channel) => {
+      await refreshCatalog();
+      const state = hostStateManager.getCatalogState(channel);
+      if (state === undefined) {
+        throw new Error('catalog resource is not registered');
+      }
+      return {
+        resource: channel,
+        state,
+        fromSeq: hostStateManager.serverSeq,
+      };
+    },
     ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
     ...(options.acl === undefined ? {} : { acl: options.acl }),
     ...(options.accessControlList === undefined ? {} : { accessControlList: options.accessControlList }),
@@ -859,8 +871,9 @@ export async function createClaudeAgentHost(
   let shuttingDown = false;
   let protocolDisposed = false;
   let shutdownPromise: Promise<void> | undefined;
+  let catalogRefreshFlight: Promise<RootCatalogState> | undefined;
 
-  const refreshCatalog = async (): Promise<RootCatalogState> => {
+  const performCatalogRefresh = async (): Promise<RootCatalogState> => {
     if (shuttingDown) {
       throw new Error('Claude Agent Host is shutting down');
     }
@@ -1040,6 +1053,24 @@ export async function createClaudeAgentHost(
     }
     sdkModelIdentities = projectCatalogSdkModelIdentities(discoveredSdkModels);
     return state;
+  };
+
+  /** Collapse concurrent UI refreshes into one SDK catalog probe. */
+  const refreshCatalog = (): Promise<RootCatalogState> => {
+    if (catalogRefreshFlight !== undefined) {
+      return catalogRefreshFlight;
+    }
+    const flight = performCatalogRefresh();
+    catalogRefreshFlight = flight;
+    void flight.then(
+      () => {
+        if (catalogRefreshFlight === flight) catalogRefreshFlight = undefined;
+      },
+      () => {
+        if (catalogRefreshFlight === flight) catalogRefreshFlight = undefined;
+      },
+    );
+    return flight;
   };
 
   const createBackingFromInput = (input: ClaudeAgentHostCreateChatInput): ChatBacking =>

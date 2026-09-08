@@ -9,6 +9,7 @@
 - 网络入口：`GET /health`、`GET /ws`（WebSocket）。没有 REST 聊天接口。
 - 客户端协议：JSON-RPC 2.0，当前协商版本为 `1.0.0`。
 - 状态模型：服务端权威的 `ChatState`；所有变更以有序 `state/action` 通知广播。
+- 根目录 catalog：`agent-root://` 由 Host 维护工作区、模型和最近会话摘要；刷新必须重新探测 Claude Agent SDK session catalog。
 - SDK 边界：只有 `claude/` 层接触 `@anthropic-ai/claude-agent-sdk`；协议、领域模型和客户端都不依赖 SDK 类型。
 - 持久化边界：可选 SQLite overlay 仅保存会话 backing、命令回执和审批审计；聊天转录历史仍由 Claude SDK 的 session API 读取。
 
@@ -63,6 +64,7 @@ HostStateManager ── ReplayBuffer ── ProtocolServerHandler fan-out
 5. Snapshot/reconnect 期间通过订阅屏障暂存动作，先返回基线再按 `serverSeq` 发送，避免漏发和乱序。
 6. 新连接使用同一 `clientId` 时，旧连接被 fenced，收到 `client/replaced` 后以 WebSocket `4001` 关闭。
 7. 未配置 `canUseTool` 时，不会自动同意工具操作；请求会进入交互注册表等待客户端决议。
+8. `catalog/refresh` 通过 Host 的单飞入口执行 SDK catalog probe；并发请求共享同一个进行中的 probe，完成或失败后下一次请求才会开始新的 probe。
 
 ## 3. 生命周期与数据流
 
@@ -104,13 +106,19 @@ dispatchAction(chat/send)
 
 `conversation_and_files` 依赖 `enableFileCheckpointing`，只保证恢复 SDK checkpoint 覆盖的文件编辑；shell、外部服务、副作用以及 SDK 明确跳过的链接安全路径不在“文件变更”保证内。SDK 回退完成前不会广播 `chat/rewound`，失败返回 `REWIND_FAILED`，客户端不得乐观删除历史。
 
+### 3.4 首页 catalog 刷新
+
+首页的“最近会话”刷新使用 `catalog/refresh`，而不是在客户端重新计算或重新订阅本地缓存。Host 组合层把协议的 SDK-free `catalogRefresher` port 绑定到现有 `refreshCatalog()`；该函数重新调用 Claude Agent SDK `listSessions()`，按当前 workspace/model 规则投影 catalog，并通过 `HostStateManager` 提交替换 actions。成功响应返回同一 `agent-root://` 的 `StateSnapshot`（含刷新后的 `fromSeq`），因此调用方在 RPC 完成时已有这次刷新切点；catalog actions 仍会广播给其他 root 订阅者。
+
+`catalog/refresh` 只接受严格参数 `{ "channel": "agent-root://" }`。连接必须已经 initialize/reconnect、仍是当前逻辑 client、订阅了 root channel，并拥有 root 资源的 `configure` capability。未满足这些条件时，handler 在调用刷新 port 或 SDK 之前拒绝请求；协议层不导入 Claude SDK 类型。刷新失败不会清空上一份已提交的 catalog，客户端继续展示 last-known-good sessions。
+
 ## 4. 资源、状态与消息信封
 
 ### 4.1 资源 URI
 
 | 类型 | 格式 | 当前状态提供者支持 |
 | --- | --- | --- |
-| Root | `agent-root://` | 协议可声明，chat provider 返回 missing |
+| Root | `agent-root://` | 支持 workspace、model、session catalog 快照、订阅与 `catalog/refresh` |
 | Session | `agent-session://{sessionId}` | 协议可声明，chat provider 返回 missing |
 | Chat | `agent-chat://{sessionId}/{chatId}` | 支持快照、订阅、命令、重连 |
 
@@ -156,8 +164,8 @@ URI segment 为不透明 ID，不能含空白、`/`、`?`、`#`、反斜杠、`.
 
 `origin` 仅在由客户端命令引起的动作上存在。`action.type` 当前包括：
 
-- turn：`chat/turnStarted`、`chat/turnCompleted`、`chat/turnFailed`、`chat/turnInterrupted`、`chat/turnsLoaded`、`chat/rewound`
-- 文本/推理/系统次消息：`chat/responsePartAdded`、`chat/responsePartDelta`。SDK system event 先归一化为 `system_message` part，原始 SDK 类型不进入协议
+- turn：`chat/turnStarted`、`chat/turnActivityChanged`、`chat/turnCompleted`、`chat/turnFailed`、`chat/turnInterrupted`、`chat/turnsLoaded`、`chat/rewound`
+- 文本/推理/系统次消息：`chat/responsePartAdded`、`chat/responsePartDelta`。SDK system event 先归一化为 `system_message` part，原始 SDK 类型不进入协议；其中 `system/status` 归一化为 active turn 的瞬时 activity，只有压缩失败保留 error part
 - 工具：`chat/toolCallStarted`、`chat/toolCallInputDelta`、`chat/toolCallReady`、`chat/toolCallCompleted`
 - 交互：`chat/approvalRequested`、`chat/approvalResolved`、`chat/inputRequested`、`chat/inputResolved`
 
@@ -224,6 +232,22 @@ Bearer 只允许 `Authorization: Bearer <token>`；URL 中 `token`、`access_tok
 ```
 
 若 `hostEpoch` 一致且 replay buffer 覆盖所需区间，结果为 `{type:"replay", actions, missing, throughSeq, serverSeq, hostEpoch}`；否则为 `{type:"snapshot", snapshots, missing, throughSeq, serverSeq, hostEpoch}`。`hostEpoch` 变化时客户端必须接受 snapshot 路径。
+
+#### `catalog/refresh`
+
+重新从 Host 所在机器的 Claude Agent SDK 读取 root catalog。它不会读取或重算 Mobile 缓存，也不会建立第二份 transcript/catalog 数据库。
+
+```json
+{"jsonrpc":"2.0","id":8,"method":"catalog/refresh","params":{"channel":"agent-root://"}}
+```
+
+参数对象采用 strict schema，只允许 canonical root `channel`。成功返回：
+
+```json
+{"snapshot":{"resource":"agent-root://","fromSeq":91,"state":{"resource":"agent-root://","workspaces":[],"models":[],"sessions":[]}}}
+```
+
+除 schema 错误外，未初始化、旧连接、未订阅 root 或 ACL 缺少 `configure` capability 的请求都会在 SDK 调用前被拒绝。相同时间到达的刷新请求在 Host 内共享单飞 probe；刷新完成后，下一次 RPC 才会重新调用 SDK `listSessions()`。
 
 #### `dispatchAction`
 

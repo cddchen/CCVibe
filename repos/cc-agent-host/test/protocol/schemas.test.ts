@@ -24,6 +24,7 @@ import {
   clientActionSchema,
   clientIdSchema,
   catalogCreateChatParamsSchema,
+  catalogRefreshParamsSchema,
   dispatchActionParamsSchema,
   initializeParamsSchema,
   reconnectParamsSchema,
@@ -85,6 +86,14 @@ if (false) {
 }
 
 describe('Phase 1 protocol schemas', () => {
+  it('strictly validates the root-only catalog refresh params', () => {
+    const parsed = catalogRefreshParamsSchema.parse({ channel: root });
+
+    expect(parsed.channel).toBe(root);
+    expect(() => catalogRefreshParamsSchema.parse({ channel: chat })).toThrow();
+    expect(() => catalogRefreshParamsSchema.parse({ channel: root, extra: true })).toThrow();
+  });
+
   it('strictly validates catalog create chat params', () => {
     const parsed = catalogCreateChatParamsSchema.parse({
       channel: root,

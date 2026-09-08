@@ -5,7 +5,7 @@ export type HomeMode = 'loading' | 'disconnected' | 'ready' | 'no-workspace' | '
 export interface HomeSelectorError {
   readonly code: string;
   readonly message?: string;
-  readonly operation?: 'create' | 'subscribe' | 'send' | 'workspace';
+  readonly operation?: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh';
 }
 
 export interface HomeSelectorInput {

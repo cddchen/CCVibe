@@ -10,6 +10,17 @@ type HostTurn = HostChatState['turns'][number];
 type HostActiveTurn = NonNullable<HostChatState['activeTurn']>;
 type HostResponsePart = HostActiveTurn['parts'][number];
 
+function sameSystemMessagePart(
+  left: Extract<HostResponsePart, { readonly kind: 'system_message' }>,
+  right: Extract<HostResponsePart, { readonly kind: 'system_message' }>,
+): boolean {
+  return left.id === right.id
+    && left.event === right.event
+    && left.title === right.title
+    && left.content === right.content
+    && left.level === right.level;
+}
+
 function freezeArray<T>(values: readonly T[]): readonly T[] {
   return Object.isFrozen(values) ? values : Object.freeze([...values]);
 }
@@ -74,16 +85,52 @@ export function applyHostChatAction(state: HostChatState, action: HostChatAction
       };
       return freezeChat({ ...state, activeTurn, status: 'in_progress', modifiedAt: action.timestamp, pendingInputs });
     }
+    case 'chat/turnActivityChanged': {
+      const activeTurn = state.activeTurn;
+      if (activeTurn === undefined || activeTurn.id !== action.turnId
+        || activeTurn.activity === action.activity
+        || (action.activity === null && activeTurn.activity === undefined)) return state;
+      if (action.activity === null) {
+        const withoutActivity: HostActiveTurn = {
+          id: activeTurn.id,
+          prompt: activeTurn.prompt,
+          status: activeTurn.status,
+          parts: activeTurn.parts,
+          startedAt: activeTurn.startedAt,
+        };
+        return updateActiveTurn(state, withoutActivity, action.timestamp);
+      }
+      return updateActiveTurn(state, { ...activeTurn, activity: action.activity }, action.timestamp);
+    }
     case 'chat/responsePartAdded': {
       const activeTurn = state.activeTurn;
       if (activeTurn !== undefined) {
-        if (activeTurn.parts.some((part) => part.id === action.part.id)) return state;
+        const existingIndex = activeTurn.parts.findIndex((part) => part.id === action.part.id);
+        if (existingIndex >= 0) {
+          const existing = activeTurn.parts[existingIndex];
+          if (existing === undefined || existing.kind !== 'system_message' || action.part.kind !== 'system_message') return state;
+          if (sameSystemMessagePart(existing, action.part)) return state;
+          const parts = [...activeTurn.parts];
+          parts[existingIndex] = action.part;
+          return updateActiveTurn(state, { ...activeTurn, parts: freezeArray(parts) }, action.timestamp);
+        }
         const parts = [...activeTurn.parts, action.part];
         return updateActiveTurn(state, { ...activeTurn, parts: freezeArray(parts) }, action.timestamp);
       }
       const turnIndex = state.turns.findIndex((turn) => turn.id === action.turnId);
       const turn = state.turns[turnIndex];
-      if (turnIndex < 0 || turn === undefined || turn.parts.some((part) => part.id === action.part.id)) return state;
+      if (turnIndex < 0 || turn === undefined) return state;
+      const existingIndex = turn.parts.findIndex((part) => part.id === action.part.id);
+      if (existingIndex >= 0) {
+        const existing = turn.parts[existingIndex];
+        if (existing === undefined || existing.kind !== 'system_message' || action.part.kind !== 'system_message') return state;
+        if (sameSystemMessagePart(existing, action.part)) return state;
+        const parts = [...turn.parts];
+        parts[existingIndex] = action.part;
+        const turns = [...state.turns];
+        turns[turnIndex] = Object.freeze({ ...turn, parts: freezeArray(parts) });
+        return freezeChat({ ...state, turns: freezeArray(turns), pendingInputs, modifiedAt: action.timestamp });
+      }
       const turns = [...state.turns];
       turns[turnIndex] = Object.freeze({ ...turn, parts: freezeArray([...turn.parts, action.part]) });
       return freezeChat({ ...state, turns: freezeArray(turns), pendingInputs, modifiedAt: action.timestamp });

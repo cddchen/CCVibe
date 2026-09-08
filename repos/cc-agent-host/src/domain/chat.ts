@@ -9,6 +9,7 @@ import type {
 
 export type ChatStatus = 'idle' | 'in_progress' | 'input_needed' | 'error';
 export type TurnStatus = 'active' | 'complete' | 'failed' | 'interrupted';
+export type TurnActivity = 'requesting_model' | 'compacting_context';
 export type ToolCallStatus = 'started' | 'ready' | 'completed';
 export type ApprovalDecision = 'allow' | 'deny';
 
@@ -107,6 +108,7 @@ export interface ActiveTurn {
   readonly id: TurnId;
   readonly prompt: string;
   readonly status: 'active';
+  readonly activity?: TurnActivity;
   readonly parts: readonly ResponsePart[];
   readonly startedAt: string;
 }

@@ -44,6 +44,7 @@ export type SyncCommand =
   | { readonly type: 'initialize/succeeded'; readonly result: HostInitializeResult; readonly requestedSubscriptions: readonly string[] }
   | { readonly type: 'reconnect/succeeded'; readonly result: HostReconnectResult }
   | { readonly type: 'subscription/succeeded'; readonly snapshot: HostStateSnapshot }
+  | { readonly type: 'catalog/refresh/succeeded'; readonly snapshot: HostStateSnapshot }
   | { readonly type: 'subscription/removed'; readonly resource: AgentResource }
   | { readonly type: 'state/action'; readonly envelope: HostActionEnvelope }
   | { readonly type: 'client/replaced'; readonly reason: string };
@@ -87,6 +88,8 @@ export function reduceSyncCommand(state: SyncState, command: SyncCommand): SyncS
       return applyReconnectResult(state, command.result);
     case 'subscription/succeeded':
       return applySubscriptionSnapshot(state, command.snapshot);
+    case 'catalog/refresh/succeeded':
+      return applyCatalogRefreshSnapshot(state, command.snapshot);
     case 'subscription/removed':
       return removeSubscription(state, command.resource);
     case 'state/action':
@@ -212,6 +215,22 @@ export function applySubscriptionSnapshot(state: SyncState, snapshot: HostStateS
     subscriptions: uniqueResources([...state.subscriptions, snapshot.resource]),
     resources: [...resources, nextResource],
     missing: state.missing.filter((resource) => resource !== snapshot.resource),
+  });
+}
+
+/** Replace a refreshed root only when its sequence is not older than local state. */
+export function applyCatalogRefreshSnapshot(state: SyncState, snapshot: HostStateSnapshot): SyncState {
+  if (snapshot.resource !== 'agent-root://') {
+    throw new TypeError('catalog refresh snapshot must target the root resource');
+  }
+  const current = state.resources.find((entry) => entry.resource === snapshot.resource);
+  if (current !== undefined && snapshot.fromSeq < current.lastServerSeq) {
+    return state;
+  }
+  const refreshed = applySubscriptionSnapshot(state, snapshot);
+  return freezeState({
+    ...refreshed,
+    lastSeenServerSeq: Math.max(state.lastSeenServerSeq, snapshot.fromSeq),
   });
 }
 

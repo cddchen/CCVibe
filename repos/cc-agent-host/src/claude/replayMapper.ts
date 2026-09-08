@@ -75,6 +75,13 @@ interface ToolMapping {
 }
 
 type SafeRecord = Record<string, unknown>;
+type RecordedSystemProjection = NonNullable<ReturnType<typeof projectRecordedSystemMessage>>;
+
+interface PendingSystemMessage {
+  readonly projection: RecordedSystemProjection;
+  readonly identity: string;
+  readonly timestamp: string;
+}
 
 /**
  * Converts SDK session transcript envelopes into immutable CCVibe turns.
@@ -113,6 +120,7 @@ export class ClaudeReplayMapper {
 
     const turns: MutableTurn[] = [];
     const toolsByRawId = new Map<string, ToolMapping>();
+    const pendingSystemMessages: PendingSystemMessage[] = [];
     let currentTurn: MutableTurn | undefined;
 
     for (const [index, message] of candidates.entries()) {
@@ -131,6 +139,7 @@ export class ClaudeReplayMapper {
               turns,
               currentTurn,
               toolsByRawId,
+              pendingSystemMessages,
             );
             currentTurn = result.currentTurn;
             break;
@@ -148,7 +157,7 @@ export class ClaudeReplayMapper {
             break;
           }
           case 'system':
-            currentTurn = this.mapSystemMessage(record, index, timestamp, currentTurn);
+            currentTurn = this.mapSystemMessage(record, index, timestamp, currentTurn, pendingSystemMessages);
             break;
           default:
             this.emitDiagnostic('unsupported_message', type ?? 'unknown');
@@ -183,6 +192,7 @@ export class ClaudeReplayMapper {
     turns: MutableTurn[],
     currentTurn: MutableTurn | undefined,
     toolsByRawId: Map<string, ToolMapping>,
+    pendingSystemMessages: PendingSystemMessage[],
   ): { readonly currentTurn: MutableTurn | undefined } {
     const rawMessage = readProperty(record, 'message');
     const content = contentFromEnvelope(rawMessage);
@@ -248,6 +258,8 @@ export class ClaudeReplayMapper {
       turns,
       currentTurn,
     );
+    this.attachPendingSystemMessages(nextTurn, pendingSystemMessages);
+    nextTurn.lastAt = timestamp;
     return { currentTurn: nextTurn };
   }
 
@@ -328,25 +340,65 @@ export class ClaudeReplayMapper {
     index: number,
     timestamp: string,
     currentTurn: MutableTurn | undefined,
+    pendingSystemMessages: PendingSystemMessage[],
   ): MutableTurn | undefined {
-    const projected = projectRecordedSystemMessage(readProperty(record, 'message'));
+    const rawPayload = readProperty(record, 'message');
+    const projected = projectRecordedSystemMessage(rawPayload);
     if (projected === undefined) {
       return currentTurn;
     }
     if (currentTurn === undefined) {
-      // Initialization and detached housekeeping do not fabricate an empty
-      // user turn. Live tail events are attached when a canonical owner exists.
-      this.emitDiagnostic('unmatched_system_message', projected.event);
+      // SDK history commonly starts with init before the first user prompt.
+      // Buffer it deterministically and attach it to that first real turn;
+      // never fabricate an empty transcript turn for setup/housekeeping.
+      pendingSystemMessages.push({
+        projection: projected,
+        identity: recordIdentity(record, index),
+        timestamp,
+      });
       return undefined;
     }
-    currentTurn.parts.push(Object.freeze({
-      kind: 'system_message' as const,
-      id: makePartId(currentTurn.id, recordIdentity(record, index), 0, 'system_message', projected.event),
-      ...projected,
-    }));
+    this.appendSystemMessage(currentTurn, projected, recordIdentity(record, index), timestamp);
+    return currentTurn;
+  }
+
+  private attachPendingSystemMessages(
+    turn: MutableTurn,
+    pendingSystemMessages: PendingSystemMessage[],
+  ): void {
+    for (const pending of pendingSystemMessages) {
+      this.appendSystemMessage(turn, pending.projection, pending.identity, pending.timestamp);
+    }
+    pendingSystemMessages.length = 0;
+  }
+
+  private appendSystemMessage(
+    currentTurn: MutableTurn,
+    projected: RecordedSystemProjection,
+    identity: string,
+    timestamp: string,
+  ): void {
+    const { taskId, ...systemMessage } = projected;
+    const partId = taskId === undefined
+      ? projected.event === 'status'
+        ? makeStatusPartId(currentTurn.id)
+        : makePartId(currentTurn.id, identity, 0, 'system_message', projected.event)
+      : makeTaskPartId(currentTurn.id, taskId);
+    const part = Object.freeze({ kind: 'system_message' as const, id: partId, ...systemMessage });
+    const existingIndex = currentTurn.parts.findIndex((candidate) => candidate.id === partId);
+    if (existingIndex < 0) {
+      currentTurn.parts.push(part);
+    } else {
+      const existing = currentTurn.parts[existingIndex];
+      // Replay uses the same idempotent system-part contract as live reducers:
+      // a task update replaces its existing slot, while an accidental id clash
+      // with another part kind remains a no-op.
+      if (existing?.kind === 'system_message' && !sameSystemMessagePart(existing, part)) {
+        currentTurn.parts[existingIndex] = part;
+      }
+    }
     currentTurn.lastAt = timestamp;
     currentTurn.finalized = false;
-    return currentTurn;
   }
 
   private appendMarkdown(
@@ -744,6 +796,25 @@ function makePartId(
   rawToolId = '',
 ): PartId {
   return createPartId(`replay_part_${hash('part', turnId, identity, String(blockIndex), kind, rawToolId)}`);
+}
+
+function makeTaskPartId(turnId: TurnId, taskId: string): PartId {
+  return createPartId(`replay_task_part_${hash('task-part', turnId, taskId)}`);
+}
+
+function makeStatusPartId(turnId: TurnId): PartId {
+  return createPartId(`replay_status_part_${hash('status-part', turnId)}`);
+}
+
+function sameSystemMessagePart(
+  left: Extract<ResponsePart, { readonly kind: 'system_message' }>,
+  right: Extract<ResponsePart, { readonly kind: 'system_message' }>,
+): boolean {
+  return left.id === right.id
+    && left.event === right.event
+    && left.title === right.title
+    && left.content === right.content
+    && left.level === right.level;
 }
 
 function makeToolCallId(

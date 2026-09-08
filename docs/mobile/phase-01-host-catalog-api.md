@@ -40,3 +40,9 @@ SDK listSessions/model 返回值通过 SDK 自带类型推导并在 `src/claude`
 - root initialize/subscribe/reconnect 不再返回 missing。
 - 两个客户端看到相同 catalog state 和同一新会话。
 - Host typecheck/test/build 全绿，API 文档同步更新。
+
+## 首页 catalog 刷新（当前实现）
+
+首页“最近会话”右侧的刷新按钮调用严格 JSON-RPC `catalog/refresh`，参数只有 canonical root `{ channel: "agent-root://" }`。Host 会重新调用 Claude Agent SDK `listSessions()`，而不是让 Mobile 重新计算缓存；成功返回 root `StateSnapshot` 后，`ConnectionSupervisor` 先通过 strict wire parser 校验，再交给 `SyncStore` 应用同一刷新切点。Host 产生的 catalog actions 仍同步广播给其他 root 订阅者。
+
+`CloudRuntime.actions.refreshSessions()` 只在已连接状态发起请求，并将 transport/RPC 失败归一化给 HomeScreen。刷新期间按钮进入 loading/disabled；失败不清空当前 `sessions` selector，继续显示 last-known-good 会话并给出轻量错误提示。Host protocol handler 还要求当前逻辑 client、root 已订阅和 `configure` ACL，Host composition 以窄 `catalogRefresher` port 绑定现有 `refreshCatalog()`，并用单飞保护并发 SDK probe。

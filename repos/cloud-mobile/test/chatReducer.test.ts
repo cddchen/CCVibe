@@ -82,6 +82,89 @@ describe('chat envelope reducer', () => {
     }));
   });
 
+  it('updates and clears transient activity only on the active turn', () => {
+    const started = applyHostChatAction(createHostChatState(chat), {
+      type: 'chat/turnStarted', turnId, prompt: 'hello', timestamp: 't1',
+    });
+    const requesting = applyHostChatAction(started, {
+      type: 'chat/turnActivityChanged', turnId, activity: 'requesting_model', timestamp: 't2',
+    });
+    expect(requesting.activeTurn?.activity).toBe('requesting_model');
+    const compacting = applyHostChatAction(requesting, {
+      type: 'chat/turnActivityChanged', turnId, activity: 'compacting_context', timestamp: 't3',
+    });
+    expect(compacting.activeTurn?.activity).toBe('compacting_context');
+    expect(applyHostChatAction(compacting, {
+      type: 'chat/turnActivityChanged', turnId: 'other-turn', activity: null, timestamp: 'wrong',
+    })).toBe(compacting);
+    const cleared = applyHostChatAction(compacting, {
+      type: 'chat/turnActivityChanged', turnId, activity: null, timestamp: 't4',
+    });
+    expect(cleared.activeTurn).not.toHaveProperty('activity');
+    const completed = applyHostChatAction(compacting, {
+      type: 'chat/turnCompleted', turnId, timestamp: 't5',
+    });
+    expect(completed.turns[0]).not.toHaveProperty('activity');
+  });
+
+  it('upserts changed system messages in place and ignores identical repeats', () => {
+    const initial = createHostChatState(chat);
+    const started = applyHostChatAction(initial, {
+      type: 'chat/turnStarted',
+      turnId,
+      prompt: 'index',
+      timestamp: 't1',
+    });
+    const first = applyHostChatAction(started, {
+      type: 'chat/responsePartAdded',
+      turnId,
+      part: {
+        kind: 'system_message',
+        id: 'task-part',
+        event: 'task_started',
+        title: '后台任务进度',
+        content: 'Indexing',
+        level: 'progress',
+      },
+      timestamp: 't2',
+    });
+    const repeated = applyHostChatAction(first, {
+      type: 'chat/responsePartAdded',
+      turnId,
+      part: {
+        kind: 'system_message',
+        id: 'task-part',
+        event: 'task_started',
+        title: '后台任务进度',
+        content: 'Indexing',
+        level: 'progress',
+      },
+      timestamp: 't3',
+    });
+    const updated = applyHostChatAction(repeated, {
+      type: 'chat/responsePartAdded',
+      turnId,
+      part: {
+        kind: 'system_message',
+        id: 'task-part',
+        event: 'task_notification',
+        title: '后台任务进度',
+        content: 'Done',
+        level: 'success',
+      },
+      timestamp: 't4',
+    });
+
+    expect(repeated).toBe(first);
+    expect(updated.activeTurn?.parts).toEqual([expect.objectContaining({
+      id: 'task-part',
+      event: 'task_notification',
+      content: 'Done',
+      level: 'success',
+    })]);
+    expect(updated.modifiedAt).toBe('t4');
+  });
+
   it('removes the selected prompt and all later turns on canonical rewind', () => {
     const initial = createHostChatState(chat);
     const firstStarted = applyHostChatAction(initial, {

@@ -10,14 +10,15 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Text as NativeText,
   TextInput as NativeTextInput,
   View,
-  type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent,
+  type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent, type StyleProp, type TextLayoutEventData, type TextStyle,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ActivityIndicator, Button, IconButton, Text, useTheme, type MD3Theme } from 'react-native-paper';
-import Markdown from 'react-native-markdown-display';
+import Markdown, { type RenderRules } from 'react-native-markdown-display';
 
 import { GlassPanel } from '../../ui/glass/GlassPanel';
 import { GlassSurface } from '../../ui/glass/GlassSurface';
@@ -44,6 +45,8 @@ import {
   type ChatScrollMetrics,
 } from './chatScroll';
 import { nextRequestSheet, type RequestSheetKind } from './sheetCoordinator';
+import { copyMessageText } from './messageClipboard';
+import { processContentMaxHeight, shouldShowPromptExpand, USER_PROMPT_MAX_LINES } from './messagePresentation';
 
 type ConfigPicker = 'model' | 'effort' | 'permission' | undefined;
 interface ConfigOption { readonly id: string; readonly title: string; readonly description?: string }
@@ -238,6 +241,14 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
     }
   }, [actions, commands.length, commandsLoading, props.chatUri]);
   const showNotice = useCallback((message: string): void => setNotice(message), []);
+  const copyMessage = useCallback(async (rawText: string): Promise<void> => {
+    try {
+      await copyMessageText(rawText);
+      setNotice('已复制');
+    } catch {
+      setNotice('复制失败，请重试');
+    }
+  }, []);
   const turns = useMemo(() => view.activeTurn === undefined ? view.history : [...view.history, view.activeTurn], [view.activeTurn, view.history]);
   const active = view.activeTurn !== undefined && view.status === 'in_progress';
   const canChangeComposer = !sending && !stopping && !active;
@@ -438,6 +449,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
             onContentSizeChange={updateContentMetrics}
             onMomentumScrollBegin={beginUserScroll}
             onMomentumScrollEnd={endUserMomentum}
+            onCopy={(rawText) => void copyMessage(rawText)}
             onRewind={rewind}
             onScroll={updateBottomState}
             onScrollBeginDrag={beginUserScroll}
@@ -516,6 +528,7 @@ interface ChatTranscriptProps {
   readonly onContentSizeChange: (width: number, height: number) => void;
   readonly onMomentumScrollBegin: () => void;
   readonly onMomentumScrollEnd: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  readonly onCopy: (rawText: string) => void;
   readonly onRewind: (turn: ChatTurnViewModel) => void;
   readonly onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
   readonly onScrollBeginDrag: () => void;
@@ -531,8 +544,8 @@ const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps):
   // intermediate projections while input and native scrolling stay urgent.
   const deferredTurns = useDeferredValue(props.turns);
   const renderItem = useCallback(({ item }: ListRenderItemInfo<ChatTurnViewModel>) => (
-    <TurnTranscriptItem onRewind={props.onRewind} reduceMotion={props.reduceMotion} turn={item} />
-  ), [props.onRewind, props.reduceMotion]);
+    <TurnTranscriptItem onCopy={props.onCopy} onRewind={props.onRewind} reduceMotion={props.reduceMotion} turn={item} />
+  ), [props.onCopy, props.onRewind, props.reduceMotion]);
   return (
     <FlatList
       contentContainerStyle={[styles.transcript, { paddingBottom: props.composerHeight + props.bottomInset + 20 }]}
@@ -561,7 +574,7 @@ const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps):
   );
 });
 
-const TurnTranscriptItem = memo(function TurnTranscriptItem({ turn, reduceMotion, onRewind }: { readonly turn: ChatTurnViewModel; readonly reduceMotion: boolean; readonly onRewind: (turn: ChatTurnViewModel) => void }): JSX.Element {
+const TurnTranscriptItem = memo(function TurnTranscriptItem({ turn, reduceMotion, onCopy, onRewind }: { readonly turn: ChatTurnViewModel; readonly reduceMotion: boolean; readonly onCopy: (rawText: string) => void; readonly onRewind: (turn: ChatTurnViewModel) => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const markdownParts = turn.parts.filter((part): part is Extract<ChatPartViewModel, { kind: 'markdown' }> => part.kind === 'markdown');
   const hasStructuredProcess = turn.parts.some((part) => part.kind !== 'markdown');
@@ -579,12 +592,12 @@ const TurnTranscriptItem = memo(function TurnTranscriptItem({ turn, reduceMotion
   const hasProcess = processParts.length > 0 || turn.status === 'active';
   return (
     <View style={styles.turnBlock}>
-      <View style={styles.promptRow}><Pressable accessibilityActions={[{ name: 'activate', label: '撤回到此消息' }]} accessibilityHint="长按可撤回到这条消息" accessibilityRole="button" disabled={turn.status === 'active'} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'activate') onRewind(turn); }} onLongPress={() => onRewind(turn)} style={[styles.promptBubble, { backgroundColor: theme.colors.onSurface }]}><Text style={[styles.promptText, { color: theme.colors.surface }]}>{turn.prompt}</Text></Pressable></View>
+      <UserPromptMessage onCopy={onCopy} onRewind={() => onRewind(turn)} prompt={turn.prompt} reduceMotion={reduceMotion} status={turn.status} />
       {hasProcess ? (
         <View style={styles.processBlock}>
           <Pressable accessibilityRole="button" accessibilityState={{ expanded: processOpen }} onPress={() => setProcessOpen((open) => !open)} style={({ pressed }) => [styles.processHeader, pressed && !reduceMotion ? styles.pressed : null]}>
             {turn.status === 'active' ? <ActivityIndicator color={theme.colors.onSurfaceVariant} size="small" /> : null}
-            <Text style={[styles.processTitle, { color: theme.colors.onSurfaceVariant }]}>{turn.status === 'active' ? (elapsed === undefined ? '正在思考' : `正在思考 · ${elapsed}`) : elapsed ?? '思考过程'}</Text>
+            <Text style={[styles.processTitle, { color: theme.colors.onSurfaceVariant }]}>{turn.status === 'active' ? activeProcessTitle(turn.activity, elapsed) : elapsed ?? '思考过程'}</Text>
             <View style={styles.toolbarSpacer} />
             <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name={processOpen ? 'chevron-up' : 'chevron-down'} size={21} />
           </Pressable>
@@ -600,15 +613,74 @@ const TurnTranscriptItem = memo(function TurnTranscriptItem({ turn, reduceMotion
       ) : null}
       {answerParts.map((part) => turn.status === 'active'
         ? <StreamingAnswer key={part.id} content={part.content} />
-        : <MarkdownAnswer key={part.id} content={part.content} />)}
+        : <MarkdownAnswer key={part.id} content={part.content} onCopy={onCopy} />)}
       {turn.status === 'failed' ? <FailureView message={turn.error ?? 'Host 未能完成这次请求，请稍后重试。'} /> : null}
+    </View>
+  );
+});
+
+interface UserPromptMessageProps {
+  readonly onCopy: (rawText: string) => void;
+  readonly onRewind: () => void;
+  readonly prompt: string;
+  readonly reduceMotion: boolean;
+  readonly status: ChatTurnViewModel['status'];
+}
+
+const UserPromptMessage = memo(function UserPromptMessage(props: UserPromptMessageProps): JSX.Element {
+  const theme = useTheme<MD3Theme>();
+  const [expanded, setExpanded] = useState(false);
+  const [hasOverflow, setHasOverflow] = useState(false);
+  const onFullTextLayout = useCallback((event: NativeSyntheticEvent<TextLayoutEventData>): void => {
+    setHasOverflow(shouldShowPromptExpand(event.nativeEvent.lines.length));
+  }, []);
+  return (
+    <View style={styles.promptMessage}>
+      <View style={styles.promptRow}>
+        <View style={[styles.promptBubble, { backgroundColor: theme.colors.onSurface }]}>
+          {/* A full, invisible layout pass is required because a truncated Text cannot report true overflow. */}
+          <NativeText accessibilityElementsHidden importantForAccessibility="no-hide-descendants" onTextLayout={onFullTextLayout} style={[styles.promptText, styles.promptMeasurement, { color: theme.colors.surface }]}>{props.prompt}</NativeText>
+          <Text ellipsizeMode="tail" numberOfLines={expanded ? undefined : USER_PROMPT_MAX_LINES} selectable style={[styles.promptText, { color: theme.colors.surface }]}>{props.prompt}</Text>
+        </View>
+      </View>
+      <View style={styles.messageActions}>
+        <Pressable
+          accessibilityLabel="复制用户消息"
+          accessibilityRole="button"
+          onPress={() => props.onCopy(props.prompt)}
+          style={({ pressed }) => [styles.messageAction, pressed && !props.reduceMotion ? styles.pressed : null]}
+        >
+          <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="content-copy" size={18} />
+        </Pressable>
+        <Pressable
+          accessibilityLabel="撤回到此消息"
+          accessibilityRole="button"
+          accessibilityState={{ disabled: props.status === 'active' }}
+          disabled={props.status === 'active'}
+          onPress={props.onRewind}
+          style={({ pressed }) => [styles.messageAction, pressed && !props.reduceMotion ? styles.pressed : null]}
+        >
+          <MaterialCommunityIcons color={props.status === 'active' ? theme.colors.outline : theme.colors.onSurfaceVariant} name="history" size={19} />
+        </Pressable>
+        {hasOverflow ? (
+          <Pressable
+            accessibilityLabel={expanded ? '收起用户消息' : '展开用户消息'}
+            accessibilityRole="button"
+            accessibilityState={{ expanded }}
+            onPress={() => setExpanded((value) => !value)}
+            style={({ pressed }) => [styles.messageAction, pressed && !props.reduceMotion ? styles.pressed : null]}
+          >
+            <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name={expanded ? 'chevron-up' : 'chevron-down'} size={20} />
+          </Pressable>
+        ) : null}
+      </View>
     </View>
   );
 });
 
 const StreamingAnswer = memo(function StreamingAnswer({ content }: { readonly content: string }): JSX.Element {
   const theme = useTheme<MD3Theme>();
-  return <View style={styles.assistantBlock}><Text style={[styles.streamingText, { color: theme.colors.onSurface }]}>{content}</Text></View>;
+  return <View style={styles.assistantBlock}><Text selectable style={[styles.streamingText, { color: theme.colors.onSurface }]}>{content}</Text></View>;
 });
 
 function PendingThinking({ startedAt }: { readonly startedAt: string }): JSX.Element {
@@ -631,7 +703,25 @@ function useElapsedLabel(startedAt: string, completedAt: string | undefined, run
   return `用时${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, '0')}秒`;
 }
 
-const MarkdownAnswer = memo(function MarkdownAnswer({ content }: { readonly content: string }): JSX.Element {
+function activeProcessTitle(activity: ChatTurnViewModel['activity'], elapsed: string | undefined): string {
+  const title = activity === 'requesting_model'
+    ? '正在请求 Claude'
+    : activity === 'compacting_context'
+      ? '正在压缩上下文'
+      : '正在思考';
+  return elapsed === undefined ? title : `${title} · ${elapsed}`;
+}
+
+const selectableMarkdownRules: RenderRules = {
+  text: (node, _children, _parent, markdownStyles, inheritedStyles = {}) => (
+    <NativeText key={node.key} selectable style={[inheritedStyles, markdownStyles.text]}>{node.content}</NativeText>
+  ),
+  textgroup: (node, children, _parent, markdownStyles) => (
+    <NativeText key={node.key} selectable style={markdownStyles.textgroup}>{children}</NativeText>
+  ),
+};
+
+const MarkdownAnswer = memo(function MarkdownAnswer({ content, onCopy }: { readonly content: string; readonly onCopy: (rawText: string) => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const markdownStyle = useMemo(() => ({
     body: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25 },
@@ -658,11 +748,22 @@ const MarkdownAnswer = memo(function MarkdownAnswer({ content }: { readonly cont
     <View style={styles.assistantBlock}>
       <Markdown
         mergeStyle={false}
+        rules={selectableMarkdownRules}
         style={markdownStyle}
       >{content}</Markdown>
+      <MessageCopyAction accessibilityLabel="复制助手回复" onPress={() => onCopy(content)} />
     </View>
   );
 });
+
+function MessageCopyAction(props: { readonly accessibilityLabel: string; readonly onPress: () => void }): JSX.Element {
+  const theme = useTheme<MD3Theme>();
+  return (
+    <Pressable accessibilityLabel={props.accessibilityLabel} accessibilityRole="button" onPress={props.onPress} style={styles.messageAction}>
+      <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="content-copy" size={18} />
+    </Pressable>
+  );
+}
 
 function ProcessPart({ part, open, onToggle }: { readonly part: ChatPartViewModel; readonly open: boolean; readonly onToggle: () => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
@@ -685,13 +786,27 @@ function ProcessPart({ part, open, onToggle }: { readonly part: ChatPartViewMode
         {status === undefined ? null : <Text style={[styles.processPartStatus, { color: theme.colors.onSurfaceVariant }]}>{status}</Text>}
         <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name={open ? 'chevron-up' : 'chevron-down'} size={19} />
       </Pressable>
-      {open && part.kind === 'reasoning' ? <Text selectable style={[styles.reasoningText, { color: theme.colors.onSurfaceVariant }]}>{part.content}</Text> : null}
+      {open && part.kind === 'reasoning' ? <BoundedProcessContent content={part.content} lineHeight={21} textStyle={[styles.reasoningText, { color: theme.colors.onSurfaceVariant }]} /> : null}
       {open && part.kind === 'markdown' ? <Text selectable style={[styles.reasoningText, { color: theme.colors.onSurfaceVariant }]}>{part.content}</Text> : null}
-      {open && part.kind === 'system' ? <Text selectable style={[styles.reasoningText, { color: part.level === 'error' ? theme.colors.error : theme.colors.onSurfaceVariant }]}>{part.content}</Text> : null}
-      {open && part.kind === 'tool' && part.formattedInput.length > 0 ? <Text selectable style={[styles.toolInput, { backgroundColor: theme.colors.surfaceVariant, color: theme.colors.onSurfaceVariant }]}>{part.formattedInput}</Text> : null}
-      {open && part.kind === 'tool' && part.output !== undefined ? <Text selectable style={[styles.toolOutput, { color: theme.colors.onSurface }]}>{part.output}</Text> : null}
-      {open && part.kind === 'tool' && part.error !== undefined ? <Text selectable style={[styles.toolError, { color: theme.colors.error }]}>{part.error}</Text> : null}
+      {open && part.kind === 'system' ? <BoundedProcessContent content={part.content} lineHeight={21} textStyle={[styles.reasoningText, { color: part.level === 'error' ? theme.colors.error : theme.colors.onSurfaceVariant }]} /> : null}
+      {open && part.kind === 'tool' && part.formattedInput.length > 0 ? <BoundedProcessContent content={part.formattedInput} lineHeight={17} textStyle={[styles.toolInput, { backgroundColor: theme.colors.surfaceVariant, color: theme.colors.onSurfaceVariant }]} /> : null}
+      {open && part.kind === 'tool' && part.output !== undefined ? <BoundedProcessContent content={part.output} lineHeight={17} textStyle={[styles.toolOutput, { color: theme.colors.onSurface }]} /> : null}
+      {open && part.kind === 'tool' && part.error !== undefined ? <BoundedProcessContent content={part.error} lineHeight={19} textStyle={[styles.toolError, { color: theme.colors.error }]} /> : null}
     </View>
+  );
+}
+
+function BoundedProcessContent(props: { readonly content: string; readonly lineHeight: number; readonly textStyle?: StyleProp<TextStyle> }): JSX.Element {
+  const maxHeight = processContentMaxHeight(props.lineHeight);
+  // Keep long tool/reasoning output inside the part so the transcript list remains usable.
+  return (
+    <ScrollView
+      nestedScrollEnabled
+      showsVerticalScrollIndicator
+      style={[styles.boundedProcessScroll, { maxHeight }]}
+    >
+      <NativeText selectable style={props.textStyle}>{props.content}</NativeText>
+    </ScrollView>
   );
 }
 
@@ -704,7 +819,7 @@ function FailureView({ message }: { readonly message: string }): JSX.Element {
           <MaterialCommunityIcons color={theme.colors.error} name="alert-circle-outline" size={21} />
           <Text style={[styles.failureLabel, { color: theme.colors.error }]}>执行失败</Text>
         </View>
-        <Text style={[styles.failureMessage, { color: theme.colors.onSurface }]}>{message}</Text>
+        <Text selectable style={[styles.failureMessage, { color: theme.colors.onSurface }]}>{message}</Text>
       </View>
     </GlassPanel>
   );
@@ -802,9 +917,13 @@ const styles = StyleSheet.create({
   noticeText: { flexShrink: 1, fontSize: 12, lineHeight: 17 },
   transcript: { flexGrow: 1, paddingHorizontal: 18, paddingTop: 10, gap: 18 },
   turnBlock: { gap: 13 },
+  promptMessage: { alignItems: 'flex-end' },
   promptRow: { alignItems: 'flex-end' },
   promptBubble: { maxWidth: '88%', paddingHorizontal: 14, paddingVertical: 11, borderRadius: 20, borderBottomRightRadius: 6 },
+  promptMeasurement: { left: 14, opacity: 0, position: 'absolute', right: 14, top: 11 },
   promptText: { fontSize: 16, lineHeight: 24, fontWeight: '500' },
+  messageActions: { flexDirection: 'row', gap: 2, marginTop: 1, minHeight: 48 },
+  messageAction: { alignItems: 'center', borderRadius: 12, height: 48, justifyContent: 'center', minWidth: 48 },
   failureCard: { marginHorizontal: 8, padding: 13, borderWidth: StyleSheet.hairlineWidth },
   failureContent: { gap: 8 },
   failureHeader: { minHeight: 24, flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -840,6 +959,7 @@ const styles = StyleSheet.create({
   toolInput: { padding: 9, borderRadius: 8, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 11, lineHeight: 17 },
   toolOutput: { paddingTop: 3, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 11, lineHeight: 17 },
   toolError: { fontSize: 13, lineHeight: 19 },
+  boundedProcessScroll: { maxWidth: '100%' },
   emptyTranscript: { flex: 1, minHeight: 220, alignItems: 'center', justifyContent: 'center', gap: 10 },
   emptyText: { fontSize: 15 },
   composerDock: { position: 'absolute', zIndex: 10, left: 12, right: 12 },

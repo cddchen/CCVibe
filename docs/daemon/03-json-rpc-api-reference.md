@@ -2,6 +2,20 @@
 
 最后同步代码日期：2026-07-24。本版本不兼容旧 `session.*` API，也不会向客户端透传 Claude Agent SDK 原始消息。
 
+> Cloud 当前 Host 的协议实现位于 [`repos/cc-agent-host/src/protocol`](../../repos/cc-agent-host/src/protocol)。下方历史 `cc-agent-daemon` 接口仍保留作为归档参考；首页 catalog 刷新以本节和 [`cc-agent-host 架构/API`](./cc-agent-host-architecture-and-api.md) 为准。
+
+## Cloud Host 当前 `catalog/refresh`
+
+`catalog/refresh` 是首页“最近会话”唯一的刷新入口。它要求严格 JSON-RPC 参数 `{ "channel": "agent-root://" }`，未知字段、非 root URI 或缺少 `channel` 均返回 `InvalidParams`。请求还必须来自已 initialize/reconnect 的当前逻辑 client，已订阅 root channel，并通过 root 资源的 `configure` ACL；这些检查发生在调用 SDK 之前。
+
+Host 组合层以 SDK-free `catalogRefresher` port 注入现有 `refreshCatalog()`。每次新的 RPC（非并发单飞期间）都会让 Host 所在机器通过 Claude Agent SDK `listSessions()` 重新发现 session，并将 workspace/model/session 投影提交为 catalog actions。成功响应返回刷新后的 root snapshot：
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"snapshot":{"resource":"agent-root://","fromSeq":91,"state":{"resource":"agent-root://","workspaces":[],"models":[],"sessions":[]}}}}
+```
+
+该 snapshot 和 actions 使用同一 Host `serverSeq` 事实源；actions 会广播给其他 root 订阅者，调用客户端将响应交给 SyncStore。Host 同时只允许一个 SDK catalog probe 进行中，并发刷新共享该 probe；失败不会替换已提交的 last-known-good catalog。协议层与 Mobile 均不导入 Claude Agent SDK 类型，Mobile 不重算或维护第二份 sessions catalog。
+
 ## 契约代码指向
 
 | 契约 | 代码文件 |

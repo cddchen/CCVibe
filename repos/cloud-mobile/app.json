@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cloud",
     "slug": "cloud-mobile",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "orientation": "default",
     "scheme": "cloud",
     "userInterfaceStyle": "automatic",
@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.ccvibe.cloud",
-      "buildNumber": "7",
+      "buildNumber": "8",
       "infoPlist": {
         "CADisableMinimumFrameDurationOnPhone": true,
         "NSLocalNetworkUsageDescription": "Cloud needs access to your local network to connect to your Cloud Agent Host."
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "com.ccvibe.cloud",
-      "versionCode": 7
+      "versionCode": 8
     },
     "plugins": [
       "expo-router",

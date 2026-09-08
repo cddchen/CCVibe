@@ -5,6 +5,7 @@ import {
   parseHostReconnectResult,
   parseHostCreateChatResult,
   parseHostResolveWorkspaceResult,
+  parseHostCatalogRefreshResult,
   parseHostConfigureChatResult,
   parseHostDispatchActionResult,
   parseHostInteractionResolutionResult,
@@ -15,6 +16,8 @@ import {
   type HostCreateChatResult,
   type HostResolveWorkspaceParams,
   type HostResolveWorkspaceResult,
+  type HostCatalogRefreshParams,
+  type HostCatalogRefreshResult,
   type HostConfigureChatParams,
   type HostConfigureChatResult,
   type HostDispatchActionParams,
@@ -25,7 +28,7 @@ import {
   type HostNotification,
   type HostSupportedCommandsResult,
 } from '../protocol/hostWire';
-import { parseResourceUri, type ChatUri } from '../protocol/resourceUri';
+import { AGENT_ROOT_URI, parseResourceUri, type ChatUri } from '../protocol/resourceUri';
 import {
   applyJitter,
   calculateBackoffDelay,
@@ -197,6 +200,17 @@ export class ConnectionSupervisor {
       path: params.path,
     });
     return parseHostResolveWorkspaceResult(raw);
+  }
+
+  public async refreshCatalog(params: HostCatalogRefreshParams = { channel: AGENT_ROOT_URI }): Promise<HostCatalogRefreshResult> {
+    const transport = this.requireTransport();
+    if (params.channel !== AGENT_ROOT_URI) {
+      throw new TypeError('catalog refresh channel must be the root resource');
+    }
+    const raw = await transport.request('catalog/refresh', { channel: params.channel });
+    const result = parseHostCatalogRefreshResult(raw);
+    this.store.dispatch({ type: 'catalog/refresh/succeeded', snapshot: result.snapshot });
+    return result;
   }
 
   public async dispatchAction(params: HostDispatchActionParams): Promise<HostDispatchActionResult> {

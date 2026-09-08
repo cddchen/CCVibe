@@ -15,6 +15,7 @@ import type {
   ToolCallInputDeltaAction,
   ToolCallReadyAction,
   ToolCallStartedAction,
+  TurnActivityChangedAction,
 } from '../domain/actions.js';
 import {
   createPartId,
@@ -445,18 +446,41 @@ export class ClaudeLiveMapper {
     turnId: TurnId,
     timestamp: string,
   ): readonly ChatAction[] {
+    if (message.subtype === 'status') {
+      const activity = message.status === 'requesting' ? 'requesting_model'
+        : message.status === 'compacting' ? 'compacting_context' : null;
+      const activityAction: TurnActivityChangedAction = Object.freeze({
+        type: 'chat/turnActivityChanged', turnId, activity, timestamp,
+      });
+      const projectedFailure = projectClaudeSystemMessage(message);
+      if (projectedFailure === undefined) return freezeActions([activityAction]);
+      const failureAction: ResponsePartAddedAction = Object.freeze({
+        type: 'chat/responsePartAdded',
+        turnId,
+        part: Object.freeze({
+          kind: 'system_message' as const,
+          id: this.createPartId(turnId, message.uuid, 0, 'system_message', projectedFailure.event),
+          ...projectedFailure,
+        }),
+        timestamp,
+      });
+      return freezeActions([activityAction, failureAction]);
+    }
     const projected = projectClaudeSystemMessage(message);
     if (projected === undefined) {
       return EMPTY_ACTIONS;
     }
-    const partId = this.createPartId(turnId, message.uuid, 0, 'system_message', projected.event);
+    const { taskId, ...systemMessage } = projected;
+    const partId = taskId === undefined
+      ? this.createPartId(turnId, message.uuid, 0, 'system_message', projected.event)
+      : this.createTaskPartId(turnId, taskId);
     const action: ResponsePartAddedAction = Object.freeze({
       type: 'chat/responsePartAdded',
       turnId,
       part: Object.freeze({
         kind: 'system_message' as const,
         id: partId,
-        ...projected,
+        ...systemMessage,
       }),
       timestamp,
     });
@@ -471,6 +495,23 @@ export class ClaudeLiveMapper {
     rawToolUseId: string,
   ): PartId {
     const seed = this.hashSeed(turnId, envelopeId, index, kind, rawToolUseId, 'part');
+    return createPartId(`part_${seed}`);
+  }
+
+  private createTaskPartId(turnId: TurnId, taskId: string): PartId {
+    // Task edge messages have different SDK UUIDs, but task_id is the stable
+    // Claude identity for this turn. Keep it inside the adapter and hash it so
+    // neither provider identity nor arbitrary task text crosses the wire.
+    const fields = [
+      'ccvibe-live-mapper',
+      'part',
+      this.generation,
+      turnId,
+      'background_task',
+      taskId,
+    ];
+    const encoded = fields.map((field) => `${field.length}:${field}`).join('|');
+    const seed = createHash('sha256').update(encoded, 'utf8').digest('hex').slice(0, 48);
     return createPartId(`part_${seed}`);
   }
 

@@ -3,6 +3,7 @@ import {
   parseConnectionId,
   type ClientId,
   type ConnectionId,
+  type RootUri,
 } from '../domain/ids.js';
 import type { AgentResource } from '../domain/resources.js';
 import type {
@@ -50,6 +51,7 @@ import {
 import {
   dispatchActionParamsSchema,
   catalogCreateChatParamsSchema,
+  catalogRefreshParamsSchema,
   configureChatParamsSchema,
   initializeParamsSchema,
   reconnectParamsSchema,
@@ -62,6 +64,8 @@ import {
   unsubscribeParamsSchema,
   type DispatchActionParams,
   type CatalogCreateChatParams,
+  type CatalogRefreshParams,
+  type CatalogRefreshResult,
   type ConfigureChatParams,
   type InitializeParams,
   type InitializeResult,
@@ -129,6 +133,11 @@ export type ProtocolWorkspaceResolver = (
   path: string,
 ) => CatalogWorkspace | PromiseLike<CatalogWorkspace>;
 
+/** SDK-free composition port for the root catalog refresh operation. */
+export type ProtocolCatalogRefresher = (
+  channel: RootUri,
+) => StateSnapshot<HostState, RootUri> | PromiseLike<StateSnapshot<HostState, RootUri>>;
+
 /** Pure policy inputs consumed by the protocol authorization boundary. */
 export interface ProtocolAuthorizationOptions {
   /** One immutable policy value for all resources. */
@@ -173,6 +182,8 @@ export interface ProtocolServerHandlerOptions {
   ) => Promise<Readonly<{ modelId?: string; effort?: string; permissionMode: string }>>;
   /** Filesystem/host composition resolves and publishes a canonical workspace. */
   readonly workspaceResolver?: ProtocolWorkspaceResolver;
+  /** Host composition binds this to its catalog refresh implementation. */
+  readonly catalogRefresher?: ProtocolCatalogRefresher;
   readonly supportedResources?: ReadonlySet<AgentResource>;
   /** Transport-neutral authentication and resource policy boundary. */
   readonly authorization?: ProtocolAuthorizationOptions;
@@ -237,6 +248,7 @@ const METHODS = new Set([
   'dispatchAction',
   'catalog/createChat',
   'catalog/resolveWorkspace',
+  'catalog/refresh',
   'chat/supportedCommands',
   'chat/configure',
   'chat/resolveApproval',
@@ -260,6 +272,7 @@ export class ProtocolServerHandler {
   private readonly supportedCommandsProvider: ProtocolServerHandlerOptions['supportedCommandsProvider'];
   private readonly chatConfigurator: ProtocolServerHandlerOptions['chatConfigurator'];
   private readonly workspaceResolver: ProtocolServerHandlerOptions['workspaceResolver'];
+  private readonly catalogRefresher: ProtocolServerHandlerOptions['catalogRefresher'];
   private readonly supportedResources: ReadonlySet<AgentResource> | undefined;
   private readonly acl: AccessControlList | ResourceAcl | undefined;
   private readonly principal: Principal | undefined;
@@ -294,6 +307,7 @@ export class ProtocolServerHandler {
     this.supportedCommandsProvider = options.supportedCommandsProvider;
     this.chatConfigurator = options.chatConfigurator;
     this.workspaceResolver = options.workspaceResolver;
+    this.catalogRefresher = options.catalogRefresher;
     this.supportedResources = options.supportedResources === undefined
       ? undefined
       : new Set(options.supportedResources);
@@ -476,6 +490,9 @@ export class ProtocolServerHandler {
           return;
         case 'catalog/resolveWorkspace':
           await this.handleResolveWorkspace(context, request.id, this.parseWorkspaceParams(request));
+          return;
+        case 'catalog/refresh':
+          await this.handleCatalogRefresh(context, request.id, this.parseParams(request, catalogRefreshParamsSchema));
           return;
         case 'chat/supportedCommands':
           await this.handleSupportedCommands(context, request.id, this.parseParams(request, supportedCommandsParamsSchema));
@@ -946,6 +963,25 @@ export class ProtocolServerHandler {
 
     const workspace = await this.workspaceResolver(params.channel, params.path);
     await this.trySendResponse(context, id, { workspace });
+  }
+
+  private async handleCatalogRefresh(
+    context: ConnectionContext,
+    id: JsonRpcId,
+    params: CatalogRefreshParams,
+  ): Promise<void> {
+    this.requireCurrentClient(context);
+    this.requireAuthorized(context, 'configure', params.channel);
+    this.requireSubscribedChannel(context, params.channel);
+    if (this.catalogRefresher === undefined) {
+      throw new ProtocolRequestError(JSON_RPC_ERRORS.MethodNotFound);
+    }
+
+    const snapshot = await this.catalogRefresher(params.channel);
+    if (snapshot.resource !== params.channel) {
+      throw new ProtocolRequestError(JSON_RPC_ERRORS.InternalError);
+    }
+    await this.trySendResponse(context, id, { snapshot } satisfies CatalogRefreshResult<HostState>);
   }
 
   private async handleSupportedCommands(

@@ -57,6 +57,7 @@ export interface ChatTurnViewModel {
   readonly id: string;
   readonly prompt: string;
   readonly status: 'active' | 'complete' | 'failed' | 'interrupted';
+  readonly activity?: 'requesting_model' | 'compacting_context';
   readonly parts: readonly ChatPartViewModel[];
   readonly startedAt: string;
   readonly completedAt?: string;
@@ -347,10 +348,12 @@ function projectTurn(
 ): ChatTurnViewModel {
   const completedAt = 'completedAt' in turn ? turn.completedAt : undefined;
   const error = 'error' in turn ? summarizeTurnFailure(turn.error) : undefined;
+  const activity = 'activity' in turn ? turn.activity : undefined;
   return Object.freeze({
     id: turn.id,
     prompt: turn.prompt,
     status: turn.status === 'active' ? 'active' : turn.status,
+    ...(activity === undefined ? {} : { activity }),
     parts: Object.freeze(turn.parts.map(projectResponsePart)),
     startedAt: turn.startedAt,
     ...(completedAt === undefined ? {} : { completedAt }),

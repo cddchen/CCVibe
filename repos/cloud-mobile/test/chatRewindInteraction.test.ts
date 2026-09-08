@@ -5,12 +5,13 @@ import { describe, expect, it } from 'vitest';
 const source = readFileSync(path.join(process.cwd(), 'src/features/chat/ChatScreen.tsx'), 'utf8');
 
 describe('chat rewind interaction contract', () => {
-  it('offers both rewind scopes from a long-pressed user prompt', () => {
-    expect(source).toContain('onLongPress={() => onRewind(turn)}');
+  it('offers both rewind scopes from a dedicated message action', () => {
+    expect(source).toContain("accessibilityLabel=\"撤回到此消息\"");
     expect(source).toContain("'是否撤回到该消息？'");
     expect(source).toContain("{ text: '取消', style: 'cancel' }");
     expect(source).toContain("{ text: '撤回会话', onPress: () => void applyRewind('conversation') }");
     expect(source).toContain("{ text: '撤回消息和变更', style: 'destructive', onPress: () => void applyRewind('conversation_and_files') }");
+    expect(source).not.toContain('onLongPress={() => onRewind(turn)}');
   });
 
   it('restores the selected prompt into the composer only after Host acceptance', () => {

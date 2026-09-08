@@ -148,6 +148,80 @@ describe('ClaudeReplayMapper', () => {
     }));
   });
 
+  it('attaches leading init system rows to the first real user turn without creating an empty turn', () => {
+    const turns = mapClaudeHistory([
+      session('system', 'leading-init', { subtype: 'init' }, 't0'),
+      user('first-user', 'Start here', 't1'),
+      assistant('first-assistant', [{ type: 'text', text: 'Ready.' }], 't2'),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      id: 'first-user',
+      prompt: 'Start here',
+      parts: [
+        { kind: 'system_message', event: 'init', title: '运行环境初始化' },
+        { kind: 'markdown', content: 'Ready.' },
+      ],
+    });
+  });
+
+  it('coalesces replayed background task events by task id and preserves the first position', () => {
+    const turns = mapClaudeHistory([
+      user('task-user', 'Run the indexer', 't1'),
+      session('system', 'task-started', {
+        subtype: 'task_started',
+        task_id: 'task-replay-1',
+        description: 'Index the repository',
+      }, 't2'),
+      session('system', 'task-progress', {
+        subtype: 'task_progress',
+        task_id: 'task-replay-1',
+        description: 'Reading files',
+        usage: { total_tokens: 12, tool_uses: 1, duration_ms: 20 },
+      }, 't3'),
+      session('system', 'task-other', {
+        subtype: 'task_started',
+        task_id: 'task-replay-2',
+        description: 'Run tests',
+      }, 't4'),
+      session('system', 'task-failed', {
+        subtype: 'task_notification',
+        task_id: 'task-replay-1',
+        status: 'failed',
+        output_file: '',
+        summary: 'Indexer failed',
+      }, 't5'),
+      session('system', 'task-level', {
+        subtype: 'background_tasks_changed',
+        tasks: [],
+      }, 't6'),
+    ]);
+
+    const parts = turns[0]?.parts ?? [];
+    expect(parts).toHaveLength(3);
+    expect(new Set(parts.map((part) => part.id)).size).toBe(3);
+    expect(parts[0]).not.toHaveProperty('taskId');
+    expect(parts[0]).toMatchObject({
+      kind: 'system_message',
+      title: '后台任务进度',
+      event: 'task_notification',
+      content: 'Indexer failed',
+      level: 'error',
+    });
+    expect(parts[1]).toMatchObject({
+      kind: 'system_message',
+      title: '后台任务进度',
+      event: 'task_started',
+      content: 'Run tests',
+      level: 'progress',
+    });
+    expect(parts[2]).toMatchObject({
+      kind: 'system_message',
+      title: '后台任务变化',
+    });
+  });
+
   it('maps promptless assistant content before the first user prompt', () => {
     const turns = new ClaudeReplayMapper({ missingTimestamp: 'fallback' }).map([
       assistant('assistant-first', [{ type: 'text', text: 'Already here' }]),
@@ -254,6 +328,32 @@ describe('ClaudeReplayMapper', () => {
     expect(diagnostics).not.toContainEqual({ code: 'unsupported_message', type: 'system' });
     expect(diagnostics).toContainEqual({ code: 'unsupported_message', type: 'future_message' });
     expect(diagnostics).toContainEqual({ code: 'unmatched_tool_result', type: 'tool_result' });
+  });
+
+  it('drops transient status rows during replay and only restores compaction failures', () => {
+    const turns = mapClaudeHistory([
+      user('status-user', '/compact', 't1'),
+      session('system', 'status-requesting', { subtype: 'status', status: 'requesting' }, 't2'),
+      session('system', 'status-compacting', { subtype: 'status', status: 'compacting' }, 't3'),
+      session('system', 'status-clear', { subtype: 'status', status: null }, 't4'),
+      session('system', 'status-success', { subtype: 'status', status: null, compact_result: 'success' }, 't5'),
+      session('system', 'status-failed', {
+        subtype: 'status',
+        status: null,
+        compact_result: 'failed',
+        compact_error: 'Bearer replay-secret-token: compaction failed',
+      }, 't6'),
+    ]);
+
+    const parts = turns[0]?.parts ?? [];
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toMatchObject({
+      kind: 'system_message',
+      event: 'compact_error',
+      title: '上下文压缩失败',
+      level: 'error',
+    });
+    expect(parts[0]?.kind === 'system_message' ? parts[0].content : '').not.toContain('replay-secret-token');
   });
 
   it('marks incomplete ready tools and their containing turn as loss-aware failure', () => {
