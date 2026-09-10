@@ -1,0 +1,270 @@
+diff --git a/node_modules/react-native-enriched-markdown/ios/renderer/CodeRenderer.m b/node_modules/react-native-enriched-markdown/ios/renderer/CodeRenderer.m
+index e52a35c..b0449ab 100644
+--- a/node_modules/react-native-enriched-markdown/ios/renderer/CodeRenderer.m
++++ b/node_modules/react-native-enriched-markdown/ios/renderer/CodeRenderer.m
+@@ -35,7 +35,11 @@ - (void)renderNode:(MarkdownASTNode *)node into:(NSMutableAttributedString *)out
+   UIFontDescriptorSymbolicTraits traits = blockFont.fontDescriptor.symbolicTraits;
+   UIFontWeight weight = (traits & UIFontDescriptorTraitBold) ? UIFontWeightBold : UIFontWeightRegular;
+ 
+-  CGFloat codeFontSize = _config.codeFontSize > 0 ? _config.codeFontSize : blockStyle.fontSize;
++  // A block style established with an already-resolved UIFont may not retain
++  // its numeric fontSize. Use the actual font metrics so inline code inherits
++  // the paragraph, heading, list, or blockquote size instead of falling back
++  // to a zero-point font.
++  CGFloat codeFontSize = _config.codeFontSize > 0 ? _config.codeFontSize : blockFont.pointSize;
+ 
+   NSString *codeFontFamily = _config.codeFontFamily;
+   UIFont *codeFont;
+@@ -67,9 +71,6 @@ - (void)renderNode:(MarkdownASTNode *)node into:(NSMutableAttributedString *)out
+     }
+     codeAttributes[CodeAttributeName] = @YES;
+ 
+-    // Store block line height directly for CodeBackground to use
+-    codeAttributes[@"BlockLineHeight"] = @(UIFontLineHeight(blockFont));
+-
+     [output setAttributes:codeAttributes range:range];
+   }
+ }
+diff --git a/node_modules/react-native-enriched-markdown/ios/renderer/ListItemRenderer.m b/node_modules/react-native-enriched-markdown/ios/renderer/ListItemRenderer.m
+index 3d31558..861fa5e 100644
+--- a/node_modules/react-native-enriched-markdown/ios/renderer/ListItemRenderer.m
++++ b/node_modules/react-native-enriched-markdown/ios/renderer/ListItemRenderer.m
+@@ -95,43 +95,101 @@ - (void)renderNode:(MarkdownASTNode *)node into:(NSMutableAttributedString *)out
+     metadata[TaskIndexAttribute] = @(taskIndex);
+   }
+ 
+-  // We enumerate to ensure we don't overwrite styles of nested sub-lists
+-  // or code blocks that may have already been rendered inside this item.
+-  [output enumerateAttribute:ListDepthAttribute
++  // Preserve styles of nested sub-lists and code blocks by applying the list
++  // paragraph style only to the surviving gaps between them. Checking only
++  // the first attribute segment is not enough when a code block begins or
++  // ends at a list item's boundary newline.
++  NSMutableArray<NSValue *> *skipRanges = [NSMutableArray array];
++  [output enumerateAttribute:CodeBlockAttributeName
+                      inRange:itemRange
+                      options:0
+-                  usingBlock:^(id depthAttr, NSRange range, BOOL *stop) {
+-                    // If a segment already has a Depth attribute higher than our current level,
+-                    // it belongs to a nested list and we should skip it to preserve its styling.
+-                    if (depthAttr && [depthAttr integerValue] > nestingLevel) {
++                  usingBlock:^(id value, NSRange range, BOOL *stop) {
++                    if (![value boolValue]) {
+                       return;
+                     }
+ 
+-                    // Skip code block ranges — CodeBlockRenderer already applied its own
+-                    // paragraph style (padding, LTR indent). Overwriting would add list
+-                    // markers ("2.") inside the code block.
+-                    NSNumber *isCodeBlock = [output attribute:CodeBlockAttributeName
+-                                                      atIndex:range.location
+-                                               effectiveRange:nil];
+-                    if ([isCodeBlock boolValue]) {
++                    [skipRanges addObject:[NSValue valueWithRange:range]];
++
++                    // A nested ListItemRenderer may already have assigned a
++                    // deeper content-column indent. Only add the missing
++                    // amount for this list level so an outer list cannot
++                    // flatten the code block back to its own column.
++                    NSNumber *existingIndent = [output attribute:CodeBlockIndentAttributeName
++                                                            atIndex:range.location
++                                                     effectiveRange:NULL];
++                    CGFloat previousIndent = [existingIndent doubleValue];
++                    CGFloat targetIndent = MAX(previousIndent, totalIndent);
++                    CGFloat additionalIndent = targetIndent - previousIndent;
++                    if (additionalIndent <= 0) {
+                       return;
+                     }
+ 
+-                    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
+-                    style.baseWritingDirection = currentWritingDirection();
+-                    style.firstLineHeadIndent = totalIndent;
+-                    style.headIndent = totalIndent;
+-
+-                    if (lineHeightConfig > 0) {
+-                      style.minimumLineHeight = lineHeightConfig;
+-                      style.maximumLineHeight = lineHeightConfig;
++                    [output enumerateAttribute:NSParagraphStyleAttributeName
++                                       inRange:range
++                                       options:0
++                                    usingBlock:^(NSParagraphStyle *paragraphStyle,
++                                                 NSRange paragraphRange,
++                                                 BOOL *paragraphStop) {
++                                      if (!paragraphStyle) {
++                                        return;
++                                      }
++
++                                      NSMutableParagraphStyle *adjustedStyle = [paragraphStyle mutableCopy];
++                                      adjustedStyle.firstLineHeadIndent += additionalIndent;
++                                      adjustedStyle.headIndent += additionalIndent;
++                                      [output addAttribute:NSParagraphStyleAttributeName
++                                                     value:adjustedStyle
++                                                     range:paragraphRange];
++                                    }];
++                    [output addAttribute:CodeBlockIndentAttributeName
++                                   value:@(targetIndent)
++                                   range:range];
++                  }];
++  [output enumerateAttribute:ListDepthAttribute
++                     inRange:itemRange
++                     options:0
++                  usingBlock:^(id depthAttr, NSRange range, BOOL *stop) {
++                    if (depthAttr && [depthAttr integerValue] > nestingLevel) {
++                      [skipRanges addObject:[NSValue valueWithRange:range]];
+                     }
++                  }];
++  [skipRanges sortUsingComparator:^NSComparisonResult(NSValue *a, NSValue *b) {
++    NSUInteger la = [a rangeValue].location;
++    NSUInteger lb = [b rangeValue].location;
++    return la < lb ? NSOrderedAscending : (la > lb ? NSOrderedDescending : NSOrderedSame);
++  }];
++
++  void (^applyStyleToRange)(NSRange) = ^(NSRange range) {
++    if (range.length == 0)
++      return;
++    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
++    style.baseWritingDirection = currentWritingDirection();
++    style.firstLineHeadIndent = totalIndent;
++    style.headIndent = totalIndent;
++
++    if (lineHeightConfig > 0) {
++      style.minimumLineHeight = lineHeightConfig;
++      style.maximumLineHeight = lineHeightConfig;
++    }
+ 
+-                    NSMutableDictionary *attributesToApply = [metadata mutableCopy];
+-                    attributesToApply[NSParagraphStyleAttributeName] = style;
++    NSMutableDictionary *attributesToApply = [metadata mutableCopy];
++    attributesToApply[NSParagraphStyleAttributeName] = style;
+ 
+-                    [output addAttributes:attributesToApply range:range];
+-                  }];
++    [output addAttributes:attributesToApply range:range];
++  };
++
++  NSUInteger pos = itemRange.location;
++  const NSUInteger itemEnd = NSMaxRange(itemRange);
++  for (NSValue *val in skipRanges) {
++    NSRange skip = [val rangeValue];
++    if (pos < skip.location) {
++      applyStyleToRange(NSMakeRange(pos, skip.location - pos));
++    }
++    pos = MAX(pos, NSMaxRange(skip));
++  }
++  if (pos < itemEnd) {
++    applyStyleToRange(NSMakeRange(pos, itemEnd - pos));
++  }
+ 
+   if (isTask && isChecked) {
+     [self applyCheckedDecorationsTo:output range:itemRange nestingLevel:nestingLevel];
+diff --git a/node_modules/react-native-enriched-markdown/ios/utils/CodeBackground.m b/node_modules/react-native-enriched-markdown/ios/utils/CodeBackground.m
+index 5e5d5bf..a499291 100644
+--- a/node_modules/react-native-enriched-markdown/ios/utils/CodeBackground.m
++++ b/node_modules/react-native-enriched-markdown/ios/utils/CodeBackground.m
+@@ -63,42 +63,44 @@ - (void)drawCodeBackgroundForRange:(NSRange)range
+   if (glyphRange.location == NSNotFound || glyphRange.length == 0)
+     return;
+ 
+-  CGFloat referenceHeight = [self findReferenceHeightForRange:range textStorage:layoutManager.textStorage];
+-
+   [layoutManager
+       enumerateLineFragmentsForGlyphRange:glyphRange
+-                               usingBlock:^(CGRect rect, CGRect usedRect, NSTextContainer *tc, NSRange lineRange,
++                               usingBlock:^(CGRect rect, CGRect unusedRect, NSTextContainer *tc, NSRange lineRange,
+                                             BOOL *stop) {
+-                                 NSRange intersect = NSIntersectionRange(lineRange, glyphRange);
++                                 NSRange intersect = NSIntersectionRange(lineRange, glyphRange); // code glyphs on this visual line
+                                  if (intersect.length == 0)
+                                    return;
+ 
+                                  BOOL isFirst = (intersect.location == glyphRange.location);
+                                  BOOL isLast = (NSMaxRange(intersect) == NSMaxRange(glyphRange));
+ 
+-                                 CGRect finalRect;
+-                                 if (isFirst || isLast) {
+-                                   // Precise bounds are only required for the start and end of the span
+-                                   CGRect textRect = [layoutManager boundingRectForGlyphRange:intersect
++                                 // Derive horizontal bounds from only the code glyphs in this
++                                 // line. Using usedRect here expands a wrapped code span over
++                                 // the suffix and any ordinary text that follows it.
++                                 CGRect glyphRect = [layoutManager boundingRectForGlyphRange:intersect
+                                                                               inTextContainer:textContainer];
+-                                   finalRect = CGRectMake(textRect.origin.x + origin.x, textRect.origin.y + origin.y,
+-                                                          textRect.size.width, textRect.size.height);
+-
+-                                   // For multi-line, extend the first line to the right edge of the fragment
+-                                   if (isFirst && !isLast) {
+-                                     finalRect.size.width =
+-                                         (usedRect.origin.x + usedRect.size.width + origin.x) - finalRect.origin.x;
+-                                   }
+-                                 } else {
+-                                   // OPTIMIZATION: Middle lines use the usedRect of the fragment directly
+-                                   finalRect = CGRectMake(usedRect.origin.x + origin.x, usedRect.origin.y + origin.y,
+-                                                          usedRect.size.width, usedRect.size.height);
+-                                 }
+-
+-                                 // Ensure consistent height and no gaps
+-                                 if (finalRect.size.height < referenceHeight) {
+-                                   finalRect.size.height = referenceHeight;
+-                                 }
++                                 if (CGRectIsEmpty(glyphRect))
++                                   return;
++
++                                 UIFont *codeFont = [layoutManager.textStorage attribute:NSFontAttributeName
++                                                                 atIndex:intersect.location
++                                                          effectiveRange:NULL];
++                                 if (!codeFont)
++                                   return;
++
++                                 // TextKit reports glyph locations relative to the line
++                                 // fragment origin. Combine that baseline with the code font's
++                                 // ascender/descender so the background follows the actual glyph
++                                 // metrics instead of the paragraph's configured line height.
++                                 CGPoint glyphLocation = [layoutManager locationForGlyphAtIndex:intersect.location];
++                                 CGFloat baselineY = origin.y + rect.origin.y + glyphLocation.y;
++                                 CGFloat codeHeight = codeFont.ascender + fabs(codeFont.descender);
++                                 if (codeHeight <= 0)
++                                   return;
++                                 CGRect finalRect = CGRectMake(glyphRect.origin.x + origin.x,
++                                                               baselineY - codeFont.ascender,
++                                                               glyphRect.size.width,
++                                                               codeHeight);
+ 
+                                  [self drawBackgroundAndBorders:finalRect
+                                                 backgroundColor:backgroundColor
+diff --git a/node_modules/react-native-enriched-markdown/ios/utils/CodeBlockBackground.m b/node_modules/react-native-enriched-markdown/ios/utils/CodeBlockBackground.m
+index 7e01693..8622b6e 100644
+--- a/node_modules/react-native-enriched-markdown/ios/utils/CodeBlockBackground.m
++++ b/node_modules/react-native-enriched-markdown/ios/utils/CodeBlockBackground.m
+@@ -47,9 +47,17 @@ - (void)drawCodeBlockBackgroundForRange:(NSRange)range
+   if (CGRectIsEmpty(blockRect))
+     return;
+ 
+-  blockRect.origin.x = origin.x;
++  NSNumber *indentAttr = [layoutManager.textStorage attribute:CodeBlockIndentAttributeName
++                                                      atIndex:range.location
++                                               effectiveRange:NULL];
++  CGFloat indent = [indentAttr doubleValue];
++  CGFloat availableWidth = textContainer.size.width - indent;
++  if (availableWidth <= 0)
++    return;
++
++  blockRect.origin.x = origin.x + indent;
+   blockRect.origin.y += origin.y;
+-  blockRect.size.width = textContainer.size.width;
++  blockRect.size.width = availableWidth;
+ 
+   // We extend the background specifically to cover the bottom padding spacer,
+   // excluding any additional marginBottom applied via measurement.
+diff --git a/node_modules/react-native-enriched-markdown/ios/utils/LastElementUtils.h b/node_modules/react-native-enriched-markdown/ios/utils/LastElementUtils.h
+index fa294e6..da1cbbf 100644
+--- a/node_modules/react-native-enriched-markdown/ios/utils/LastElementUtils.h
++++ b/node_modules/react-native-enriched-markdown/ios/utils/LastElementUtils.h
+@@ -4,6 +4,7 @@
+ NS_ASSUME_NONNULL_BEGIN
+ 
+ static NSString *const CodeBlockAttributeName = @"CodeBlock";
++static NSString *const CodeBlockIndentAttributeName = @"CodeBlockIndent";
+ 
+ /**
+  * Checks if the last element in the attributed string is a code block.

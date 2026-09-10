@@ -18,6 +18,25 @@ npm run android
 
 连接页可填写 `https://host.example.com` 或完整的 `wss://host.example.com/ws`。没有显式路径时客户端自动使用 `/ws`。开发模式允许 `http://127.0.0.1:8787`；Bearer token 仅保存在系统 SecureStore。
 
+### iOS 模拟器连接本机 Host
+
+真实连接测试先访问 `http://127.0.0.1:8787/health`。若本机 Host 已运行，直接复用，不要启动或停止另一个实例；若没有运行，再启动后台 Host：
+
+```bash
+npx @cddchen/cloud@latest start --token="$CCVIBE_LOCAL_HOST_TOKEN" --global
+```
+
+`CCVIBE_LOCAL_HOST_TOKEN` 应在仓库和共享日志之外设置为本地测试 token；若不需要固定 token，也可以省略 `--token`，使用 CLI 启动时打印的配对 token。
+
+然后用正常的 Expo iOS 开发构建启动模拟器：
+
+```bash
+cd /Users/cdd/Documents/ClaudeCodeRemote/CCVibe/repos/cloud-mobile
+npm run ios
+```
+
+模拟器连接 `http://127.0.0.1:8787` 即可；真机应使用 Host 启动输出中的局域网地址。不要安装带 `CODE_SIGNING_ALLOWED=NO` 的未签名 Simulator 产物做连接测试：它缺少 iOS Keychain entitlement，SecureStore 无法保存 token。此类产物仅用于验证原生编译或资源打包。
+
 ## 质量检查
 
 ```bash
@@ -183,8 +202,7 @@ xcodebuild \
   -exportArchive \
   -archivePath build-artifacts/Cloud-0.1.0-device.xcarchive \
   -exportPath build-artifacts/ios-device \
-  -exportOptionsPlist build-artifacts/ExportOptions-debugging.plist \
-  -allowProvisioningUpdates
+  -exportOptionsPlist build-artifacts/ExportOptions-debugging.plist
 
 cp build-artifacts/ios-device/Cloud.ipa \
   build-artifacts/Cloud-0.1.0-ios-device.ipa

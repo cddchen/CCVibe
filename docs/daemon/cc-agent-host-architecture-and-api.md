@@ -165,7 +165,7 @@ URI segment 为不透明 ID，不能含空白、`/`、`?`、`#`、反斜杠、`.
 `origin` 仅在由客户端命令引起的动作上存在。`action.type` 当前包括：
 
 - turn：`chat/turnStarted`、`chat/turnActivityChanged`、`chat/turnCompleted`、`chat/turnFailed`、`chat/turnInterrupted`、`chat/turnsLoaded`、`chat/rewound`
-- 文本/推理/系统次消息：`chat/responsePartAdded`、`chat/responsePartDelta`。SDK system event 先归一化为 `system_message` part，原始 SDK 类型不进入协议；其中 `system/status` 归一化为 active turn 的瞬时 activity，只有压缩失败保留 error part
+- 文本/推理/系统次消息：`chat/responsePartAdded`、`chat/responsePartDelta`。可展示的 SDK system event 先归一化为 `system_message` part，原始 SDK 类型不进入协议；`system/init` 只更新 Host runtime/catalog 控制面元数据，live/replay 均不生成 part；`system/status` 归一化为 active turn 的瞬时 activity，只有压缩失败保留 error part
 - 工具：`chat/toolCallStarted`、`chat/toolCallInputDelta`、`chat/toolCallReady`、`chat/toolCallCompleted`
 - 交互：`chat/approvalRequested`、`chat/approvalResolved`、`chat/inputRequested`、`chat/inputResolved`
 

@@ -17,6 +17,9 @@ export type DeepReadonly<T> = T extends JsonPrimitive
 
 export type ConnectionMode = 'development' | 'production';
 
+/** Host-scoped ordering preference for the Home workspace groups. */
+export type WorkspaceSortPreference = 'default' | 'recent_workspace';
+
 export interface ConnectionConfig {
   readonly connectionId: ConnectionId;
   readonly address: string;

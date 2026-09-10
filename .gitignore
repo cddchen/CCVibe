@@ -14,3 +14,10 @@
 !repos/cc-agent-host/.env.example
 **/xcuserdata/
 *.xcuserstate
+
+# Project-scoped Codex agent definitions only
+!.codex/
+.codex/*
+!.codex/agents/
+.codex/agents/*
+!.codex/agents/*.toml

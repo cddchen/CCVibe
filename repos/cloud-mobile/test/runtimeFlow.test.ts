@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createChatUri, createRootUri, type ChatUri } from '../src/protocol/resourceUri';
-import type { HostRootCatalogState } from '../src/protocol/hostWire';
+import type { HostCreateChatParams, HostRootCatalogState } from '../src/protocol/hostWire';
 import {
   CloudRuntime,
   type CloudRuntimeDependencies,
@@ -85,6 +85,55 @@ function dependencies(supervisor: RuntimeSupervisor): CloudRuntimeDependencies {
 }
 
 describe('Cloud runtime new-chat flow', () => {
+  it('canonicalizes stale composer preferences before creating a chat', async () => {
+    const harness = createSupervisorHarness();
+    let created: HostCreateChatParams | undefined;
+    const chatUri = createChatUri('session-canonical', 'chat-canonical');
+    const supervisor: RuntimeSupervisor = {
+      ...harness.supervisor,
+      createChat: async (params) => {
+        created = params;
+        return { receipt: { status: 'accepted' as const, value: { chatUri } } };
+      },
+      dispatchAction: async () => ({ receipt: { status: 'accepted' as const, value: { acceptedAtSeq: 1 } } }),
+    };
+    const runtime = new CloudRuntime(dependencies(supervisor));
+    runtime.hydrateForTest({
+      catalog: {
+        ...createCatalog(),
+        models: [{ id: 'model-default', displayName: 'Default', capabilities: ['effort'], supportedEffortLevels: ['low'] }],
+        defaultModelId: 'model-default',
+        permissionModes: [{ id: 'default', displayName: '默认', description: 'Host 默认权限' }],
+        defaultPermissionMode: 'default',
+      },
+      selection: {
+        workspaceId: 'workspace-a',
+        modelId: 'removed-model',
+        effort: 'high',
+        permissionMode: 'plan',
+      },
+      syncStatus: 'connected',
+      supervisor,
+    });
+
+    expect(runtime.getState().selection).toEqual({ workspaceId: 'workspace-a', modelId: 'model-default', permissionMode: 'default' });
+    const result = await runtime.actions.createChatAndSend({
+      prompt: '使用当前配置',
+      workspaceId: 'workspace-a',
+      modelId: 'removed-model',
+      effort: 'high',
+      permissionMode: 'plan',
+    });
+
+    expect(result).toEqual({ status: 'accepted', chatUri });
+    expect(created).toMatchObject({
+      workspaceId: 'workspace-a',
+      modelId: 'model-default',
+      permissionMode: 'default',
+    });
+    expect(created).not.toHaveProperty('effort');
+  });
+
   it('refreshes sessions through the connected supervisor and keeps the Host snapshot authoritative', async () => {
     const harness = createSupervisorHarness();
     let refreshCalls = 0;

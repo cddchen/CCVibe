@@ -425,7 +425,7 @@ describe('ClaudeQueryRuntime', () => {
     });
   });
 
-  it('emits init capabilities and keeps post-result messages in the completed turn tail', async () => {
+  it('emits init control-plane metadata without a displayable system message', async () => {
     const harness = makeHarness();
     await harness.runtime.start();
     harness.query.yield(initMessage(['interrupt_receipt_v1']));
@@ -469,13 +469,8 @@ describe('ClaudeQueryRuntime', () => {
       model: 'claude-sonnet',
       permissionMode: 'default',
       capabilities: { interrupt_receipt_v1: true },
-      systemMessage: {
-        event: 'init',
-        title: '运行环境初始化',
-        level: 'info',
-        content: expect.stringContaining('claude-sonnet'),
-      },
     });
+    expect(init).not.toHaveProperty('systemMessage');
   });
 
   it('attributes a follow-up response as soon as the SDK consumes its input without requiring a user echo', async () => {

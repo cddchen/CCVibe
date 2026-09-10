@@ -1,8 +1,9 @@
 import { z } from 'zod';
 
-import type { ConnectionConfig, ConnectionMode } from '../domain/types';
+import type { ConnectionConfig, ConnectionMode, WorkspaceSortPreference } from '../domain/types';
 import { createConnectionId, type ConnectionId } from '../protocol/ids';
 import { connectionModeFromScheme, normalizeConnectionAddress } from '../protocol/connectionAddress';
+import type { HostPermissionMode } from '../protocol/hostWire';
 
 export interface AsyncStoragePort {
   getItem(key: string): Promise<string | null>;
@@ -16,6 +17,9 @@ export interface ConnectionPreferences {
   readonly mode: ConnectionMode;
   readonly lastWorkspaceId?: string;
   readonly lastModelId?: string;
+  readonly lastPermissionMode?: HostPermissionMode;
+  readonly lastEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly lastWorkspaceSortPreference?: WorkspaceSortPreference;
 }
 
 /**
@@ -47,6 +51,9 @@ export interface ConnectionPreferencesInput {
   readonly mode: ConnectionMode;
   readonly lastWorkspaceId?: string;
   readonly lastModelId?: string;
+  readonly lastPermissionMode?: HostPermissionMode;
+  readonly lastEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly lastWorkspaceSortPreference?: WorkspaceSortPreference;
   /** Accepted for boundary compatibility, but deliberately never persisted. */
   readonly token?: string;
 }
@@ -59,6 +66,9 @@ const storedPreferencesSchema = z.object({
   mode: z.enum(['development', 'production']),
   lastWorkspaceId: z.string().min(1).optional(),
   lastModelId: z.string().min(1).optional(),
+  lastPermissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']).optional(),
+  lastEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  lastWorkspaceSortPreference: z.enum(['default', 'recent_workspace']).optional(),
 }).strict();
 
 const storedHostsSchema = z.object({
@@ -95,6 +105,9 @@ export function createAsyncStorageConnectionPreferencesAdapter(
           mode: parsed.data.mode,
           ...(parsed.data.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: parsed.data.lastWorkspaceId }),
           ...(parsed.data.lastModelId === undefined ? {} : { lastModelId: parsed.data.lastModelId }),
+          ...(parsed.data.lastPermissionMode === undefined ? {} : { lastPermissionMode: parsed.data.lastPermissionMode }),
+          ...(parsed.data.lastEffort === undefined ? {} : { lastEffort: parsed.data.lastEffort }),
+          ...(parsed.data.lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference: parsed.data.lastWorkspaceSortPreference }),
         });
       } catch {
         return null;
@@ -108,6 +121,9 @@ export function createAsyncStorageConnectionPreferencesAdapter(
         mode: preferences.mode,
         ...(preferences.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: preferences.lastWorkspaceId }),
         ...(preferences.lastModelId === undefined ? {} : { lastModelId: preferences.lastModelId }),
+        ...(preferences.lastPermissionMode === undefined ? {} : { lastPermissionMode: preferences.lastPermissionMode }),
+        ...(preferences.lastEffort === undefined ? {} : { lastEffort: preferences.lastEffort }),
+        ...(preferences.lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference: preferences.lastWorkspaceSortPreference }),
       }));
     },
     clear: () => storage.removeItem(key),
@@ -210,6 +226,9 @@ async function readCollection(
         mode: host.mode,
         ...(host.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: host.lastWorkspaceId }),
         ...(host.lastModelId === undefined ? {} : { lastModelId: host.lastModelId }),
+        ...(host.lastPermissionMode === undefined ? {} : { lastPermissionMode: host.lastPermissionMode }),
+        ...(host.lastEffort === undefined ? {} : { lastEffort: host.lastEffort }),
+        ...(host.lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference: host.lastWorkspaceSortPreference }),
       })),
       ...(parsed.data.selectedConnectionId === undefined
         ? {}
@@ -241,6 +260,9 @@ async function readLegacyPreferences(
       mode: parsed.data.mode,
       ...(parsed.data.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: parsed.data.lastWorkspaceId }),
       ...(parsed.data.lastModelId === undefined ? {} : { lastModelId: parsed.data.lastModelId }),
+      ...(parsed.data.lastPermissionMode === undefined ? {} : { lastPermissionMode: parsed.data.lastPermissionMode }),
+      ...(parsed.data.lastEffort === undefined ? {} : { lastEffort: parsed.data.lastEffort }),
+      ...(parsed.data.lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference: parsed.data.lastWorkspaceSortPreference }),
     });
   } catch {
     return null;
@@ -281,6 +303,9 @@ async function writeCollection(
       mode: host.mode,
       ...(host.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: host.lastWorkspaceId }),
       ...(host.lastModelId === undefined ? {} : { lastModelId: host.lastModelId }),
+      ...(host.lastPermissionMode === undefined ? {} : { lastPermissionMode: host.lastPermissionMode }),
+      ...(host.lastEffort === undefined ? {} : { lastEffort: host.lastEffort }),
+      ...(host.lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference: host.lastWorkspaceSortPreference }),
     })),
     ...(normalized.selectedConnectionId === undefined ? {} : { selectedConnectionId: normalized.selectedConnectionId }),
   }));
@@ -305,11 +330,17 @@ function normalizePreferences(config: ConnectionConfig | ConnectionPreferences |
   const mode = connectionModeFromScheme(config.address) ?? config.mode;
   const lastWorkspaceId = 'lastWorkspaceId' in config ? config.lastWorkspaceId : undefined;
   const lastModelId = 'lastModelId' in config ? config.lastModelId : undefined;
+  const lastPermissionMode = 'lastPermissionMode' in config ? config.lastPermissionMode : undefined;
+  const lastEffort = 'lastEffort' in config ? config.lastEffort : undefined;
+  const lastWorkspaceSortPreference = 'lastWorkspaceSortPreference' in config ? config.lastWorkspaceSortPreference : undefined;
   return Object.freeze({
     connectionId: createConnectionId(String(config.connectionId)),
     address: normalizeConnectionAddress(config.address, mode),
     mode,
     ...(lastWorkspaceId === undefined ? {} : { lastWorkspaceId }),
     ...(lastModelId === undefined ? {} : { lastModelId }),
+    ...(lastPermissionMode === undefined ? {} : { lastPermissionMode }),
+    ...(lastEffort === undefined ? {} : { lastEffort }),
+    ...(lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference }),
   });
 }

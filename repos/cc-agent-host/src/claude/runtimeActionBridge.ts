@@ -1,8 +1,6 @@
-import { createHash } from 'node:crypto';
-
 import type { ChatAction } from '../domain/actions.js';
 import type { ActiveTurn } from '../domain/chat.js';
-import { createPartId, type ChatUri, type TurnId } from '../domain/ids.js';
+import { type ChatUri, type TurnId } from '../domain/ids.js';
 import { parseChatUri } from '../domain/resources.js';
 import type { HostStateManager } from '../host/hostStateManager.js';
 import type { ChatActionEnvelope } from '../protocol/types.js';
@@ -101,7 +99,9 @@ export class ClaudeRuntimeActionBridge {
 
     switch (runtimeSignal.type) {
       case 'runtime/init':
-        return this.handleInit(parsedChatUri, runtimeSignal);
+        // Init is a control-plane signal. Catalog/runtime observers consume it
+        // separately; it must not allocate a turn timestamp or response part.
+        return EMPTY_ENVELOPES;
       case 'runtime/message':
         return this.handleMessage(parsedChatUri, entry, runtimeSignal);
       case 'turn/result':
@@ -111,43 +111,6 @@ export class ClaudeRuntimeActionBridge {
       default:
         return EMPTY_ENVELOPES;
     }
-  }
-
-  private handleInit(
-    chatUri: ChatUri,
-    signal: Extract<ClaudeRuntimeSignal, { readonly type: 'runtime/init' }>,
-  ): readonly ChatActionEnvelope[] {
-    const activeTurn = this.activeTurn(chatUri);
-    const timestamp = this.timestamp();
-    if (activeTurn === undefined || timestamp === undefined) {
-      return EMPTY_ENVELOPES;
-    }
-
-    const seed = createHash('sha256')
-      .update(['ccvibe-runtime-init', chatUri, activeTurn.id, String(signal.generation)].join('|'), 'utf8')
-      .digest('hex')
-      .slice(0, 48);
-    const projected = signal.systemMessage ?? {
-      event: 'init',
-      title: '运行环境初始化',
-      content: JSON.stringify({
-        model: signal.model,
-        permissionMode: signal.permissionMode,
-        ...(signal.capabilities === undefined ? {} : { capabilities: signal.capabilities }),
-      }, undefined, 2),
-      level: 'info' as const,
-    };
-    const action: ChatAction = {
-      type: 'chat/responsePartAdded',
-      turnId: activeTurn.id,
-      part: {
-        kind: 'system_message',
-        id: createPartId(`part_${seed}`),
-        ...projected,
-      },
-      timestamp,
-    };
-    return this.dispatchActions(chatUri, [action]);
   }
 
   private handleMessage(

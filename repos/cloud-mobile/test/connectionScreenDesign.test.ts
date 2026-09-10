@@ -25,9 +25,14 @@ import { type SyncStore } from '../src/sync/syncState';
 
 const projectRoot = path.resolve(__dirname, '..');
 const connectionScreenPath = path.join(projectRoot, 'src/features/connection/ConnectionScreen.tsx');
+const runtimeStorePath = path.join(projectRoot, 'src/features/runtime/runtimeStore.ts');
 
 function readConnectionScreen(): string {
   return fs.readFileSync(connectionScreenPath, 'utf8');
+}
+
+function readRuntimeStore(): string {
+  return fs.readFileSync(runtimeStorePath, 'utf8');
 }
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {
@@ -161,22 +166,24 @@ describe('connection settings pure boundaries', () => {
 });
 
 describe('connection settings source contract', () => {
-  it('renders list/detail/edit/new as mutually exclusive screen states', () => {
+  it('renders list/edit/new as mutually exclusive screen states', () => {
     const source = readConnectionScreen();
-    expect(source).toMatch(/export type ConnectionSettingsView = 'list' \| 'detail' \| 'edit' \| 'new';/u);
+    expect(source).toMatch(/export type ConnectionSettingsView = 'list' \| 'edit' \| 'new';/u);
 
     const screenRender = sourceBetween(source, 'return (', '\n}\n\ninterface HostListProps');
     expect(screenRender).toContain("{view === 'list' ? (");
-    expect(screenRender).toContain(": view === 'detail' && focusedHost !== undefined ? (");
+    expect(screenRender).not.toContain('<HostDetail');
     expect(screenRender).toContain('<HostList');
-    expect(screenRender).toContain('<HostDetail');
     expect(screenRender).toContain('<HostEditor');
 
-    const hostList = sourceBetween(source, 'function HostList(', 'interface HostDetailProps');
+    const hostList = sourceBetween(source, 'function HostList(', 'interface HostEditorProps');
     expect(hostList).toContain('host.address');
     expect(hostList).toContain('const selected =');
     expect(hostList).toContain('name="check"');
-    expect(hostList).toContain('name="chevron-right"');
+    expect(hostList).toContain('name="pencil-outline"');
+    expect(hostList).toContain('connection-edit-');
+    expect(hostList).toContain('onConnect');
+    expect(hostList).not.toContain('name="chevron-right"');
     expect(hostList).toContain('testID="connection-add"');
     expect(hostList).not.toContain('host.token');
     expect(hostList).not.toContain('tokenAvailable');
@@ -195,26 +202,45 @@ describe('connection settings source contract', () => {
 
   it('keeps detail and editor controls aligned with the design states', () => {
     const source = readConnectionScreen();
-    const detail = sourceBetween(source, 'function HostDetail(', 'interface HostEditorProps');
-    expect(detail).toContain('主机详情');
-    expect(detail).toContain('已保护');
-    expect(detail).toContain('不会显示明文');
-    expect(detail).toContain('testID="connection-delete"');
-    expect(detail).toContain('testID="connection-edit"');
-    expect(detail).toContain('testID="connection-submit"');
-
-    const editor = sourceBetween(source, 'function HostEditor(', 'interface ReadOnlyFieldProps');
+    const editor = sourceBetween(source, 'function HostEditor(', 'interface LabeledInputProps');
     expect(editor).toContain("editing ? '编辑主机' : '新增主机'");
     expect(editor).toContain('testID="connection-save"');
     expect(editor).toContain('testID="connection-submit"');
-    expect(editor).toContain('secureTextEntry');
+    expect(editor).toContain('secureTextEntry={!editing}');
+    expect(editor).toContain('testID="connection-delete"');
+    expect(editor).toContain('onDelete');
+    expect(editor).toContain('tokenLoading');
+    expect(editor).toContain('tokenReadError');
     expect(editor).toContain('留空则保留已保存的 Token');
     expect(editor).toContain('Token 会安全保存，不会显示在列表中');
   });
 
+  it('connects from the Host row and keeps edit as an independent sibling action', () => {
+    const source = readConnectionScreen();
+    const hostList = sourceBetween(source, 'function HostList(', 'interface HostEditorProps');
+    expect(hostList).toContain('onPress={() => props.onConnect(host)}');
+    expect(hostList).toContain('onPress={() => props.onOpenEdit(host)}');
+    expect(hostList).toContain('testID={`connection-edit-${host.connectionId}`}');
+    expect(hostList).not.toContain('onOpenDetail');
+
+    const screen = sourceBetween(source, 'const connectHost = async', 'const save = async');
+    expect(screen).toContain('actions.switchConnection(host.connectionId)');
+    expect(screen).toContain("router.replace('/')");
+    expect(screen).toContain('setErrors(result.errors);');
+  });
+
+  it('loads an existing Host token through the scoped Runtime action', () => {
+    const source = readConnectionScreen();
+    expect(source).toContain('actions.readHostToken(focusedConnectionId)');
+    expect(source).toContain('setTokenLoading(true)');
+    expect(source).toContain('setTokenReadError');
+    expect(source).toContain('secureTextEntry={!editing}');
+    expect(readRuntimeStore()).toContain('readHostToken(connectionId: ConnectionId | string): Promise<string | null>');
+  });
+
   it('uses native back only at the list route boundary and returns nested states to list', () => {
     const source = readConnectionScreen();
-    const backHandler = sourceBetween(source, 'const goBack = (): void => {', 'const openDetail =');
+    const backHandler = sourceBetween(source, 'const goBack = (): void => {', 'const openEdit =');
     expect(backHandler).toContain("if (view === 'list')");
     expect(backHandler).toContain('router.back();');
     expect(backHandler).toContain('showList();');

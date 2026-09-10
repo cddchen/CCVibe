@@ -12,5 +12,8 @@ describe('home session refresh contract', () => {
     expect(source).toContain('disabled={props.refreshingSessions || !props.canRefreshSessions}');
     expect(source).toContain('props.actions.refreshSessions()');
     expect(source).toContain('props.refreshingSessions\n            ? <ActivityIndicator');
+    expect(source).toContain('accessibilityLabel={workspaceSortAccessibilityLabel(props.workspaceSortPreference)}');
+    expect(source).toContain('props.actions.setWorkspaceSortPreference(nextWorkspaceSortPreference(props.workspaceSortPreference))');
+    expect(source.indexOf('workspaceSortAccessibilityLabel(props.workspaceSortPreference)')).toBeLessThan(source.indexOf('accessibilityLabel="刷新最近会话"'));
   });
 });

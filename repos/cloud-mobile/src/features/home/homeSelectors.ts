@@ -1,11 +1,14 @@
 import type { HostRootCatalogState } from '../../protocol/hostWire';
+import type { WorkspaceSortPreference } from '../../domain/types';
+
+export type { WorkspaceSortPreference } from '../../domain/types';
 
 export type HomeMode = 'loading' | 'disconnected' | 'ready' | 'no-workspace' | 'no-model' | 'error';
 
 export interface HomeSelectorError {
   readonly code: string;
   readonly message?: string;
-  readonly operation?: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh';
+  readonly operation?: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh' | 'preference';
 }
 
 export interface HomeSelectorInput {
@@ -14,6 +17,7 @@ export interface HomeSelectorInput {
   readonly catalog: HostRootCatalogState | undefined;
   readonly selectedWorkspaceId: string | undefined;
   readonly selectedModelId: string | undefined;
+  readonly workspaceSortPreference: WorkspaceSortPreference;
   readonly operationError: HomeSelectorError | undefined;
 }
 
@@ -64,6 +68,7 @@ export interface HomeViewModel {
   readonly selectedModelId: string | undefined;
   readonly selectedWorkspaceName: string | undefined;
   readonly selectedModelName: string | undefined;
+  readonly workspaceSortPreference: WorkspaceSortPreference;
   readonly permissionModes: readonly HomePermissionModeItem[];
   readonly defaultPermissionMode: HostRootCatalogState['defaultPermissionMode'] | undefined;
   readonly groups: readonly HomeSessionGroup[];
@@ -105,7 +110,8 @@ export function selectHomeViewModel(input: HomeSelectorInput): HomeViewModel {
     selectedModelName: selectedModel?.displayName,
     permissionModes: Object.freeze((catalog?.permissionModes ?? []).map((mode) => Object.freeze({ ...mode }))),
     defaultPermissionMode: catalog?.defaultPermissionMode,
-    groups: groupSessions(catalog),
+    workspaceSortPreference: input.workspaceSortPreference,
+    groups: groupSessions(catalog, input.workspaceSortPreference),
     operationError: input.operationError,
   });
 }
@@ -142,7 +148,10 @@ function hostStatusLabel(status: HomeViewModel['hostStatus']): string {
   }
 }
 
-function groupSessions(catalog: HostRootCatalogState | undefined): readonly HomeSessionGroup[] {
+function groupSessions(
+  catalog: HostRootCatalogState | undefined,
+  workspaceSortPreference: WorkspaceSortPreference,
+): readonly HomeSessionGroup[] {
   if (catalog === undefined) return Object.freeze([]);
   const workspaceNames = new Map(catalog.workspaces.map((workspace) => [workspace.id, workspace.displayName]));
   const grouped = new Map<string, { readonly workspaceName: string; readonly sessions: HomeSessionItem[] }>();
@@ -167,19 +176,42 @@ function groupSessions(catalog: HostRootCatalogState | undefined): readonly Home
     }
   }
 
-  return Object.freeze([...grouped.entries()]
-    .map(([workspaceId, group]) => Object.freeze({
+  const groups = [...grouped.entries()].map(([workspaceId, group]) => {
+    const sessions = [...group.sessions].sort(compareSessions);
+    return {
       workspaceId,
       workspaceName: group.workspaceName,
-      sessions: Object.freeze([...group.sessions].sort(compareSessions)),
-    }))
-    .sort((left, right) => left.workspaceName.localeCompare(right.workspaceName) || left.workspaceId.localeCompare(right.workspaceId)));
+      sessions: Object.freeze(sessions),
+      latestUpdatedAt: sessions[0]?.updatedAt,
+    };
+  });
+
+  groups.sort((left, right) => {
+    if (workspaceSortPreference === 'recent_workspace') {
+      const recent = compareOptionalText(right.latestUpdatedAt, left.latestUpdatedAt);
+      if (recent !== 0) return recent;
+    }
+    return left.workspaceName.localeCompare(right.workspaceName) || left.workspaceId.localeCompare(right.workspaceId);
+  });
+
+  return Object.freeze(groups.map(({ workspaceId, workspaceName, sessions }) => Object.freeze({
+    workspaceId,
+    workspaceName,
+    sessions,
+  })));
 }
 
 function compareSessions(left: HomeSessionItem, right: HomeSessionItem): number {
   return right.updatedAt.localeCompare(left.updatedAt)
     || left.title.localeCompare(right.title)
     || left.id.localeCompare(right.id);
+}
+
+function compareOptionalText(left: string | undefined, right: string | undefined): number {
+  if (left === undefined && right === undefined) return 0;
+  if (left === undefined) return -1;
+  if (right === undefined) return 1;
+  return left.localeCompare(right);
 }
 
 function mapSessionStatus(status: HostRootCatalogState['sessions'][number]['status']): HomeSessionStatus {

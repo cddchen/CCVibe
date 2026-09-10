@@ -58,6 +58,16 @@ remove_generated_path "$ARCHIVE_PATH"
 remove_generated_path "$EXPORT_DIR"
 remove_generated_path "$IPA_OUTPUT"
 
+# 确保 macOS 钥匙串处于解锁状态，避免 [CP] Embed Pods Frameworks 阶段 codesign 报错 errSecInternalComponent
+LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+if [[ -f "$LOGIN_KEYCHAIN" ]] && command -v security >/dev/null 2>&1; then
+  security unlock-keychain -p "" "$LOGIN_KEYCHAIN" 2>/dev/null || true
+  if ! security show-keychain-info "$LOGIN_KEYCHAIN" >/dev/null 2>&1; then
+    echo "警告：macOS 钥匙串 ($LOGIN_KEYCHAIN) 处于锁定状态，代码签名可能因权限受阻（报错 errSecInternalComponent）。" >&2
+    echo "如后续签名失败，请先在终端运行：security unlock-keychain $LOGIN_KEYCHAIN" >&2
+  fi
+fi
+
 cat > "$EXPORT_OPTIONS" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -97,8 +107,7 @@ xcodebuild \
   -exportArchive \
   -archivePath "$ARCHIVE_PATH" \
   -exportPath "$EXPORT_DIR" \
-  -exportOptionsPlist "$EXPORT_OPTIONS" \
-  -allowProvisioningUpdates
+  -exportOptionsPlist "$EXPORT_OPTIONS"
 
 IPA_SOURCE="$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
 if [[ -z "$IPA_SOURCE" ]]; then

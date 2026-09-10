@@ -40,6 +40,7 @@ import { HOME_TITLE_REVEAL_END, HOME_TITLE_REVEAL_START } from './homeScroll';
 
 const PRESS_SCALE = 0.97;
 const PRESS_DURATION = 120;
+const DEFAULT_EFFORT_OPTION_ID = '__default_effort__';
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 type HomePicker = 'workspace' | 'permission' | 'model' | 'effort' | undefined;
 interface HomePickerOption { readonly description?: string; readonly disabled?: boolean; readonly id: string; readonly title: string }
@@ -110,6 +111,7 @@ export default function HomeScreen(): JSX.Element {
                 selectedEffort={selectedEffort}
                 selectedPermissionMode={selectedPermissionMode}
                 refreshingSessions={refreshingSessions}
+                workspaceSortPreference={view.workspaceSortPreference}
                 view={view}
               />
             )}
@@ -160,6 +162,7 @@ interface HomeHeaderProps {
   readonly selectedEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined;
   readonly selectedPermissionMode: HostPermissionMode | undefined;
   readonly refreshingSessions: boolean;
+  readonly workspaceSortPreference: HomeViewModel['workspaceSortPreference'];
   readonly view: HomeViewModel;
 }
 
@@ -238,10 +241,16 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
       : picker === 'model'
         ? props.view.models.map((model) => ({ id: model.id, title: model.displayName, ...(model.description === undefined ? {} : { description: model.description }) }))
         : picker === 'effort'
-          ? supportedEfforts.map((effort) => ({ id: effort, title: effortLabel(effort) }))
+          ? [{ id: DEFAULT_EFFORT_OPTION_ID, title: effortLabel(undefined) }, ...supportedEfforts.map((effort) => ({ id: effort, title: effortLabel(effort) }))]
           : [];
   const pickerTitle = picker === 'workspace' ? '选择工作区' : picker === 'permission' ? '权限设置' : picker === 'model' ? '选择模型' : '选择思考强度';
-  const pickerValue = picker === 'workspace' ? props.view.selectedWorkspaceId : picker === 'permission' ? permissionMode : picker === 'model' ? props.view.selectedModelId : props.selectedEffort;
+  const pickerValue = picker === 'workspace'
+    ? props.view.selectedWorkspaceId
+    : picker === 'permission'
+      ? permissionMode
+      : picker === 'model'
+        ? props.view.selectedModelId
+        : props.selectedEffort ?? DEFAULT_EFFORT_OPTION_ID;
   const selectPickerOption = (id: string): void => {
     if (picker === 'workspace') {
       props.actions.setWorkspace(id);
@@ -253,7 +262,9 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
       props.actions.setModel(id);
       props.actions.setEffort(undefined);
     }
-    if (picker === 'effort') props.actions.setEffort(id as NonNullable<HomeHeaderProps['selectedEffort']>);
+    if (picker === 'effort') {
+      props.actions.setEffort(id === DEFAULT_EFFORT_OPTION_ID ? undefined : id as NonNullable<HomeHeaderProps['selectedEffort']>);
+    }
     setPicker(undefined);
   };
   const openPicker = (next: HomePicker): void => { Keyboard.dismiss(); setPicker(next); };
@@ -391,7 +402,7 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
             <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{modelLabel}</Text>
             <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={17} />
           </GlassPressable>
-          <GlassPressable accessibilityLabel="选择思考强度" disabled={!canCompose || supportedEfforts.length === 0} onPress={() => openPicker('effort')} style={styles.thinkingButton}>
+          <GlassPressable accessibilityLabel="选择思考强度" disabled={!canCompose || selectedModel === undefined} onPress={() => openPicker('effort')} style={styles.thinkingButton}>
             <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.toolbarLabel, { color: theme.colors.onSurfaceVariant }]}>{effortLabel(props.selectedEffort)}</Text>
             <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="chevron-down" size={17} />
           </GlassPressable>
@@ -411,6 +422,18 @@ const HomeHeader = memo(function HomeHeader(props: HomeHeaderProps): JSX.Element
 
       <View style={styles.sectionHeading}>
         <Text allowFontScaling style={[styles.sectionTitle, { color: theme.colors.onBackground }]}>最近会话</Text>
+        <GlassPressable
+          accessibilityHint={workspaceSortAccessibilityHint(props.workspaceSortPreference)}
+          accessibilityLabel={workspaceSortAccessibilityLabel(props.workspaceSortPreference)}
+          onPress={() => void props.actions.setWorkspaceSortPreference(nextWorkspaceSortPreference(props.workspaceSortPreference))}
+          style={styles.workspaceSortButton}
+        >
+          <MaterialCommunityIcons
+            color={theme.colors.onSurfaceVariant}
+            name={props.workspaceSortPreference === 'default' ? 'sort-alphabetical-ascending' : 'clock-outline'}
+            size={22}
+          />
+        </GlassPressable>
         <GlassPressable
           accessibilityHint="从 Host 重新读取最新会话"
           accessibilityLabel="刷新最近会话"
@@ -664,6 +687,20 @@ function compactWorkspacePath(path: string): string {
   return name.length > 0 ? `…/${name}` : path;
 }
 
+function nextWorkspaceSortPreference(preference: HomeViewModel['workspaceSortPreference']): HomeViewModel['workspaceSortPreference'] {
+  return preference === 'default' ? 'recent_workspace' : 'default';
+}
+
+function workspaceSortAccessibilityLabel(preference: HomeViewModel['workspaceSortPreference']): string {
+  return preference === 'default'
+    ? '工作区排序：名称升序；切换为最近使用'
+    : '工作区排序：最近使用；切换为名称升序';
+}
+
+function workspaceSortAccessibilityHint(preference: HomeViewModel['workspaceSortPreference']): string {
+  return preference === 'default' ? '切换为按最近会话排序' : '切换为按工作区名称排序';
+}
+
 function effortLabel(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined): string {
   switch (effort) {
     case undefined: return '默认';
@@ -675,8 +712,9 @@ function effortLabel(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undef
   }
 }
 
-function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh' | undefined, message?: string): string {
+function operationErrorLabel(code: string, operation: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh' | 'preference' | undefined, message?: string): string {
   if (operation === 'refresh') return '最近会话刷新失败，请重试';
+  if (operation === 'preference') return '排序偏好保存失败，请稍后重试';
   if (operation === 'workspace') return message ?? '工作区路径校验失败，请重试';
   if (operation === 'send') {
     switch (code) {
@@ -747,6 +785,7 @@ const styles = StyleSheet.create({
   workspaceResolverError: { fontSize: 13, lineHeight: 19 },
   sectionHeading: { alignItems: 'center', flexDirection: 'row', minHeight: 52, paddingHorizontal: 2, paddingTop: 8 },
   sectionTitle: { flex: 1, fontSize: 28, fontWeight: '800', letterSpacing: -0.6, lineHeight: 36 },
+  workspaceSortButton: { alignItems: 'center', borderRadius: 22, height: 44, justifyContent: 'center', width: 44 },
   refreshButton: { alignItems: 'center', borderRadius: 22, height: 44, justifyContent: 'center', width: 44 },
   refreshError: { fontSize: 13, lineHeight: 19, marginTop: -7, paddingHorizontal: 2 },
   compactHeader: { left: 0, position: 'absolute', right: 0, top: 0, zIndex: 10 },

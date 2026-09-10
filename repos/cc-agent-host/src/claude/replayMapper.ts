@@ -348,9 +348,9 @@ export class ClaudeReplayMapper {
       return currentTurn;
     }
     if (currentTurn === undefined) {
-      // SDK history commonly starts with init before the first user prompt.
-      // Buffer it deterministically and attach it to that first real turn;
-      // never fabricate an empty transcript turn for setup/housekeeping.
+      // Some durable system events can precede the first user prompt. Buffer
+      // only events admitted by the projector and attach them to that first
+      // real turn; control-plane init/status records are filtered earlier.
       pendingSystemMessages.push({
         projection: projected,
         identity: recordIdentity(record, index),

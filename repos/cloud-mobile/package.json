@@ -1,6 +1,6 @@
 {
   "name": "@ccvibe/cloud-mobile",
-  "version": "0.8.0",
+  "version": "0.13.0",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint . --ext .ts,.tsx,.js --max-warnings=0",
+    "postinstall": "patch-package",
     "bundle:ios": "expo export --platform ios",
     "bundle:android": "expo export --platform android",
     "build:ios:device": "bash scripts/build-ios-device.sh",
@@ -32,13 +33,12 @@
     "expo-linking": "~8.0.12",
     "expo-router": "~6.0.24",
     "expo-secure-store": "~15.0.7",
-    "markdown-it": "^14.1.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-enriched-markdown": "0.5.0",
     "react-native-gesture-handler": "~2.28.0",
     "react-native-keyboard-controller": "1.18.5",
-    "react-native-markdown-display": "^7.0.2",
     "react-native-paper": "5.15.3",
     "react-native-reanimated": "~4.1.0",
     "react-native-safe-area-context": "~5.6.0",
@@ -53,6 +53,7 @@
     "@typescript-eslint/parser": "^8.68.0",
     "babel-preset-expo": "~54.0.12",
     "eslint": "^8.57.1",
+    "patch-package": "8.0.1",
     "typescript": "5.9.3",
     "vitest": "^3.2.4"
   }

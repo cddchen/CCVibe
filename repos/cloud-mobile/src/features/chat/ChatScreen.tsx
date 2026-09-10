@@ -6,6 +6,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Keyboard,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -18,7 +19,7 @@ import {
 import { useRouter } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ActivityIndicator, Button, IconButton, Text, useTheme, type MD3Theme } from 'react-native-paper';
-import Markdown, { type RenderRules } from 'react-native-markdown-display';
+import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 
 import { GlassPanel } from '../../ui/glass/GlassPanel';
 import { GlassSurface } from '../../ui/glass/GlassSurface';
@@ -96,6 +97,11 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const requestSheetRef = useRef<RequestSheetKind>(undefined);
   const desiredRequestSheetRef = useRef<RequestSheetKind>(undefined);
   const transcriptRef = useRef<FlatList<ChatTurnViewModel>>(null);
+  // The first render needs a stable safe-area-aware inset before the overlay
+  // has reported its measured height. The later onLayout value includes any
+  // visible connection/error banners.
+  const topChromeFallback = insets.top + 52;
+  const [topChromeHeight, setTopChromeHeight] = useState(topChromeFallback);
   // Do not assume a long, initially loaded history is at its end.
   const atBottomRef = useRef(false);
   const bottomStateMeasuredRef = useRef(false);
@@ -107,6 +113,15 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const [composerHeight, setComposerHeight] = useState(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const composerSelectionRef = useRef<ComposerTextSelection>({ start: 0, end: 0 });
+
+  useEffect(() => {
+    setTopChromeHeight(topChromeFallback);
+  }, [topChromeFallback]);
+
+  const updateTopChromeHeight = useCallback((height: number): void => {
+    const nextHeight = Math.max(topChromeFallback, Math.ceil(height));
+    setTopChromeHeight((current) => current === nextHeight ? current : nextHeight);
+  }, [topChromeFallback]);
 
   useEffect(() => {
     if (notice === undefined) return;
@@ -408,38 +423,6 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
     <SafeAreaView edges={['left', 'right', 'bottom']} style={[styles.safe, { backgroundColor: theme.colors.background }]}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={8} style={styles.flex}>
         <View style={styles.flex}>
-          <GlassSurface
-            blurIntensity={48}
-            glassEffectStyle="regular"
-            materialElevation={1}
-            materialShape="none"
-            materialTone="surfaceContainerLow"
-            style={[styles.headerChrome, { paddingTop: insets.top }]}
-          >
-            <View style={styles.headerRow}>
-              <IconButton
-                accessibilityLabel="返回首页"
-                icon={({ color, size }) => <MaterialCommunityIcons color={color} name="chevron-left" size={size + 4} />}
-                onPress={() => router.back()}
-                size={44}
-              />
-              <View style={styles.headerIdentity}>
-                <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.chatTitle, { color: theme.colors.onSurface }]}>{view.title}</Text>
-                <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.chatSubtitle, { color: theme.colors.onSurfaceVariant }]}>
-                  {[view.workspaceName, view.modelDisplayName, view.modelId === undefined ? undefined : `强度 ${effortDisplayName(view.effort)}`].filter((value): value is string => value !== undefined && value.length > 0).join(' · ')}
-                </Text>
-              </View>
-              <IconButton
-                accessibilityLabel="会话更多选项"
-                icon={({ color, size }) => <MaterialCommunityIcons color={color} name="dots-horizontal" size={size} />}
-                onPress={() => showNotice('会话操作：重命名、归档（规划中）')}
-                size={44}
-              />
-            </View>
-          </GlassSurface>
-          {syncStatus !== 'connected' ? <View style={[styles.statusBanner, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="cloud-off-outline" size={18} /><Text style={[styles.statusBannerText, { color: theme.colors.onSurfaceVariant }]}>{syncStatus === 'reconnecting' ? '连接已断开，正在重新连接；当前内容保留在本机' : '当前未连接 Host，消息不会显示为已发送'}</Text><Button compact onPress={actions.retryConnection}>重试</Button></View> : null}
-          {subscribeError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>无法载入这个会话（{subscribeError.code}）</Text><Button compact onPress={() => void actions.subscribeChat(props.chatUri)}>重试</Button><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearOperationError} size={22} /></View> : null}
-          {chatOperationError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>操作未完成，请重试（{chatOperationError.code}）</Text><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearChatOperationError} size={22} /></View> : null}
           <ChatTranscript
             awaitingSince={awaitingSince}
             bottomInset={Math.max(insets.bottom, 10)}
@@ -456,6 +439,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
             onScrollEndDrag={endUserDrag}
             reduceMotion={reduceMotion}
             status={view.status}
+            topChromeInset={topChromeHeight}
             transcriptRef={transcriptRef}
             turns={turns}
           />
@@ -497,6 +481,50 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
               </View>
             </GlassPanel>
           </View>
+          <View
+            collapsable={false}
+            onLayout={(event) => updateTopChromeHeight(event.nativeEvent.layout.height)}
+            pointerEvents="box-none"
+            style={styles.topChrome}
+            testID="chat-top-chrome"
+          >
+            <View style={styles.topChromeHeader}>
+              <GlassSurface
+                blurIntensity={48}
+                glassEffectStyle="regular"
+                materialElevation={1}
+                materialShape="none"
+                materialTone="surfaceContainerLow"
+                style={styles.topChromeMaterial}
+              />
+              <View style={[styles.topChromeContent, { paddingTop: insets.top }]}>
+                <View style={styles.headerRow}>
+                  <IconButton
+                    accessibilityLabel="返回首页"
+                    icon={({ color, size }) => <MaterialCommunityIcons color={color} name="chevron-left" size={size + 4} />}
+                    onPress={() => router.back()}
+                    size={44}
+                  />
+                  <View style={styles.headerIdentity}>
+                    <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.chatTitle, { color: theme.colors.onSurface }]}>{view.title}</Text>
+                    <Text ellipsizeMode="tail" numberOfLines={1} style={[styles.chatSubtitle, { color: theme.colors.onSurfaceVariant }]}>
+                      {[view.workspaceName, view.modelDisplayName, view.modelId === undefined ? undefined : `强度 ${effortDisplayName(view.effort)}`].filter((value): value is string => value !== undefined && value.length > 0).join(' · ')}
+                    </Text>
+                  </View>
+                  <IconButton
+                    accessibilityLabel="会话更多选项"
+                    icon={({ color, size }) => <MaterialCommunityIcons color={color} name="dots-horizontal" size={size} />}
+                    onPress={() => showNotice('会话操作：重命名、归档（规划中）')}
+                    size={44}
+                  />
+                </View>
+              </View>
+              <View style={[styles.topChromeEdge, { backgroundColor: theme.colors.outlineVariant }]} />
+            </View>
+            {syncStatus !== 'connected' ? <View style={[styles.statusBanner, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="cloud-off-outline" size={18} /><Text style={[styles.statusBannerText, { color: theme.colors.onSurfaceVariant }]}>{syncStatus === 'reconnecting' ? '连接已断开，正在重新连接；当前内容保留在本机' : '当前未连接 Host，消息不会显示为已发送'}</Text><Button compact onPress={actions.retryConnection}>重试</Button></View> : null}
+            {subscribeError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>无法载入这个会话（{subscribeError.code}）</Text><Button compact onPress={() => void actions.subscribeChat(props.chatUri)}>重试</Button><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearOperationError} size={22} /></View> : null}
+            {chatOperationError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>操作未完成，请重试（{chatOperationError.code}）</Text><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearChatOperationError} size={22} /></View> : null}
+          </View>
         </View>
       </KeyboardAvoidingView>
       <ComposerCommandPopover commands={commands} currentPermission={view.permissionModes.find((mode) => mode.id === view.permissionMode)?.displayName ?? view.permissionMode} loading={commandsLoading} onClose={closeComposerMenus} onCommand={selectCommand} onPermission={openPermissionPicker} reduceMotion={reduceMotion} visible={attachmentMenuOpen} />
@@ -504,7 +532,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
       <ApprovalSheet approval={requestSheet === 'approval' ? activeApproval : undefined} reduceMotion={reduceMotion} onClose={closeApproval} onResolve={resolveApproval} />
       <InputSheet input={requestSheet === 'input' ? activeInput : undefined} reduceMotion={reduceMotion} onClose={closeInput} onResolve={resolveInput} />
       {notice !== undefined ? (
-        <Pressable accessibilityRole="button" accessibilityLabel="关闭提示" onPress={() => setNotice(undefined)} style={[styles.noticeToast, { top: insets.top + 54, backgroundColor: theme.colors.onSurface }]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="关闭提示" onPress={() => setNotice(undefined)} style={[styles.noticeToast, { top: topChromeHeight + 8, backgroundColor: theme.colors.onSurface }]}>
           <MaterialCommunityIcons color={theme.colors.surface} name="information-outline" size={17} />
           <Text style={[styles.noticeText, { color: theme.colors.surface }]}>{notice}</Text>
           <MaterialCommunityIcons color={theme.colors.surface} name="close" size={17} />
@@ -535,6 +563,7 @@ interface ChatTranscriptProps {
   readonly onScrollEndDrag: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
   readonly reduceMotion: boolean;
   readonly status: ChatViewModel['status'];
+  readonly topChromeInset: number;
   readonly transcriptRef: RefObject<FlatList<ChatTurnViewModel> | null>;
   readonly turns: readonly ChatTurnViewModel[];
 }
@@ -548,7 +577,8 @@ const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps):
   ), [props.onCopy, props.onRewind, props.reduceMotion]);
   return (
     <FlatList
-      contentContainerStyle={[styles.transcript, { paddingBottom: props.composerHeight + props.bottomInset + 20 }]}
+      contentContainerStyle={[styles.transcript, { paddingBottom: props.composerHeight + props.bottomInset + 20, paddingTop: props.topChromeInset + 10 }]}
+      contentInsetAdjustmentBehavior="never"
       data={deferredTurns}
       initialNumToRender={8}
       keyExtractor={(item) => item.id}
@@ -567,6 +597,7 @@ const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps):
       removeClippedSubviews={Platform.OS === 'android'}
       renderItem={renderItem}
       scrollEventThrottle={32}
+      scrollIndicatorInsets={{ top: props.topChromeInset }}
       showsVerticalScrollIndicator={false}
       updateCellsBatchingPeriod={32}
       windowSize={7}
@@ -611,9 +642,9 @@ const TurnTranscriptItem = memo(function TurnTranscriptItem({ turn, reduceMotion
           ) : null}
         </View>
       ) : null}
-      {answerParts.map((part) => turn.status === 'active'
-        ? <StreamingAnswer key={part.id} content={part.content} />
-        : <MarkdownAnswer key={part.id} content={part.content} onCopy={onCopy} />)}
+      {answerParts.map((part) => turn.status === 'complete'
+        ? <MarkdownAnswer key={part.id} content={part.content} onCopy={onCopy} />
+        : <StreamingAnswer key={part.id} content={part.content} />)}
       {turn.status === 'failed' ? <FailureView message={turn.error ?? 'Host 未能完成这次请求，请稍后重试。'} /> : null}
     </View>
   );
@@ -712,45 +743,48 @@ function activeProcessTitle(activity: ChatTurnViewModel['activity'], elapsed: st
   return elapsed === undefined ? title : `${title} · ${elapsed}`;
 }
 
-const selectableMarkdownRules: RenderRules = {
-  text: (node, _children, _parent, markdownStyles, inheritedStyles = {}) => (
-    <NativeText key={node.key} selectable style={[inheritedStyles, markdownStyles.text]}>{node.content}</NativeText>
-  ),
-  textgroup: (node, children, _parent, markdownStyles) => (
-    <NativeText key={node.key} selectable style={markdownStyles.textgroup}>{children}</NativeText>
-  ),
-};
+// react-native-enriched-markdown@0.5.0 defaults latexMath to true. Math is
+// deliberately disabled for this migration: it is unrelated to text
+// selection/copy and would add iosMath/AndroidMath native dependencies and
+// validation surface. Keep this explicit because the library's default can
+// otherwise change the native build when this component is refactored.
+const assistantMarkdownMd4cFlags = { underline: false, latexMath: false } as const;
 
 const MarkdownAnswer = memo(function MarkdownAnswer({ content, onCopy }: { readonly content: string; readonly onCopy: (rawText: string) => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const markdownStyle = useMemo(() => ({
-    body: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25 },
-    heading1: { color: theme.colors.onSurface, fontSize: 26, fontWeight: '800' as const, lineHeight: 34, marginBottom: 8, marginTop: 12 },
-    heading2: { color: theme.colors.onSurface, fontSize: 22, fontWeight: '700' as const, lineHeight: 30, marginBottom: 7, marginTop: 10 },
-    heading3: { color: theme.colors.onSurface, fontSize: 19, fontWeight: '700' as const, lineHeight: 27, marginBottom: 6, marginTop: 8 },
     paragraph: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25, marginBottom: 10, marginTop: 0 },
-    strong: { fontWeight: '800' as const },
+    h1: { color: theme.colors.onSurface, fontSize: 26, fontWeight: 'bold', lineHeight: 34, marginBottom: 8, marginTop: 12 },
+    h2: { color: theme.colors.onSurface, fontSize: 22, fontWeight: 'bold', lineHeight: 30, marginBottom: 7, marginTop: 10 },
+    h3: { color: theme.colors.onSurface, fontSize: 19, fontWeight: 'bold', lineHeight: 27, marginBottom: 6, marginTop: 8 },
+    h4: { color: theme.colors.onSurface, fontSize: 17, fontWeight: 'bold', lineHeight: 25, marginBottom: 5, marginTop: 7 },
+    h5: { color: theme.colors.onSurface, fontSize: 16, fontWeight: 'bold', lineHeight: 24, marginBottom: 4, marginTop: 6 },
+    h6: { color: theme.colors.onSurface, fontSize: 15, fontWeight: 'bold', lineHeight: 22, marginBottom: 4, marginTop: 5 },
+    strong: { fontWeight: 'bold' as const },
     em: { fontStyle: 'italic' as const },
-    s: { textDecorationLine: 'line-through' as const },
-    code_inline: { backgroundColor: theme.colors.surfaceVariant, borderRadius: 5, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 14, paddingHorizontal: 4 },
-    code_block: { backgroundColor: theme.colors.surfaceVariant, borderRadius: 12, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 20, padding: 12 },
-    fence: { backgroundColor: theme.colors.surfaceVariant, borderColor: theme.colors.outlineVariant, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 20, padding: 12 },
-    blockquote: { backgroundColor: theme.colors.surfaceVariant, borderLeftColor: theme.colors.primary, borderLeftWidth: 3, paddingHorizontal: 12, paddingVertical: 7 },
-    bullet_list: { marginBottom: 8 }, ordered_list: { marginBottom: 8 },
-    table: { borderColor: theme.colors.outlineVariant, borderWidth: StyleSheet.hairlineWidth },
-    tr: { borderBottomColor: theme.colors.outlineVariant, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row' as const },
-    th: { backgroundColor: theme.colors.surfaceVariant, flex: 1, fontWeight: '700' as const, padding: 7 },
-    td: { flex: 1, padding: 7 },
-    link: { color: theme.colors.primary, textDecorationLine: 'underline' as const },
-    hr: { backgroundColor: theme.colors.outlineVariant, height: StyleSheet.hairlineWidth },
+    strikethrough: { color: theme.colors.onSurfaceVariant },
+    // Native enriched-markdown uses an empty family and zero size as the
+    // inheritance sentinel for inline code. Keeping those fields absent lets
+    // the parent paragraph/list provide the 16pt metrics while the library
+    // supplies its platform system-monospace face, so wrapped inline code
+    // stays on the same baseline instead of becoming a smaller tall span.
+    code: { backgroundColor: theme.colors.surfaceVariant, borderColor: theme.colors.outlineVariant, color: theme.colors.onSurface },
+    codeBlock: { backgroundColor: theme.colors.surfaceVariant, borderColor: theme.colors.outlineVariant, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, color: theme.colors.onSurface, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, lineHeight: 18, marginBottom: 0, marginTop: 0, padding: 4 },
+    blockquote: { backgroundColor: theme.colors.surfaceVariant, borderColor: theme.colors.primary, borderWidth: 3, color: theme.colors.onSurfaceVariant, gapWidth: 12 },
+    list: { color: theme.colors.onSurface, fontSize: 16, lineHeight: 25, marginBottom: 8, marginLeft: 22, marginTop: 0, gapWidth: 8 },
+    link: { color: theme.colors.primary, underline: true },
+    thematicBreak: { color: theme.colors.outlineVariant, height: StyleSheet.hairlineWidth, marginBottom: 10, marginTop: 10 },
   }), [theme.colors]);
   return (
     <View style={styles.assistantBlock}>
-      <Markdown
-        mergeStyle={false}
-        rules={selectableMarkdownRules}
-        style={markdownStyle}
-      >{content}</Markdown>
+      <EnrichedMarkdownText
+        flavor="github"
+        markdown={content}
+        markdownStyle={markdownStyle}
+        md4cFlags={assistantMarkdownMd4cFlags}
+        onLinkPress={({ url }) => { void Linking.openURL(url); }}
+        selectable
+      />
       <MessageCopyAction accessibilityLabel="复制助手回复" onPress={() => onCopy(content)} />
     </View>
   );
@@ -759,7 +793,7 @@ const MarkdownAnswer = memo(function MarkdownAnswer({ content, onCopy }: { reado
 function MessageCopyAction(props: { readonly accessibilityLabel: string; readonly onPress: () => void }): JSX.Element {
   const theme = useTheme<MD3Theme>();
   return (
-    <Pressable accessibilityLabel={props.accessibilityLabel} accessibilityRole="button" onPress={props.onPress} style={styles.messageAction}>
+    <Pressable accessibilityLabel={props.accessibilityLabel} accessibilityRole="button" onPress={props.onPress} style={[styles.messageAction, styles.assistantMessageAction]}>
       <MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="content-copy" size={18} />
     </Pressable>
   );
@@ -904,7 +938,11 @@ function effortDisplayName(effort: ChatViewModel['effort']): string {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   flex: { flex: 1 },
-  headerChrome: { paddingHorizontal: 8, paddingBottom: 2 },
+  topChrome: { left: 0, position: 'absolute', right: 0, top: 0, zIndex: 12 },
+  topChromeHeader: { position: 'relative' },
+  topChromeMaterial: { ...StyleSheet.absoluteFillObject },
+  topChromeContent: { paddingHorizontal: 8, paddingBottom: 2 },
+  topChromeEdge: { bottom: 0, height: StyleSheet.hairlineWidth, left: 0, position: 'absolute', right: 0 },
   headerRow: { minHeight: 50, flexDirection: 'row', alignItems: 'center' },
   headerIdentity: { flex: 1, minWidth: 0, alignItems: 'center', paddingHorizontal: 4, gap: 2 },
   chatTitle: { maxWidth: '82%', fontSize: 16, lineHeight: 21, fontWeight: '700' },
@@ -924,6 +962,7 @@ const styles = StyleSheet.create({
   promptText: { fontSize: 16, lineHeight: 24, fontWeight: '500' },
   messageActions: { flexDirection: 'row', gap: 2, marginTop: 1, minHeight: 48 },
   messageAction: { alignItems: 'center', borderRadius: 12, height: 48, justifyContent: 'center', minWidth: 48 },
+  assistantMessageAction: { alignSelf: 'flex-start' },
   failureCard: { marginHorizontal: 8, padding: 13, borderWidth: StyleSheet.hairlineWidth },
   failureContent: { gap: 8 },
   failureHeader: { minHeight: 24, flexDirection: 'row', alignItems: 'center', gap: 8 },

@@ -1,3 +1,96 @@
+# Cloud 项目 harness 与 agent 协作入口
+
+本入口于 2026-09-08 根据当前工作树、包脚本、Host options/runtime、Mobile sync/runtime 和功能计划核对；本次没有运行产品测试或真实 SDK。事实优先级与强制门禁见 [AGENTS.md](AGENTS.md)。下方「VS Code 历史参考」保留原研究全文，其类型、路径、版本和测试数字均不是 Cloud 当前事实。
+
+## Cloud 事实索引
+
+| 事实与 owner | 本仓库核对入口 | 维护边界 |
+| --- | --- | --- |
+| SDK adapter 与 options 汇聚 | `repos/cc-agent-host/src/claude/claudeAgentSdkService.ts`、`src/claude/options.ts`（后者相对 Host 包） | SDK 类型在服务端 adapter 收敛；修改前核对安装的 `.d.ts` |
+| Host 装配与长生命周期 Query | `repos/cc-agent-host/src/claude/createClaudeAgentHost.ts`、`repos/cc-agent-host/src/claude/claudeQueryRuntime.ts` | result 结束 turn；interrupt 是控制路径；勿把它们当作关闭整个 Query |
+| Live/replay 与权威状态 | `repos/cc-agent-host/src/claude/runtimeActionBridge.ts`、`repos/cc-agent-host/src/claude/replayMapper.ts`、`repos/cc-agent-host/src/domain/chatReducer.ts` | mapper 投影为领域状态；SDK transcript 与 Host overlay 分离；`system/init` 是 runtime/catalog 控制面信号，不生成 turn part，`system/status` 是瞬时 activity |
+| RPC、订阅与恢复 | `repos/cc-agent-host/src/protocol/protocolServerHandler.ts`、`repos/cc-agent-host/src/protocol/schemas.ts` | 公共 wire、授权和 snapshot/replay 边界 |
+| 移动端连接及同步 | `repos/cloud-mobile/src/features/runtime/runtimeStore.ts`、`repos/cloud-mobile/src/sync/reconcile.ts`、`repos/cloud-mobile/src/protocol/hostWire.ts` | Host 事实经 schema 和 sync 进入展示，snapshot 替换、replay 应用 action |
+| 完成态 assistant Markdown | `repos/cloud-mobile/src/features/chat/ChatScreen.tsx`、`repos/cloud-mobile/patches/react-native-enriched-markdown+0.5.0.patch`、`repos/cloud-mobile/test/enrichedMarkdownContract.test.ts` | 完成态使用精确固定的 `react-native-enriched-markdown@0.5.0` GitHub container renderer，使 GFM table 走原生表格容器；非表格文本保留 `selectable`，但当前表格单元格不可选，也不承诺跨表格边界连续选区。流式消息仍走原生 `Text`；iOS inline code 的父字号继承和逐行 glyph 背景几何、nested fenced code 的列表范围/缩进均由可复现 package patch 持有。公式支持全链路关闭 |
+| 产品配置持久化 | `repos/cc-agent-host/src/persistence/overlayRepository.ts`、`repos/cloud-mobile/src/storage/connectionPreferences.ts` | Host overlay 与客户端连接/偏好各有 owner，不能扩成第二份 transcript |
+
+这张表是定位入口，不是全面架构审计。未覆盖的细节由任务架构师沿源码核实后补充，不从历史参考推导。
+
+## 文档如何协作
+
+| 文档 | 唯一主要职责 | 谁维护 |
+| --- | --- | --- |
+| `harness.md` | 当前事实、owner、证据入口、漂移和知识导航 | 架构师收敛；开发者提交变更证据，测试员核对 |
+| `AGENTS.md` | 全项目必须遵守的规则和验证矩阵 | 架构师仅将稳定、可验证约束提升为规则 |
+| `docs/cloud-feature-plans/`、`docs/daemon/phase-*.md`、`docs/mobile/phase-*.md` | 单任务目标、计划、交接、实现偏差和验收记录 | 按阶段单写者交接 |
+| `docs/daemon/cc-agent-host-architecture-and-api.md` 及包 README | 架构/API 与操作说明 | 开发者随行为更新，架构师复核 |
+| `.codex/agents/*.toml` | 三个角色的执行指令与模型配置 | 架构师；不复制全部项目规则 |
+
+现有功能计划 08、11 展示了「根因/产品语义 → 实施 → 验证 → 代理边界」的交接形式；其历史完成状态不代表新任务验证通过。新任务沿用对应目录，不覆盖旧验收记录。
+
+## 架构师 → 开发者 → 测试员 → 架构师
+
+1. **架构师调研**：读根规则、本入口、相关计划及事实 owner；检查分支和 dirty 基线。记录事实、来源、置信度和漂移，明确范围、非目标与验收标准，再将可独立执行的计划写入现有计划目录。
+2. **开发者实现**：读取计划及其证据，使用 Luna Max 在分配的文件范围编码并做针对性验证；原则上先证明回归测试失败。发现方案与真实类型/行为冲突，向架构师回报证据，不跨职责补丁。完成后追加实现与偏差记录。
+3. **测试员独立验收**：使用独立的 Luna Max 子代理，从验收条件检查当前 diff、回归测试和失败路径；开发者交接后再运行受影响门禁。记录实际命令、环境、结果和缺口，不把开发者报告直接当成验证证据。问题返回开发者，修复后验证受影响范围。
+4. **架构师收敛**：审查代码、测试与文档的一致性；把本次证明的持久事实更新到本入口，将必要的稳定规则更新到 AGENTS，将操作/API 变化放回其 owner 文档。只有验收要求满足才将计划标为完成。
+
+默认由当前主代理承担架构师，或显式调用 `cloud-architect`；`cloud-developer` 和 `cloud-tester` 配置为 `gpt-5.6-luna` / `max`。主代理模型继承当前会话。仅要求调研/计划时，到计划交付为止；要求实现时继续完整闭环，不额外增加计划审批。
+
+调度必须传递：仓库路径、计划路径、任务目标、允许修改文件、禁止范围、依赖/前置结果、验收条件、回报位置。三个角色都先读本文件和根 AGENTS，不能依赖原对话记忆。父代理统一调度，开发者和测试员不递归派生。相同文件/共享文档串行写入；独立模块只有在接口和写入范围明确后才并行。测试验收以开发者交接的稳定代码为基线，期间如代码再次变化需记录并重验。
+
+### 计划最小交接结构
+
+- 状态：调研中 / 可实施 / 实施中 / 待验收 / 需返工 / 已完成 / 阻塞；阻塞写明原因、owner、解除条件。
+- 目标、范围和非目标；当前分支与已有改动摘要。
+- 事实证据：`事实 → owner → 文件/符号 → 置信度 → 漂移/动作`。
+- 方案、备选取舍、依赖与实施顺序；按角色分配文件范围。
+- 验收条目：可观察行为、正常/失败/竞态路径、测试入口、所需平台。
+- 实现记录：改动、偏差、原因、harness/API/README 更新位置或无需更新的理由。
+- 验证记录：命令、执行目录、日期/环境、退出结果、证据路径；分别列自动化、真机/模拟器、尚未验证。
+- 收敛记录：未解决风险、返工结果和架构师最终结论。
+
+## 验证地图
+
+两个包分别执行脚本；完整强制矩阵见 AGENTS「按变更类型选择验证」。Host 无 lint script。
+
+| 边界 | 现有测试入口 | 命令 owner |
+| --- | --- | --- |
+| Host SDK/runtime/options | `repos/cc-agent-host/test/claude/` | Host `package.json` 的 typecheck、test、build |
+| Host 状态/协议/存储 | `repos/cc-agent-host/test/domain/`、`test/protocol/`、`test/persistence/`（后二者相对 Host 包） | 同上；按矩阵扩大到全量 |
+| Mobile schema/sync/runtime | `repos/cloud-mobile/test/hostWire.test.ts`、`repos/cloud-mobile/test/syncState.test.ts`、`repos/cloud-mobile/test/runtimeFlow.test.ts` | Mobile typecheck、test、lint、双平台 bundle |
+| 平台视觉与原生行为 | `repos/cloud-mobile/test/` 的相关静态契约 + 受影响平台实测 | Mobile ios/android 与 build 脚本；bundle 不证明原生通过 |
+
+### iOS Simulator 连接本机 Host 的 live smoke
+
+需要验证 SecureStore、真实 WebSocket、历史会话或聊天 UI 时，先检查本机 Host，而不是直接启动第二个实例：
+
+```bash
+curl -fsS http://127.0.0.1:8787/health
+```
+
+- 已返回 Host health 时，复用现有进程、地址和 token；不得为了测试重启、替换或停止用户已运行的 Host。
+- 没有 Host 监听时，才自行启动后台实例：`npx @cddchen/cloud@latest start --token="$CCVIBE_LOCAL_HOST_TOKEN" --global`。`CCVIBE_LOCAL_HOST_TOKEN` 使用操作者在仓库和共享日志之外提供的本地测试值；也可省略 `--token`，使用 CLI 打印的一次性配对 token。记录启动输出的地址，并按 AGENTS 的长驻进程规则报告和清理本轮创建的实例。
+- iOS Simulator 上从当前工作区运行可连接 smoke，使用：
+
+  ```bash
+  cd /Users/cdd/Documents/ClaudeCodeRemote/CCVibe/repos/cloud-mobile
+  npm run ios
+  ```
+
+  模拟器可连接 `http://127.0.0.1:8787`（客户端规范化为 `ws://127.0.0.1:8787/ws`）；真机使用 Host 输出的局域网地址。
+- `CODE_SIGNING_ALLOWED=NO` 生成的 Simulator `.app` 只可作为原生编译/资源安装证据，不可用于上述连接 smoke。该产物没有 Keychain 所需的 `application-identifier` / `keychain-access-groups` entitlement，Expo SecureStore 会以 `-34018` 失败，使界面在发起 WebSocket 前就显示连接配置读写失败。
+
+只改文档/agent 配置时检查 TOML、路径、引用及 `git diff --check`，无需消耗模型 token 或跑产品全量构建。角色约束属于指令，并非操作系统写权限隔离。自定义角色的自动发现及实际模型选择需在支持该配置的 Codex 会话中验证；工具未提供角色选择时，父代理应读取对应 TOML 指令并显式传入 Luna/max，不能声称配置自动生效。若运行环境不支持该模型，报告限制，不静默换模型。
+
+配置格式依据：[OpenAI 自定义子代理文档](https://learn.chatgpt.com/docs/agent-configuration/subagents)。可用提示：「按项目 harness 流程实现 X，由架构师先写计划，再让 cloud-developer 和 cloud-tester 使用 Luna Max 完成开发及独立验收。」
+
+---
+
+# VS Code 历史参考（原文保留，非 Cloud 当前事实）
+
+以下内容是先前对外部 VS Code 项目的研究快照；其中的“当前”均指该研究时点与参考项目，本次未复验这些外部结论。
+
 ## 结论
 
 这个目录里的“agent harness”不是一个单独类，而是一套分层适配系统：

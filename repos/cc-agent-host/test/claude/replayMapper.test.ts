@@ -148,10 +148,12 @@ describe('ClaudeReplayMapper', () => {
     }));
   });
 
-  it('attaches leading init system rows to the first real user turn without creating an empty turn', () => {
+  it('filters leading, in-turn, and repeated init rows without creating an empty turn', () => {
     const turns = mapClaudeHistory([
-      session('system', 'leading-init', { subtype: 'init' }, 't0'),
+      session('system', 'leading-init', { subtype: 'init', model: 'claude-sonnet' }, 't0'),
+      session('system', 'leading-init-repeat', { subtype: 'init', model: 'claude-opus' }, 't0.5'),
       user('first-user', 'Start here', 't1'),
+      session('system', 'in-turn-init', { subtype: 'init', model: 'claude-sonnet' }, 't1.5'),
       assistant('first-assistant', [{ type: 'text', text: 'Ready.' }], 't2'),
     ]);
 
@@ -159,10 +161,7 @@ describe('ClaudeReplayMapper', () => {
     expect(turns[0]).toMatchObject({
       id: 'first-user',
       prompt: 'Start here',
-      parts: [
-        { kind: 'system_message', event: 'init', title: '运行环境初始化' },
-        { kind: 'markdown', content: 'Ready.' },
-      ],
+      parts: [{ kind: 'markdown', content: 'Ready.' }],
     });
   });
 

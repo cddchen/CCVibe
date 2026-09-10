@@ -236,6 +236,15 @@ Mobile local storage    = 连接信息、token、偏好与必要缓存，不是�
 - 注释解释“为何如此”、协议不变量、竞态和降级原因，不逐行复述代码。SDK/协议兼容分支、序列屏障、生命周期 race 和安全拒绝必须有必要注释。
 - 新增依赖前说明已有依赖为何不足；小功能不引入重型库。
 
+## 架构师、开发者与测试员协作
+
+- 项目角色定义位于 `.codex/agents/cloud-architect.toml`、`cloud-developer.toml`、`cloud-tester.toml`。主代理默认承担架构师；开发与独立测试使用 `gpt-5.6-luna`、`max`，不静默换模型。
+- 每个角色开始先读根 `harness.md` 的 Cloud 入口和任务计划，并核对真实 owner。其中 VS Code 历史参考不是当前项目事实。
+- 开发任务先由架构师调研并写可执行计划，再派发有明确文件边界的开发子代理，交接后由独立测试子代理验收，失败返回开发者。只要求调研/计划时不启动编码；已授权实现时不重复请求计划批准。
+- 计划交接字段、状态和文档职责见 harness。共享文件单写者，架构师统一调度；开发者和测试员不递归派生。实现和针对同一代码的最终验收不得并发写入。
+- 开发者提供事实变更与验证证据；测试员核对代码、验收与 harness 漂移；架构师将经证实的持久事实收敛回 harness，将稳定约束收敛回本文件。无须更新时在计划说明原因。
+- 配置文件不代表已验证运行生效。工具不能选择角色时读取对应角色指令并显式指定模型/强度；模型不可用应报告限制。门禁缺失时不得把计划标为完成。
+
 ## Bug 修复与开发流程
 
 1. 开始前运行 `git status --short`，确认当前分支和用户已有改动。工作树可能是 dirty；现有改动均视为用户工作，禁止覆盖、回退或顺手格式化无关文件。
@@ -258,6 +267,8 @@ Mobile local storage    = 连接信息、token、偏好与必要缓存，不是�
 - Host 从源码运行：在 `repos/cc-agent-host` 执行 `npm run start:dev`；生产语义的前台进程执行 `npm run start:prod`。不要把真实 token 写进命令历史、文档或仓库。
 - CLI 的 `start` 默认可以后台运行，`status` / `stop` 管理同一服务；调试生命周期和日志时使用 `--foreground`。绑定 `0.0.0.0` 或公网接口前必须明确评估 token 与 TLS 边界。
 - Mobile 开发：在 `repos/cloud-mobile` 执行 `npm start` 启动 Metro，或用 `npm run ios` / `npm run android` 构建原生开发应用。
+- 做 iOS Simulator 的真实 Host/SecureStore/会话 smoke 时，先用 `curl -fsS http://127.0.0.1:8787/health` 检查并复用现有 Host，不得重启或停止用户已运行的实例；仅在没有 Host 时才执行 `npx @cddchen/cloud@latest start --token="$CCVIBE_LOCAL_HOST_TOKEN" --global`，token 从仓库和共享日志之外取得，也可省略 `--token` 使用 CLI 生成值。随后必须在 `/Users/cdd/Documents/ClaudeCodeRemote/CCVibe/repos/cloud-mobile` 执行 `npm run ios` 启动模拟器开发应用。
+- `CODE_SIGNING_ALLOWED=NO` 的未签名 Simulator 产物只能证明编译或资源安装，不能用于连接 smoke：它缺少 iOS Keychain entitlement，会导致 Expo SecureStore 在 WebSocket 发起前读写失败。Simulator 使用 `127.0.0.1`；真机使用 Host 输出的局域网地址。
 - 启动长驻 Host、Metro、模拟器或真机任务后，应向用户报告地址、模式和如何停止；任务结束且用户未要求保留时清理本轮创建的后台进程。
 
 ### Host

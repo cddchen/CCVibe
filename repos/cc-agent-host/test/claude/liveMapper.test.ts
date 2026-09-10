@@ -498,7 +498,7 @@ describe('ClaudeLiveMapper', () => {
     expect(part(otherTurn).id).not.toBe(part(failed).id);
   });
 
-  it('maps the SDK init message without exposing its session identity', () => {
+  it('drops the SDK init message without exposing its session identity', () => {
     const mapper = new ClaudeLiveMapper({ generation: 7 });
     const init = {
       type: 'system',
@@ -520,16 +520,7 @@ describe('ClaudeLiveMapper', () => {
 
     const actions = mapper.mapMessage(init, TURN_ID, 'init-time');
 
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({
-      type: 'chat/responsePartAdded',
-      part: {
-        kind: 'system_message',
-        event: 'init',
-        title: '运行环境初始化',
-        content: expect.stringContaining('claude-sonnet'),
-      },
-    });
+    expect(actions).toEqual([]);
     expect(JSON.stringify(actions)).not.toContain(SESSION_ID);
   });
 

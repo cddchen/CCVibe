@@ -68,6 +68,202 @@ function createSupervisor(store: SyncStore | undefined, behavior: 'connected' | 
 }
 
 describe('multi-Host runtime connection flow', () => {
+  it('restores all Host-scoped composer preferences on initialization', async () => {
+    const hosts = preferencesStore({
+      hosts: [{
+        connectionId: createConnectionId('connection-a'),
+        address: 'wss://one.example.test/ws',
+        mode: 'production',
+        lastWorkspaceId: 'workspace-a',
+        lastModelId: 'model-a',
+        lastPermissionMode: 'plan',
+        lastEffort: 'high',
+      }],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    const runtime = new CloudRuntime(dependencies(hosts, tokenStore({ 'connection-a': 'token-a' })));
+
+    await runtime.initialize();
+
+    expect(runtime.getState().selection).toEqual({
+      workspaceId: 'workspace-a',
+      modelId: 'model-a',
+      permissionMode: 'plan',
+      effort: 'high',
+    });
+    runtime.dispose();
+  });
+
+  it('reads one Host token through the scoped Runtime action without touching preferences', async () => {
+    const hosts = preferencesStore({
+      hosts: [{
+        connectionId: createConnectionId('connection-a'),
+        address: 'wss://one.example.test/ws',
+        mode: 'production',
+      }],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    const tokens = tokenStore({ 'connection-a': 'token-a' });
+    const runtime = new CloudRuntime(dependencies(hosts, tokens));
+
+    await runtime.initialize();
+
+    await expect(runtime.actions.readHostToken('connection-a')).resolves.toBe('token-a');
+    expect(JSON.stringify(hosts.current())).not.toContain('token-a');
+    runtime.dispose();
+  });
+
+  it('propagates scoped token read failures so the editor can show an explicit error', async () => {
+    const hosts = preferencesStore({
+      hosts: [{
+        connectionId: createConnectionId('connection-a'),
+        address: 'wss://one.example.test/ws',
+        mode: 'production',
+      }],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    const tokens = tokenStore();
+    tokens.readForHost = async () => { throw new Error('secure store unavailable'); };
+    const runtime = new CloudRuntime(dependencies(hosts, tokens));
+
+    await runtime.initialize();
+
+    await expect(runtime.actions.readHostToken('connection-a')).rejects.toThrow('secure store unavailable');
+    runtime.dispose();
+  });
+
+  it('rejects scoped token reads for an unknown Host id', async () => {
+    const runtime = new CloudRuntime(dependencies(preferencesStore(), tokenStore({ 'connection-a': 'token-a' })));
+
+    await runtime.initialize();
+
+    await expect(runtime.actions.readHostToken('connection-a')).rejects.toThrow('connectionId is not configured');
+    runtime.dispose();
+  });
+
+  it('restores and switches the Host-scoped workspace sort preference', async () => {
+    const hosts = preferencesStore({
+      hosts: [
+        {
+          connectionId: createConnectionId('connection-a'),
+          address: 'wss://one.example.test/ws',
+          mode: 'production',
+          lastWorkspaceSortPreference: 'recent_workspace',
+        },
+        {
+          connectionId: createConnectionId('connection-b'),
+          address: 'wss://two.example.test/ws',
+          mode: 'production',
+        },
+      ],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    const runtime = new CloudRuntime(dependencies(hosts, tokenStore({ 'connection-a': 'token-a', 'connection-b': 'token-b' })));
+    await runtime.initialize();
+
+    expect(runtime.getState().workspaceSortPreference).toBe('recent_workspace');
+    await expect(runtime.actions.switchConnection('connection-b')).resolves.toEqual({ ok: true });
+    expect(runtime.getState().workspaceSortPreference).toBe('default');
+    await expect(runtime.actions.switchConnection('connection-a')).resolves.toEqual({ ok: true });
+    expect(runtime.getState().workspaceSortPreference).toBe('recent_workspace');
+    runtime.dispose();
+  });
+
+  it('persists a workspace sort change and exposes storage failure', async () => {
+    const base = preferencesStore({
+      hosts: [{
+        connectionId: createConnectionId('connection-a'),
+        address: 'wss://one.example.test/ws',
+        mode: 'production',
+      }],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    let failSave = false;
+    const hosts: HostPreferencesStore = {
+      loadHosts: base.loadHosts,
+      selectHost: base.selectHost,
+      saveHosts: async (next) => {
+        if (failSave) throw new Error('storage unavailable');
+        await base.saveHosts(next);
+      },
+    };
+    const runtime = new CloudRuntime(dependencies(hosts, tokenStore({ 'connection-a': 'token-a' })));
+    await runtime.initialize();
+
+    await runtime.actions.setWorkspaceSortPreference('recent_workspace');
+    expect(runtime.getState().workspaceSortPreference).toBe('recent_workspace');
+    expect(base.current().hosts[0]).toMatchObject({ lastWorkspaceSortPreference: 'recent_workspace' });
+
+    failSave = true;
+    await runtime.actions.setWorkspaceSortPreference('default');
+    expect(runtime.getState().workspaceSortPreference).toBe('default');
+    expect(runtime.getState().operationError).toMatchObject({ operation: 'preference', code: 'STORAGE_UNAVAILABLE' });
+    runtime.dispose();
+  });
+
+  it('keeps composer preferences isolated when switching Hosts', async () => {
+    const hosts = preferencesStore({
+      hosts: [
+        {
+          connectionId: createConnectionId('connection-a'),
+          address: 'wss://one.example.test/ws',
+          mode: 'production',
+          lastModelId: 'model-a',
+          lastPermissionMode: 'plan',
+          lastEffort: 'high',
+        },
+        {
+          connectionId: createConnectionId('connection-b'),
+          address: 'wss://two.example.test/ws',
+          mode: 'production',
+          lastModelId: 'model-b',
+          lastPermissionMode: 'default',
+          lastEffort: 'low',
+        },
+      ],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    const runtime = new CloudRuntime(dependencies(hosts, tokenStore({ 'connection-a': 'token-a', 'connection-b': 'token-b' })));
+    await runtime.initialize();
+
+    await expect(runtime.actions.switchConnection('connection-b')).resolves.toEqual({ ok: true });
+    expect(runtime.getState().selection).toMatchObject({ modelId: 'model-b', permissionMode: 'default', effort: 'low' });
+
+    await expect(runtime.actions.switchConnection('connection-a')).resolves.toEqual({ ok: true });
+    expect(runtime.getState().selection).toMatchObject({ modelId: 'model-a', permissionMode: 'plan', effort: 'high' });
+    runtime.dispose();
+  });
+
+  it('persists setter changes as a complete selection and removes a cleared default effort', async () => {
+    const hosts = preferencesStore({
+      hosts: [{
+        connectionId: createConnectionId('connection-a'),
+        address: 'wss://one.example.test/ws',
+        mode: 'production',
+        lastModelId: 'model-a',
+        lastPermissionMode: 'plan',
+        lastEffort: 'high',
+        lastWorkspaceSortPreference: 'recent_workspace',
+      }],
+      selectedConnectionId: createConnectionId('connection-a'),
+    });
+    const runtime = new CloudRuntime(dependencies(hosts, tokenStore({ 'connection-a': 'token-a' })));
+    await runtime.initialize();
+
+    runtime.actions.setPermissionMode('default');
+    runtime.actions.setModel('model-b');
+    runtime.actions.setEffort(undefined);
+    await Promise.resolve();
+
+    expect(hosts.current().hosts[0]).toMatchObject({
+      lastModelId: 'model-b',
+      lastPermissionMode: 'default',
+      lastWorkspaceSortPreference: 'recent_workspace',
+    });
+    expect(hosts.current().hosts[0]).not.toHaveProperty('lastEffort');
+    runtime.dispose();
+  });
+
   it('migrates the legacy token into the selected Host namespace on initialization', async () => {
     const values = new Map<string, string>([
       ['cloud.connection.preferences', JSON.stringify({

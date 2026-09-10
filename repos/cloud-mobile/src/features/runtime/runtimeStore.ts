@@ -59,7 +59,7 @@ import {
   type HomeSelectorInput,
   type HomeViewModel,
 } from '../home/homeSelectors';
-import type { JsonValue, ConnectionMode } from '../../domain/types';
+import type { JsonValue, ConnectionMode, WorkspaceSortPreference } from '../../domain/types';
 import type { HostResourceState } from '../../domain/hostReducer';
 import { TransportRpcError } from '../../sync/transport';
 
@@ -78,7 +78,7 @@ export interface PendingSend {
 }
 
 export interface RuntimeOperationError extends HomeSelectorError {
-  readonly operation: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh';
+  readonly operation: 'create' | 'subscribe' | 'send' | 'workspace' | 'refresh' | 'preference';
   readonly chatUri?: ChatUri;
 }
 
@@ -101,6 +101,8 @@ export interface CloudRuntimeState {
   /** Non-sensitive availability metadata, keyed by the Host's local id. */
   readonly tokenAvailability: Readonly<Record<string, boolean>>;
   readonly selection: RuntimeSelection;
+  /** Host-scoped Home workspace ordering preference. */
+  readonly workspaceSortPreference: WorkspaceSortPreference;
   readonly pendingSend?: PendingSend;
   readonly operationError?: RuntimeOperationError;
   readonly chatOperationError?: ChatOperationError;
@@ -206,6 +208,8 @@ export interface CloudRuntimeDependencies {
 export interface RuntimeHydrationForTest {
   readonly catalog: HostRootCatalogState;
   readonly chat?: { readonly resource: ChatUri; readonly state: HostChatState; readonly lastServerSeq?: number };
+  readonly selection?: RuntimeSelection;
+  readonly workspaceSortPreference?: WorkspaceSortPreference;
   readonly syncStatus?: SyncState['status'];
   readonly supervisor?: RuntimeSupervisor;
 }
@@ -243,6 +247,7 @@ export class CloudRuntime {
       tokenAvailable: false,
       tokenAvailability: {},
       selection: {},
+      workspaceSortPreference: 'default',
       refreshingSessions: false,
     });
     this.actionsValue = Object.freeze({
@@ -250,6 +255,10 @@ export class CloudRuntime {
       saveConnection: (values: ConnectionFormValues, connectionId?: ConnectionId | string | null) => this.saveConnection(values, connectionId),
       deleteConnection: (connectionId: ConnectionId | string) => this.deleteConnection(connectionId),
       hasHostToken: (connectionId: ConnectionId | string) => this.hasHostToken(connectionId),
+      // The editor needs the scoped secret itself, but it must not receive the
+      // TokenStore or any unscoped/migration behavior. Keep this action narrow
+      // and reuse the same private SecureStore boundary as connection flows.
+      readHostToken: (connectionId: ConnectionId | string) => this.readConfiguredHostToken(connectionId),
       switchConnection: (connectionId: ConnectionId | string) => this.switchConnection(connectionId),
       selectConnection: (connectionId: ConnectionId | string) => this.switchConnection(connectionId),
       reconnectSaved: () => this.reconnectSaved(),
@@ -257,6 +266,7 @@ export class CloudRuntime {
       retryConnection: () => this.retryConnection(),
       subscribeChat: (chatUri: ChatUri) => this.subscribeChat(chatUri),
       setWorkspace: (workspaceId: string) => this.setWorkspace(workspaceId),
+      setWorkspaceSortPreference: (preference: WorkspaceSortPreference) => this.setWorkspaceSortPreference(preference),
       resolveWorkspace: (path: string) => this.resolveWorkspace(path),
       refreshSessions: () => this.refreshSessions(),
       setModel: (modelId: string) => this.setModel(modelId),
@@ -312,10 +322,10 @@ export class CloudRuntime {
         savedConnection: savedConnection ?? undefined,
         tokenAvailable: token !== null,
         tokenAvailability,
-        selection: {
-          ...(savedConnection?.lastWorkspaceId === undefined ? {} : { workspaceId: savedConnection.lastWorkspaceId }),
-          ...(savedConnection?.lastModelId === undefined ? {} : { modelId: savedConnection.lastModelId }),
-        },
+        selection: savedConnection === undefined ? {} : selectionFromPreferences(savedConnection),
+        workspaceSortPreference: savedConnection === undefined
+          ? 'default'
+          : workspaceSortPreferenceFromPreferences(savedConnection),
       });
       if (savedConnection !== undefined && token !== null) {
         void this.attachConnection({
@@ -347,6 +357,8 @@ export class CloudRuntime {
           { resource: input.chat.resource, state: input.chat.state, lastServerSeq: input.chat.lastServerSeq ?? 0 },
         ];
     const sync = createSyncState({ subscriptions });
+    const previousSelection = input.selection ?? this.state.selection;
+    const selection = normalizeComposerSelection(previousSelection, input.catalog);
     this.setState({
       phase: 'ready',
       sync: freezeSyncState({
@@ -356,7 +368,10 @@ export class CloudRuntime {
         hostEpoch: 'test-epoch',
         resources,
       }),
+      selection,
+      ...(input.workspaceSortPreference === undefined ? {} : { workspaceSortPreference: input.workspaceSortPreference }),
     });
+    if (!sameRuntimeSelection(previousSelection, selection)) void this.persistSelection();
     if (input.supervisor !== undefined) {
       this.supervisor = input.supervisor;
     }
@@ -396,6 +411,15 @@ export class CloudRuntime {
       ...(existingHost?.lastModelId === undefined
         ? {}
         : { lastModelId: existingHost.lastModelId }),
+      ...(existingHost?.lastPermissionMode === undefined
+        ? {}
+        : { lastPermissionMode: existingHost.lastPermissionMode }),
+      ...(existingHost?.lastEffort === undefined
+        ? {}
+        : { lastEffort: existingHost.lastEffort }),
+      ...(existingHost?.lastWorkspaceSortPreference === undefined
+        ? {}
+        : { lastWorkspaceSortPreference: existingHost.lastWorkspaceSortPreference }),
     });
     const config = Object.freeze({
       connectionId,
@@ -423,10 +447,8 @@ export class CloudRuntime {
       savedConnection: hostPreferences,
       tokenAvailable: true,
       tokenAvailability: { ...this.state.tokenAvailability, [String(connectionId)]: true },
-      selection: {
-        ...(hostPreferences.lastWorkspaceId === undefined ? {} : { workspaceId: hostPreferences.lastWorkspaceId }),
-        ...(hostPreferences.lastModelId === undefined ? {} : { modelId: hostPreferences.lastModelId }),
-      },
+      selection: selectionFromPreferences(hostPreferences),
+      workspaceSortPreference: workspaceSortPreferenceFromPreferences(hostPreferences),
       operationError: undefined,
     });
     const attempt = this.attachConnection(config);
@@ -482,7 +504,7 @@ export class CloudRuntime {
 
     // A save-only edit of the live Host changes the configuration underneath
     // its supervisor. Fence it after the durable write; the user can connect
-    // explicitly from the detail screen when they are ready.
+    // explicitly from the Host list when they are ready.
     if (replacingActiveHost) {
       this.beginConnectionOperation();
       this.detachSupervisor(true);
@@ -499,12 +521,8 @@ export class CloudRuntime {
       tokenAvailable: selectedConnectionId === connectionId ? true : this.state.tokenAvailable,
       tokenAvailability,
       ...(replacingActiveHost ? { phase: 'unconfigured', sync: freezeSyncState(createSyncState({ subscriptions: [AGENT_ROOT_URI] })) } : {}),
-      selection: selectedHost === undefined
-        ? {}
-        : {
-            ...(selectedHost.lastWorkspaceId === undefined ? {} : { workspaceId: selectedHost.lastWorkspaceId }),
-            ...(selectedHost.lastModelId === undefined ? {} : { modelId: selectedHost.lastModelId }),
-          },
+      selection: selectedHost === undefined ? {} : selectionFromPreferences(selectedHost),
+      workspaceSortPreference: selectedHost === undefined ? 'default' : workspaceSortPreferenceFromPreferences(selectedHost),
       operationError: undefined,
     });
     return { ok: true };
@@ -560,12 +578,8 @@ export class CloudRuntime {
       tokenAvailable: isSelected ? nextSelectedToken : this.state.tokenAvailable,
       tokenAvailability,
       ...(isSelected ? { phase: 'unconfigured', sync: freezeSyncState(createSyncState({ subscriptions: [AGENT_ROOT_URI] })) } : {}),
-      selection: nextSelectedHost === undefined
-        ? {}
-        : {
-            ...(nextSelectedHost.lastWorkspaceId === undefined ? {} : { workspaceId: nextSelectedHost.lastWorkspaceId }),
-            ...(nextSelectedHost.lastModelId === undefined ? {} : { modelId: nextSelectedHost.lastModelId }),
-          },
+      selection: nextSelectedHost === undefined ? {} : selectionFromPreferences(nextSelectedHost),
+      workspaceSortPreference: nextSelectedHost === undefined ? 'default' : workspaceSortPreferenceFromPreferences(nextSelectedHost),
       operationError: undefined,
     });
     return { ok: true };
@@ -577,6 +591,14 @@ export class CloudRuntime {
     } catch {
       return false;
     }
+  }
+
+  private async readConfiguredHostToken(connectionId: ConnectionId | string): Promise<string | null> {
+    const selectedId = createConnectionId(String(connectionId));
+    if (!this.state.savedConnections.some((host) => host.connectionId === selectedId)) {
+      throw new TypeError('connectionId is not configured');
+    }
+    return this.readHostToken(selectedId, false);
   }
 
   private async reconnectSaved(): Promise<boolean> {
@@ -632,6 +654,7 @@ export class CloudRuntime {
         this.setState({
           selectedConnectionId: selectedId,
           savedConnection: host,
+          workspaceSortPreference: workspaceSortPreferenceFromPreferences(host),
           tokenAvailable: false,
           tokenAvailability: { ...this.state.tokenAvailability, [String(selectedId)]: false },
           phase: 'unconfigured',
@@ -646,10 +669,8 @@ export class CloudRuntime {
         savedConnection: host,
         tokenAvailable: true,
         tokenAvailability: { ...this.state.tokenAvailability, [String(selectedId)]: true },
-        selection: {
-          ...(host.lastWorkspaceId === undefined ? {} : { workspaceId: host.lastWorkspaceId }),
-          ...(host.lastModelId === undefined ? {} : { modelId: host.lastModelId }),
-        },
+        selection: selectionFromPreferences(host),
+        workspaceSortPreference: workspaceSortPreferenceFromPreferences(host),
         phase: 'ready',
         operationError: undefined,
       });
@@ -699,7 +720,27 @@ export class CloudRuntime {
 
   private setWorkspace(workspaceId: string): void {
     this.setState({ selection: { ...this.state.selection, workspaceId } });
-    void this.persistSelection({ workspaceId });
+    void this.persistSelection();
+  }
+
+  private async setWorkspaceSortPreference(preference: WorkspaceSortPreference): Promise<void> {
+    this.setState({ workspaceSortPreference: preference, operationError: undefined });
+    const savedConnection = this.state.savedConnection;
+    if (savedConnection === undefined) return;
+
+    const updatedHost = Object.freeze({
+      ...savedConnection,
+      lastWorkspaceSortPreference: preference,
+    });
+    const hosts = upsertConnection(this.state.savedConnections, updatedHost);
+    this.setState({ savedConnections: hosts, savedConnection: updatedHost });
+    try {
+      await this.saveHostCollection({ hosts, selectedConnectionId: savedConnection.connectionId });
+    } catch {
+      // Keep the in-memory preference visible, but make a failed durable write
+      // observable so the UI can explain why a restart may lose this choice.
+      this.setState({ operationError: { operation: 'preference', code: 'STORAGE_UNAVAILABLE' } });
+    }
   }
 
   private async resolveWorkspace(path: string): Promise<WorkspaceResolutionResult> {
@@ -718,7 +759,7 @@ export class CloudRuntime {
         selection: { ...this.state.selection, workspaceId: workspace.id },
         operationError: undefined,
       });
-      void this.persistSelection({ workspaceId: workspace.id });
+      void this.persistSelection();
       return { status: 'accepted', workspace };
     } catch (error) {
       const details = workspaceOperationErrorDetails(error);
@@ -768,26 +809,49 @@ export class CloudRuntime {
   }
 
   private setModel(modelId: string): void {
-    this.setState({ selection: { ...this.state.selection, modelId } });
-    void this.persistSelection({ modelId });
+    const selection = normalizeComposerSelection(
+      { ...this.state.selection, modelId },
+      selectRootCatalog(this.state),
+    );
+    this.setState({ selection });
+    void this.persistSelection();
   }
 
   private setEffort(effort: RuntimeSelection['effort']): void {
-    this.setState({ selection: { ...this.state.selection, effort } });
+    const selection = normalizeComposerSelection(
+      { ...this.state.selection, effort },
+      selectRootCatalog(this.state),
+    );
+    this.setState({ selection });
+    void this.persistSelection();
   }
 
   private setPermissionMode(permissionMode: HostPermissionMode): void {
-    this.setState({ selection: { ...this.state.selection, permissionMode } });
+    const selection = normalizeComposerSelection(
+      { ...this.state.selection, permissionMode },
+      selectRootCatalog(this.state),
+    );
+    this.setState({ selection });
+    void this.persistSelection();
   }
 
-  private async persistSelection(selection: Partial<RuntimeSelection>): Promise<void> {
+  private async persistSelection(selection: Partial<RuntimeSelection> = {}): Promise<void> {
     const savedConnection = this.state.savedConnection;
     if (savedConnection === undefined) return;
     try {
+      const nextSelection = { ...this.state.selection, ...selection };
+      const connection = {
+        connectionId: savedConnection.connectionId,
+        address: savedConnection.address,
+        mode: savedConnection.mode,
+      };
       const updatedHost = Object.freeze({
-        ...savedConnection,
-        ...(selection.workspaceId === undefined ? {} : { lastWorkspaceId: selection.workspaceId }),
-        ...(selection.modelId === undefined ? {} : { lastModelId: selection.modelId }),
+        ...connection,
+        ...(nextSelection.workspaceId === undefined ? {} : { lastWorkspaceId: nextSelection.workspaceId }),
+        ...(nextSelection.modelId === undefined ? {} : { lastModelId: nextSelection.modelId }),
+        ...(nextSelection.permissionMode === undefined ? {} : { lastPermissionMode: nextSelection.permissionMode }),
+        ...(nextSelection.effort === undefined ? {} : { lastEffort: nextSelection.effort }),
+        lastWorkspaceSortPreference: this.state.workspaceSortPreference,
       });
       const hosts = upsertConnection(this.state.savedConnections, updatedHost);
       this.setState({ savedConnections: hosts, savedConnection: updatedHost });
@@ -805,11 +869,22 @@ export class CloudRuntime {
 
     let createResult: HostCreateChatResult;
     try {
-      const command = buildCreateChatCommand({
+      const catalog = selectRootCatalog(this.state);
+      const previousSelection = this.state.selection;
+      const selection = normalizeComposerSelection({
+        ...this.state.selection,
         workspaceId: input.workspaceId,
         modelId: input.modelId,
-        effort: input.effort ?? this.state.selection.effort,
-        permissionMode: input.permissionMode ?? this.state.selection.permissionMode,
+        ...(input.effort === undefined ? {} : { effort: input.effort }),
+        ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
+      }, catalog);
+      this.setState({ selection });
+      if (!sameRuntimeSelection(previousSelection, selection)) void this.persistSelection();
+      const command = buildCreateChatCommand({
+        workspaceId: selection.workspaceId ?? input.workspaceId,
+        modelId: selection.modelId ?? input.modelId,
+        effort: selection.effort,
+        permissionMode: selection.permissionMode,
         prompt: input.prompt,
         clientSeq: this.nextClientSeq(),
         commandId: this.nextCommandId('create'),
@@ -1076,7 +1151,7 @@ export class CloudRuntime {
         clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
         clientInfo: {
           name: 'Cloud',
-          version: '0.8.0',
+          version: '0.13.0',
           platform: this.dependencies.platform ?? 'unknown',
         },
         store: syncStore,
@@ -1089,9 +1164,23 @@ export class CloudRuntime {
     }
     this.supervisor = supervisor;
     this.removeSyncSubscription = syncStore.subscribe((sync) => {
-      this.setState({ sync });
+      const catalog = selectRootCatalogFromSync(sync);
+      const previousSelection = this.state.selection;
+      const selection = normalizeComposerSelection(previousSelection, catalog);
+      this.setState({ sync, selection });
+      if (catalog !== undefined && !sameRuntimeSelection(previousSelection, selection)) void this.persistSelection();
     });
-    this.setState({ sync: syncStore.getState(), phase: 'ready', operationError: undefined });
+    const initialSync = syncStore.getState();
+    const initialCatalog = selectRootCatalogFromSync(initialSync);
+    const previousSelection = this.state.selection;
+    const initialSelection = normalizeComposerSelection(this.state.selection, initialCatalog);
+    this.setState({
+      sync: initialSync,
+      phase: 'ready',
+      operationError: undefined,
+      selection: initialSelection,
+    });
+    if (initialCatalog !== undefined && !sameRuntimeSelection(previousSelection, initialSelection)) void this.persistSelection();
     try {
       supervisor.start();
     } catch {
@@ -1264,6 +1353,8 @@ export interface CloudRuntimeActions {
   deleteConnection(connectionId: ConnectionId | string): Promise<DeleteConnectionResult>;
   /** Read one Host's non-sensitive token availability metadata. */
   hasHostToken(connectionId: ConnectionId | string): Promise<boolean>;
+  /** Read one Host's scoped token for the in-memory edit form only. */
+  readHostToken(connectionId: ConnectionId | string): Promise<string | null>;
   switchConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult>;
   /** Alias retained for UI callers that model a Host row as a selection. */
   selectConnection(connectionId: ConnectionId | string): Promise<ConnectionActionResult>;
@@ -1272,6 +1363,7 @@ export interface CloudRuntimeActions {
   retryConnection(): void;
   subscribeChat(chatUri: ChatUri): Promise<boolean>;
   setWorkspace(workspaceId: string): void;
+  setWorkspaceSortPreference(preference: WorkspaceSortPreference): Promise<void>;
   resolveWorkspace(path: string): Promise<WorkspaceResolutionResult>;
   refreshSessions(): Promise<SessionRefreshResult>;
   setModel(modelId: string): void;
@@ -1306,6 +1398,58 @@ export function selectRootCatalog(state: CloudRuntimeState): HostRootCatalogStat
   return rootResource.state;
 }
 
+function selectRootCatalogFromSync(sync: SyncState): HostRootCatalogState | undefined {
+  const resource = getResourceState(sync, AGENT_ROOT_URI);
+  if (resource === undefined || resource.resource !== AGENT_ROOT_URI) return undefined;
+  const rootResource = resource as Extract<HostResourceState, { resource: typeof AGENT_ROOT_URI }>;
+  return rootResource.state;
+}
+
+function normalizeComposerSelection(
+  selection: RuntimeSelection,
+  catalog: HostRootCatalogState | undefined,
+): RuntimeSelection {
+  if (catalog === undefined) return Object.freeze({ ...selection });
+
+  const model = catalog.models.find((candidate) => candidate.id === selection.modelId)
+    ?? catalog.models.find((candidate) => candidate.id === catalog.defaultModelId)
+    ?? catalog.models[0];
+  const modelId = model?.id;
+  const permissionMode = normalizePermissionMode(selection.permissionMode, catalog);
+  const effort = selection.effort !== undefined
+    && model?.supportedEffortLevels?.includes(selection.effort) === true
+    ? selection.effort
+    : undefined;
+
+  return Object.freeze({
+    ...(selection.workspaceId === undefined ? {} : { workspaceId: selection.workspaceId }),
+    ...(modelId === undefined ? {} : { modelId }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
+    ...(effort === undefined ? {} : { effort }),
+  });
+}
+
+function normalizePermissionMode(
+  permissionMode: HostPermissionMode | undefined,
+  catalog: HostRootCatalogState,
+): HostPermissionMode | undefined {
+  const options = catalog.permissionModes;
+  if (options === undefined) return permissionMode;
+  if (permissionMode !== undefined && options.some((option) => option.id === permissionMode)) return permissionMode;
+  if (catalog.defaultPermissionMode !== undefined
+    && options.some((option) => option.id === catalog.defaultPermissionMode)) {
+    return catalog.defaultPermissionMode;
+  }
+  return undefined;
+}
+
+function sameRuntimeSelection(left: RuntimeSelection, right: RuntimeSelection): boolean {
+  return left.workspaceId === right.workspaceId
+    && left.modelId === right.modelId
+    && left.permissionMode === right.permissionMode
+    && left.effort === right.effort;
+}
+
 export function selectHomeSelectorInput(state: CloudRuntimeState): HomeSelectorInput {
   return {
     phase: state.phase,
@@ -1313,6 +1457,7 @@ export function selectHomeSelectorInput(state: CloudRuntimeState): HomeSelectorI
     catalog: selectRootCatalog(state),
     selectedWorkspaceId: state.selection.workspaceId,
     selectedModelId: state.selection.modelId,
+    workspaceSortPreference: state.workspaceSortPreference,
     operationError: state.operationError,
   };
 }
@@ -1427,7 +1572,23 @@ function createHostPreferences(
     mode: config.mode,
     ...(existingHost?.lastWorkspaceId === undefined ? {} : { lastWorkspaceId: existingHost.lastWorkspaceId }),
     ...(existingHost?.lastModelId === undefined ? {} : { lastModelId: existingHost.lastModelId }),
+    ...(existingHost?.lastPermissionMode === undefined ? {} : { lastPermissionMode: existingHost.lastPermissionMode }),
+    ...(existingHost?.lastEffort === undefined ? {} : { lastEffort: existingHost.lastEffort }),
+    ...(existingHost?.lastWorkspaceSortPreference === undefined ? {} : { lastWorkspaceSortPreference: existingHost.lastWorkspaceSortPreference }),
   });
+}
+
+function selectionFromPreferences(preferences: ConnectionPreferences): RuntimeSelection {
+  return Object.freeze({
+    ...(preferences.lastWorkspaceId === undefined ? {} : { workspaceId: preferences.lastWorkspaceId }),
+    ...(preferences.lastModelId === undefined ? {} : { modelId: preferences.lastModelId }),
+    ...(preferences.lastPermissionMode === undefined ? {} : { permissionMode: preferences.lastPermissionMode }),
+    ...(preferences.lastEffort === undefined ? {} : { effort: preferences.lastEffort }),
+  });
+}
+
+function workspaceSortPreferenceFromPreferences(preferences: ConnectionPreferences): WorkspaceSortPreference {
+  return preferences.lastWorkspaceSortPreference ?? 'default';
 }
 
 function removeTokenAvailability(

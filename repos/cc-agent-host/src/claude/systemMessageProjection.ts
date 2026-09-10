@@ -75,6 +75,12 @@ function projectSystemRecord(record: object, taskIdOverride?: string): ClaudeSys
   if (event === undefined || event.length === 0) {
     return undefined;
   }
+  // SDK init carries runtime/catalog metadata. It is consumed by the Host
+  // control plane and must never become a transcript response part in either
+  // the live or replay projection.
+  if (event === 'init') {
+    return undefined;
+  }
   if (event === 'status') {
     const compactResult = readString(record, 'compact_result');
     const compactError = readString(record, 'compact_error');

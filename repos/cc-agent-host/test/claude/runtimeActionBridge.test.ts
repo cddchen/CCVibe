@@ -157,19 +157,33 @@ describe('ClaudeRuntimeActionBridge', () => {
     }));
   });
 
-  it('projects runtime init and ignores stale generations and non-system tail or unmatched messages', () => {
+  it('treats runtime init as control-plane only and ignores stale generations and non-system tail or unmatched messages', () => {
     const host = makeHost();
-    const bridge = new ClaudeRuntimeActionBridge({ hostStateManager: host, nowAction: () => 'unused' });
+    let timestampCalls = 0;
+    const bridge = new ClaudeRuntimeActionBridge({
+      hostStateManager: host,
+      nowAction: () => {
+        timestampCalls += 1;
+        return 'unused';
+      },
+    });
     const startSeq = host.serverSeq;
 
-    bridge.handle(chat, {
+    bridge.handle(chat, runtimeMessage(
+      stream({ type: 'message_start', message: { id: 'generation-one' } }),
+      { generation: 1 },
+    ));
+
+    const beforeInitSeq = host.serverSeq;
+    const beforeInitTimestampCalls = timestampCalls;
+    const initEnvelopes = bridge.handle(chat, {
       type: 'runtime/init',
       generation: 2,
       sdkSessionId: 'sdk-new',
       model: 'claude-sonnet',
       permissionMode: 'default',
     });
-    bridge.handle(chat, runtimeMessage(
+    const staleEnvelopes = bridge.handle(chat, runtimeMessage(
       stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'stale' } }),
       { generation: 1 },
     ));
@@ -182,15 +196,12 @@ describe('ClaudeRuntimeActionBridge', () => {
       { generation: 2, phase: 'unmatched', omitTurnId: true },
     ));
 
-    expect(host.serverSeq).toBe(startSeq + 1);
-    expect(host.getState(chat)?.activeTurn?.parts).toEqual([
-      expect.objectContaining({
-        kind: 'system_message',
-        event: 'init',
-        title: '运行环境初始化',
-        content: expect.stringContaining('claude-sonnet'),
-      }),
-    ]);
+    expect(initEnvelopes).toEqual([]);
+    expect(staleEnvelopes).toEqual([]);
+    expect(timestampCalls).toBe(beforeInitTimestampCalls);
+    expect(host.serverSeq).toBe(beforeInitSeq);
+    expect(host.serverSeq).toBe(startSeq);
+    expect(host.getState(chat)?.activeTurn?.parts).toEqual([]);
   });
 
   it('maps a terminal signal once and uses a canonical safe crash error', () => {

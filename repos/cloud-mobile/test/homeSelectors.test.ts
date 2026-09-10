@@ -36,6 +36,7 @@ function input(overrides: Partial<HomeSelectorInput> = {}): HomeSelectorInput {
     catalog: catalog(),
     selectedWorkspaceId: 'workspace-a',
     selectedModelId: 'model-a',
+    workspaceSortPreference: 'default',
     operationError: undefined,
     ...overrides,
   };
@@ -70,5 +71,106 @@ describe('home selectors', () => {
 
     expect(result.selectedWorkspaceId).toBe('workspace-a');
     expect(result.selectedModelId).toBe('model-a');
+  });
+
+  it('sorts workspace groups by their latest unarchived session when requested', () => {
+    const result = selectHomeViewModel(input({
+      workspaceSortPreference: 'recent_workspace',
+      catalog: catalog({
+        workspaces: [
+          { id: 'workspace-z', path: '/workspace/z', displayName: 'Zeta', status: 'available' },
+          { id: 'workspace-a', path: '/workspace/a', displayName: 'Alpha', status: 'available' },
+          { id: 'workspace-b', path: '/workspace/b', displayName: 'Beta', status: 'available' },
+        ],
+        sessions: [
+          {
+            chatUri: parseChatUri('agent-chat://workspace-z/chat-old'),
+            sdkSessionRef: 'sdk-z-old',
+            workspaceId: 'workspace-z',
+            title: 'Zeta old',
+            updatedAt: '2026-08-28T00:00:00.000Z',
+            status: 'idle',
+            archived: false,
+          },
+          {
+            chatUri: parseChatUri('agent-chat://workspace-z/chat-new'),
+            sdkSessionRef: 'sdk-z-new',
+            workspaceId: 'workspace-z',
+            title: 'Zeta new',
+            updatedAt: '2026-08-30T00:00:00.000Z',
+            status: 'idle',
+            archived: false,
+          },
+          {
+            chatUri: parseChatUri('agent-chat://workspace-a/chat-archived'),
+            sdkSessionRef: 'sdk-a-archived',
+            workspaceId: 'workspace-a',
+            title: 'Archived should not count',
+            updatedAt: '2026-09-01T00:00:00.000Z',
+            status: 'idle',
+            archived: true,
+          },
+          {
+            chatUri: parseChatUri('agent-chat://workspace-a/chat-a'),
+            sdkSessionRef: 'sdk-a',
+            workspaceId: 'workspace-a',
+            title: 'Alpha latest',
+            updatedAt: '2026-08-29T00:00:00.000Z',
+            status: 'idle',
+            archived: false,
+          },
+          {
+            chatUri: parseChatUri('agent-chat://workspace-b/chat-b'),
+            sdkSessionRef: 'sdk-b',
+            workspaceId: 'workspace-b',
+            title: 'Beta latest',
+            updatedAt: '2026-08-29T00:00:00.000Z',
+            status: 'idle',
+            archived: false,
+          },
+        ],
+      }),
+    }));
+
+    expect(result.groups.map((group) => group.workspaceId)).toEqual([
+      'workspace-z',
+      'workspace-a',
+      'workspace-b',
+    ]);
+    expect(result.groups[0]?.sessions.map((session) => session.title)).toEqual(['Zeta new', 'Zeta old']);
+  });
+
+  it('keeps the default workspace-name ordering and deterministic recent ties', () => {
+    const baseCatalog = catalog({
+      workspaces: [
+        { id: 'workspace-b', path: '/workspace/b', displayName: 'Same', status: 'available' },
+        { id: 'workspace-a', path: '/workspace/a', displayName: 'Same', status: 'available' },
+      ],
+      sessions: [
+        {
+          chatUri: parseChatUri('agent-chat://workspace-b/chat-b'),
+          sdkSessionRef: 'sdk-b',
+          workspaceId: 'workspace-b',
+          title: 'B',
+          updatedAt: '2026-08-29T00:00:00.000Z',
+          status: 'idle',
+          archived: false,
+        },
+        {
+          chatUri: parseChatUri('agent-chat://workspace-a/chat-a'),
+          sdkSessionRef: 'sdk-a',
+          workspaceId: 'workspace-a',
+          title: 'A',
+          updatedAt: '2026-08-29T00:00:00.000Z',
+          status: 'idle',
+          archived: false,
+        },
+      ],
+    });
+
+    expect(selectHomeViewModel(input({ catalog: baseCatalog })).groups.map((group) => group.workspaceId))
+      .toEqual(['workspace-a', 'workspace-b']);
+    expect(selectHomeViewModel(input({ catalog: baseCatalog, workspaceSortPreference: 'recent_workspace' })).groups.map((group) => group.workspaceId))
+      .toEqual(['workspace-a', 'workspace-b']);
   });
 });
