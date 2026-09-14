@@ -61,20 +61,20 @@ export function useCloudSelector<T>(
   equality: (left: T, right: T) => boolean = Object.is,
 ): T {
   const runtime = useCloudRuntime();
-  const selected = useRef<{ readonly state: CloudRuntimeState; readonly value: T } | null>(null);
+  const selected = useRef<{ readonly state: CloudRuntimeState; readonly selector: (state: CloudRuntimeState) => T; readonly equality: (left: T, right: T) => boolean; readonly value: T } | null>(null);
 
   const getSnapshot = useCallback((): T => {
     const state = runtime.getState();
     const previous = selected.current;
-    if (previous?.state === state) return previous.value;
+    if (previous?.state === state && previous.selector === selector && previous.equality === equality) return previous.value;
 
     const next = selector(state);
     if (previous !== null && equality(previous.value, next)) {
-      selected.current = { state, value: previous.value };
+      selected.current = { state, selector, equality, value: previous.value };
       return previous.value;
     }
 
-    selected.current = { state, value: next };
+    selected.current = { state, selector, equality, value: next };
     return next;
   }, [equality, runtime, selector]);
 
@@ -95,18 +95,18 @@ export function useCloudFrameSelector<T>(
   equality: (left: T, right: T) => boolean = Object.is,
 ): T {
   const runtime = useCloudRuntime();
-  const selected = useRef<{ readonly state: CloudRuntimeState; readonly value: T } | null>(null);
+  const selected = useRef<{ readonly state: CloudRuntimeState; readonly selector: (state: CloudRuntimeState) => T; readonly equality: (left: T, right: T) => boolean; readonly value: T } | null>(null);
 
   const getSnapshot = useCallback((): T => {
     const state = runtime.getState();
     const previous = selected.current;
-    if (previous?.state === state) return previous.value;
+    if (previous?.state === state && previous.selector === selector && previous.equality === equality) return previous.value;
     const next = selector(state);
     if (previous !== null && equality(previous.value, next)) {
-      selected.current = { state, value: previous.value };
+      selected.current = { state, selector, equality, value: previous.value };
       return previous.value;
     }
-    selected.current = { state, value: next };
+    selected.current = { state, selector, equality, value: next };
     return next;
   }, [equality, runtime, selector]);
 

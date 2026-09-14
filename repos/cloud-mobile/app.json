@@ -3,7 +3,7 @@
     "name": "Cloud",
     "slug": "cloud-mobile",
     "icon": "./assets/branding/cloud-app-icon.png",
-    "version": "0.13.0",
+    "version": "0.16.0",
     "orientation": "default",
     "scheme": "cloud",
     "userInterfaceStyle": "automatic",
@@ -11,7 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.ccvibe.cloud",
-      "buildNumber": "13",
+      "buildNumber": "16",
       "infoPlist": {
         "CADisableMinimumFrameDurationOnPhone": true,
         "NSLocalNetworkUsageDescription": "Cloud needs access to your local network to connect to your Cloud Agent Host."
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "com.ccvibe.cloud",
-      "versionCode": 13
+      "versionCode": 16
     },
     "plugins": [
       "expo-router",

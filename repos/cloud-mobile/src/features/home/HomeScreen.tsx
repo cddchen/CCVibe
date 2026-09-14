@@ -29,6 +29,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useReanimatedKeyboardAnimation, useWindowDimensions } from 'react-native-keyboard-controller';
 
+import { GlassPanel } from '../../ui/glass/GlassPanel';
 import { GlassSurface } from '../../ui/glass/GlassSurface';
 import { BottomSheetFrame } from '../../ui/motion/BottomSheetMotion';
 import { useCloudActions, useCloudSelector } from '../runtime/CloudRuntimeProvider';
@@ -483,7 +484,7 @@ function HomeChoiceSheet(props: {
   const reduceMotion = useReducedMotion();
   return (
     <BottomSheetFrame onClose={props.onClose} panelStyle={styles.pickerMotion} reduceMotion={reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}>
-          <GlassSurface blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" materialTone="surfaceContainer" style={styles.pickerSheet}>
+          <GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.pickerSheet}>
             <View style={[styles.pickerHandle, { backgroundColor: theme.colors.outline }]} />
             <Text style={[styles.pickerTitle, { color: theme.colors.onSurface }]}>{props.title}</Text>
             <ScrollView bounces={false} contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.pickerScroll}>
@@ -527,7 +528,7 @@ function HomeChoiceSheet(props: {
                 );
               })}
             </ScrollView>
-          </GlassSurface>
+          </GlassPanel>
     </BottomSheetFrame>
   );
 }

@@ -23,7 +23,7 @@ import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 
 import { GlassPanel } from '../../ui/glass/GlassPanel';
 import { GlassSurface } from '../../ui/glass/GlassSurface';
-import { BOTTOM_SHEET_BACKDROP_DURATION_MS, BOTTOM_SHEET_DISMISS_MS, BottomSheetFrame } from '../../ui/motion/BottomSheetMotion';
+import { BottomSheetFrame } from '../../ui/motion/BottomSheetMotion';
 import { useCloudActions, useCloudFrameSelector, useCloudSelector } from '../runtime/CloudRuntimeProvider';
 import { selectRootCatalog, type CloudRuntimeState } from '../runtime/runtimeStore';
 import {
@@ -38,6 +38,7 @@ import {
 import { parseChatUri, type ChatUri } from '../../protocol/resourceUri';
 import type { HostPermissionMode, HostSlashCommand } from '../../protocol/hostWire';
 import { insertSlashCommand, type ComposerTextSelection } from './chatCommands';
+import { shouldShowDeferredTranscriptLoading } from './chatTranscript';
 import {
   atBottomFromMetrics,
   chatBottomOffset,
@@ -52,7 +53,11 @@ import { processContentMaxHeight, shouldShowPromptExpand, USER_PROMPT_MAX_LINES 
 type ConfigPicker = 'model' | 'effort' | 'permission' | undefined;
 interface ConfigOption { readonly id: string; readonly title: string; readonly description?: string }
 
-export interface ChatScreenProps { readonly chatUri: ChatUri }
+export interface ChatScreenProps {
+  readonly chatUri: ChatUri;
+  /** Native-stack transitionEnd has fired for the currently focused route. */
+  readonly navigationReady: boolean;
+}
 
 export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const router = useRouter();
@@ -60,11 +65,34 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const theme = useTheme<MD3Theme>();
   const actions = useCloudActions();
   const projectChat = useMemo(createChatViewModelSelector, []);
+  const projectionUriRef = useRef<ChatUri | undefined>(undefined);
+  if (projectionUriRef.current !== props.chatUri) projectionUriRef.current = undefined;
+  const projectionReady = projectionUriRef.current === props.chatUri;
+  const [, requestProjection] = useState(0);
+  useEffect(() => {
+    if (!props.navigationReady) return;
+    let active = true;
+    // Native-stack transitionEnd is the navigation completion signal. A single
+    // frame gives that event a chance to return before the potentially large
+    // transcript projection runs; unlike InteractionManager, this is explicit
+    // and cancellable and does not claim to observe native animation handles.
+    const frame = requestAnimationFrame(() => {
+      if (!active) return;
+      projectionUriRef.current = props.chatUri;
+      requestProjection((value) => value + 1);
+    });
+    return () => {
+      active = false;
+      cancelAnimationFrame(frame);
+    };
+  }, [props.chatUri, props.navigationReady]);
   const selectChat = useCallback((state: CloudRuntimeState) => projectChat({
       chatUri: props.chatUri,
-      chatState: selectChatState(state, props.chatUri),
+      chatState: projectionReady ? selectChatState(state, props.chatUri) : undefined,
+      // Catalog projection is small and keeps the real title/workspace in the
+      // first frame; only the potentially long chat transcript is deferred.
       catalog: selectRootCatalog(state),
-    }), [projectChat, props.chatUri]);
+    }), [projectionReady, projectChat, props.chatUri]);
   const view = useCloudFrameSelector(selectChat);
   const syncStatus = useCloudSelector((state) => state.sync.status);
   const chatOperationError = useCloudSelector((state) => state.chatOperationError);
@@ -73,6 +101,14 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
       ? state.operationError
       : undefined
   ));
+  const chatSubscription = useCloudSelector((state) => state.chatSubscriptions[String(props.chatUri)]);
+  const subscribeFailureCode = chatSubscription?.status === 'error' ? chatSubscription.code : subscribeError?.code;
+  // A known catalog session has a loading view before the route effect gets a
+  // chance to publish its per-chat request state. Keep that first frame honest
+  // without treating an already materialized snapshot as loading.
+  const chatLoading = !projectionReady
+    || chatSubscription?.status === 'loading'
+    || (chatSubscription === undefined && view.status === 'loading');
   const draftRef = useRef('');
   const hasDraftRef = useRef(false);
   const [hasDraft, setHasDraft] = useState(false);
@@ -92,9 +128,10 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   const [requestSheet, setRequestSheet] = useState<RequestSheetKind>();
   const [reduceMotion, setReduceMotion] = useState(false);
   const composerInputRef = useRef<NativeTextInput>(null);
-  const commandTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const requestSheetTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pendingPermissionPickerRef = useRef(false);
+  const mountedRef = useRef(true);
   const requestSheetRef = useRef<RequestSheetKind>(undefined);
+  const requestSheetClosingRef = useRef<RequestSheetKind>(undefined);
   const desiredRequestSheetRef = useRef<RequestSheetKind>(undefined);
   const transcriptRef = useRef<FlatList<ChatTurnViewModel>>(null);
   // The first render needs a stable safe-area-aware inset before the overlay
@@ -139,8 +176,13 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
       subscription.remove();
     };
   }, []);
-  useEffect(() => () => { if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current); }, []);
-  useEffect(() => () => { if (requestSheetTimerRef.current !== undefined) clearTimeout(requestSheetTimerRef.current); }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingPermissionPickerRef.current = false;
+    };
+  }, []);
   useEffect(() => () => { if (userScrollIdleTimerRef.current !== undefined) clearTimeout(userScrollIdleTimerRef.current); }, []);
 
   const activeApproval = view.pendingApprovals.find((candidate) => candidate.id === approvalId)
@@ -149,20 +191,36 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
     ?? (inputId === undefined ? view.pendingInputs.find((candidate) => candidate.id !== dismissedInputId) : undefined);
   const desiredRequestSheet: RequestSheetKind = activeApproval === undefined ? (activeInput === undefined ? undefined : 'input') : 'approval';
   desiredRequestSheetRef.current = desiredRequestSheet;
-  useEffect(() => {
-    // A closing native Modal owns this interval. Desired changes during it are
-    // recorded in the ref and must not cancel/reopen another native Modal.
-    if (requestSheetTimerRef.current !== undefined) return;
-    const transition = nextRequestSheet(requestSheetRef.current, desiredRequestSheet);
-    if (!transition.dismissCurrent) { requestSheetRef.current = transition.show; setRequestSheet(transition.show); return; }
+
+  const handleRequestSheetDismissed = useCallback((kind: 'approval' | 'input'): void => {
+    if (!mountedRef.current || requestSheetClosingRef.current !== kind) return;
+    requestSheetClosingRef.current = undefined;
     requestSheetRef.current = undefined;
+    const latest = desiredRequestSheetRef.current;
+    if (latest === undefined) {
+      setRequestSheet(undefined);
+      return;
+    }
+    requestSheetRef.current = latest;
+    setRequestSheet(latest);
+  }, []);
+  const handleApprovalSheetDismissed = useCallback((): void => handleRequestSheetDismissed('approval'), [handleRequestSheetDismissed]);
+  const handleInputSheetDismissed = useCallback((): void => handleRequestSheetDismissed('input'), [handleRequestSheetDismissed]);
+
+  useEffect(() => {
+    if (requestSheetClosingRef.current !== undefined) return;
+    const transition = nextRequestSheet(requestSheetRef.current, desiredRequestSheet);
+    if (!transition.dismissCurrent) {
+      if (requestSheetRef.current !== transition.show) {
+        requestSheetRef.current = transition.show;
+        setRequestSheet(transition.show);
+      }
+      return;
+    }
+    // Keep the current kind in requestSheetRef until its native Modal reports
+    // dismissal. A new approval/input sheet is mounted only from that signal.
+    requestSheetClosingRef.current = requestSheetRef.current;
     setRequestSheet(undefined);
-    requestSheetTimerRef.current = setTimeout(() => {
-      requestSheetTimerRef.current = undefined;
-      const latest = desiredRequestSheetRef.current;
-      requestSheetRef.current = latest;
-      setRequestSheet(latest);
-    }, BOTTOM_SHEET_DISMISS_MS + 16);
   }, [desiredRequestSheet]);
 
   useEffect(() => {
@@ -243,8 +301,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   }, [actions, props.chatUri, rewindingTurnId, sending, stopping, syncStatus]);
 
   const openCommands = useCallback(async (): Promise<void> => {
-    if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current);
-    commandTransitionTimerRef.current = undefined;
+    pendingPermissionPickerRef.current = false;
     Keyboard.dismiss();
     setAttachmentMenuOpen(true);
     if (commands.length > 0 || commandsLoading) return;
@@ -343,18 +400,20 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
   }, [active, scrollToBottom]);
 
   const closeComposerMenus = useCallback((): void => {
-    if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current);
-    commandTransitionTimerRef.current = undefined;
+    pendingPermissionPickerRef.current = false;
     setAttachmentMenuOpen(false);
   }, []);
   const openPermissionPicker = useCallback((): void => {
+    pendingPermissionPickerRef.current = true;
     setAttachmentMenuOpen(false);
-    if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current);
-    commandTransitionTimerRef.current = setTimeout(() => { commandTransitionTimerRef.current = undefined; setConfigPicker('permission'); }, BOTTOM_SHEET_DISMISS_MS + 16);
+  }, []);
+  const handleComposerPopoverDismissed = useCallback((): void => {
+    if (!mountedRef.current || !pendingPermissionPickerRef.current) return;
+    pendingPermissionPickerRef.current = false;
+    setConfigPicker('permission');
   }, []);
   const selectCommand = useCallback((command: HostSlashCommand): void => {
-    if (commandTransitionTimerRef.current !== undefined) clearTimeout(commandTransitionTimerRef.current);
-    commandTransitionTimerRef.current = undefined;
+    pendingPermissionPickerRef.current = false;
     const insertion = insertSlashCommand(draftRef.current, composerSelectionRef.current, command);
     setAttachmentMenuOpen(false);
     draftRef.current = insertion.text;
@@ -427,7 +486,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
             awaitingSince={awaitingSince}
             bottomInset={Math.max(insets.bottom, 10)}
             composerHeight={composerHeight}
-            failed={subscribeError !== undefined}
+            failed={subscribeFailureCode !== undefined}
             initializeMetrics={initializeTranscriptMetrics}
             onContentSizeChange={updateContentMetrics}
             onMomentumScrollBegin={beginUserScroll}
@@ -438,7 +497,7 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
             onScrollBeginDrag={beginUserScroll}
             onScrollEndDrag={endUserDrag}
             reduceMotion={reduceMotion}
-            status={view.status}
+            status={chatLoading ? 'loading' : view.status}
             topChromeInset={topChromeHeight}
             transcriptRef={transcriptRef}
             turns={turns}
@@ -522,15 +581,16 @@ export default function ChatScreen(props: ChatScreenProps): JSX.Element {
               <View style={[styles.topChromeEdge, { backgroundColor: theme.colors.outlineVariant }]} />
             </View>
             {syncStatus !== 'connected' ? <View style={[styles.statusBanner, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.onSurfaceVariant} name="cloud-off-outline" size={18} /><Text style={[styles.statusBannerText, { color: theme.colors.onSurfaceVariant }]}>{syncStatus === 'reconnecting' ? '连接已断开，正在重新连接；当前内容保留在本机' : '当前未连接 Host，消息不会显示为已发送'}</Text><Button compact onPress={actions.retryConnection}>重试</Button></View> : null}
-            {subscribeError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>无法载入这个会话（{subscribeError.code}）</Text><Button compact onPress={() => void actions.subscribeChat(props.chatUri)}>重试</Button><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearOperationError} size={22} /></View> : null}
+            {chatLoading ? <View accessibilityLiveRegion="polite" style={[styles.statusBanner, { backgroundColor: theme.colors.surfaceVariant }]}><ActivityIndicator color={theme.colors.onSurfaceVariant} size="small" /><Text style={[styles.statusBannerText, { color: theme.colors.onSurfaceVariant }]}>正在从 Host 同步会话</Text></View> : null}
+            {subscribeFailureCode !== undefined ? <View accessibilityLiveRegion="assertive" style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>无法载入这个会话（{subscribeFailureCode}）</Text><Button compact onPress={() => void actions.subscribeChat(props.chatUri)}>重试</Button>{subscribeError !== undefined ? <IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearOperationError} size={22} /> : null}</View> : null}
             {chatOperationError !== undefined ? <View style={[styles.errorBanner, { backgroundColor: theme.colors.errorContainer }]}><MaterialCommunityIcons color={theme.colors.onErrorContainer} name="alert-circle-outline" size={18} /><Text style={[styles.errorText, { color: theme.colors.onErrorContainer }]}>操作未完成，请重试（{chatOperationError.code}）</Text><IconButton accessibilityLabel="关闭错误" icon="close" onPress={actions.clearChatOperationError} size={22} /></View> : null}
           </View>
         </View>
       </KeyboardAvoidingView>
-      <ComposerCommandPopover commands={commands} currentPermission={view.permissionModes.find((mode) => mode.id === view.permissionMode)?.displayName ?? view.permissionMode} loading={commandsLoading} onClose={closeComposerMenus} onCommand={selectCommand} onPermission={openPermissionPicker} reduceMotion={reduceMotion} visible={attachmentMenuOpen} />
+      <ComposerCommandPopover commands={commands} currentPermission={view.permissionModes.find((mode) => mode.id === view.permissionMode)?.displayName ?? view.permissionMode} loading={commandsLoading} onClose={closeComposerMenus} onCommand={selectCommand} onDismiss={handleComposerPopoverDismissed} onPermission={openPermissionPicker} reduceMotion={reduceMotion} visible={attachmentMenuOpen} />
       <ConfigChoiceSheet currentValue={currentPickerValue} onClose={() => setConfigPicker(undefined)} onSelect={selectConfig} options={pickerOptions} reduceMotion={reduceMotion} title={configPicker === 'model' ? '选择模型' : configPicker === 'effort' ? '选择思考强度' : '权限设置'} visible={configPicker !== undefined} />
-      <ApprovalSheet approval={requestSheet === 'approval' ? activeApproval : undefined} reduceMotion={reduceMotion} onClose={closeApproval} onResolve={resolveApproval} />
-      <InputSheet input={requestSheet === 'input' ? activeInput : undefined} reduceMotion={reduceMotion} onClose={closeInput} onResolve={resolveInput} />
+      <ApprovalSheet approval={requestSheet === 'approval' ? activeApproval : undefined} reduceMotion={reduceMotion} onClose={closeApproval} onDismiss={handleApprovalSheetDismissed} onResolve={resolveApproval} />
+      <InputSheet input={requestSheet === 'input' ? activeInput : undefined} reduceMotion={reduceMotion} onClose={closeInput} onDismiss={handleInputSheetDismissed} onResolve={resolveInput} />
       {notice !== undefined ? (
         <Pressable accessibilityRole="button" accessibilityLabel="关闭提示" onPress={() => setNotice(undefined)} style={[styles.noticeToast, { top: topChromeHeight + 8, backgroundColor: theme.colors.onSurface }]}>
           <MaterialCommunityIcons color={theme.colors.surface} name="information-outline" size={17} />
@@ -572,6 +632,12 @@ const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps):
   // Streaming can outpace the display refresh rate. React may discard stale
   // intermediate projections while input and native scrolling stay urgent.
   const deferredTurns = useDeferredValue(props.turns);
+  const showDeferredLoading = shouldShowDeferredTranscriptLoading(
+    deferredTurns.length,
+    props.turns.length,
+    props.awaitingSince,
+    props.failed,
+  );
   const renderItem = useCallback(({ item }: ListRenderItemInfo<ChatTurnViewModel>) => (
     <TurnTranscriptItem onCopy={props.onCopy} onRewind={props.onRewind} reduceMotion={props.reduceMotion} turn={item} />
   ), [props.onCopy, props.onRewind, props.reduceMotion]);
@@ -583,7 +649,7 @@ const ChatTranscript = memo(function ChatTranscript(props: ChatTranscriptProps):
       initialNumToRender={8}
       keyExtractor={(item) => item.id}
       keyboardShouldPersistTaps="handled"
-      ListEmptyComponent={props.awaitingSince === undefined ? <EmptyTranscript failed={props.failed} status={props.status} /> : null}
+      ListEmptyComponent={props.awaitingSince === undefined ? <EmptyTranscript failed={props.failed} status={showDeferredLoading ? 'loading' : props.status} /> : null}
       ListFooterComponent={props.awaitingSince === undefined ? null : <PendingThinking startedAt={props.awaitingSince} />}
       maxToRenderPerBatch={6}
       onContentSizeChange={props.onContentSizeChange}
@@ -867,6 +933,7 @@ interface ComposerCommandPopoverProps {
   readonly loading: boolean;
   readonly onClose: () => void;
   readonly onCommand: (command: HostSlashCommand) => void;
+  readonly onDismiss: () => void;
   readonly onPermission: () => void;
   readonly reduceMotion: boolean;
   readonly visible: boolean;
@@ -875,8 +942,8 @@ function ComposerCommandPopover(props: ComposerCommandPopoverProps): JSX.Element
   const theme = useTheme<MD3Theme>();
   const insets = useSafeAreaInsets();
   return (
-    <BottomSheetFrame enterDelayMs={BOTTOM_SHEET_BACKDROP_DURATION_MS} onClose={props.onClose} panelStyle={styles.commandPopoverMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}>
-          <GlassPanel containerStyle={styles.commandPopoverContainer} forceSolid materialElevation={5} materialShape="extraLarge" materialTone="surfaceContainerLowest" solidColor={theme.colors.surface} style={[styles.commandPopover, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+    <BottomSheetFrame onClose={props.onClose} onDismiss={props.onDismiss} panelStyle={styles.commandPopoverMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}>
+          <GlassPanel blurIntensity={82} containerStyle={styles.commandPopoverContainer} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={[styles.commandPopover, { paddingBottom: Math.max(insets.bottom, 16) }]}>
             <View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} />
             <Text variant="headlineSmall" style={styles.sheetTitle}>添加内容</Text>
             <ScrollView bounces={false} contentContainerStyle={styles.commandList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.commandScroll}>
@@ -902,24 +969,24 @@ function ConfigChoiceSheet(props: ConfigChoiceSheetProps): JSX.Element {
   return <BottomSheetFrame onClose={props.onClose} panelStyle={styles.choiceSheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.visible}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.choiceSheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>{props.title}</Text><ScrollView bounces={false} contentContainerStyle={styles.choiceList} showsVerticalScrollIndicator style={styles.boundedScroll}>{props.options.length === 0 ? <Text style={[styles.commandEmpty, { color: theme.colors.onSurfaceVariant }]}>Host 未下发可用选项</Text> : props.options.map((option) => { const selected = option.id === props.currentValue; return <Pressable key={option.id} accessibilityRole="radio" accessibilityState={{ checked: selected }} onPress={() => void props.onSelect(option.id)} style={({ pressed }) => [styles.choiceRow, { borderColor: selected ? theme.colors.primary : theme.colors.outlineVariant, backgroundColor: selected ? theme.colors.primaryContainer : theme.colors.surface }, pressed ? styles.pressed : null]}><View style={styles.commandCopy}><Text style={[styles.choiceTitle, { color: theme.colors.onSurface }]}>{option.title}</Text>{option.description === undefined ? null : <Text numberOfLines={2} style={[styles.choiceDescription, { color: theme.colors.onSurfaceVariant }]}>{option.description}</Text>}</View>{selected ? <MaterialCommunityIcons color={theme.colors.primary} name="check" size={21} /> : null}</Pressable>; })}</ScrollView></GlassPanel></BottomSheetFrame>;
 }
 
-interface ApprovalSheetProps { readonly approval: PendingApprovalViewModel | undefined; readonly reduceMotion: boolean; readonly onClose: () => void; readonly onResolve: (decision: 'allow' | 'deny') => Promise<void> }
+interface ApprovalSheetProps { readonly approval: PendingApprovalViewModel | undefined; readonly reduceMotion: boolean; readonly onClose: () => void; readonly onDismiss: () => void; readonly onResolve: (decision: 'allow' | 'deny') => Promise<void> }
 const ApprovalSheet = memo(function ApprovalSheet(props: ApprovalSheetProps): JSX.Element {
   const theme = useTheme<MD3Theme>(); const [resolving, setResolving] = useState(false); const cachedRef = useRef(props.approval);
   if (props.approval !== undefined) cachedRef.current = props.approval;
   const cached = cachedRef.current;
   if (cached === undefined) return <></>;
   const resolve = async (decision: 'allow' | 'deny'): Promise<void> => { setResolving(true); try { await props.onResolve(decision); } finally { setResolving(false); } };
-  return <BottomSheetFrame onClose={props.onClose} panelStyle={styles.sheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.approval !== undefined}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.sheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>权限请求</Text><Text style={[styles.sheetDescription, { color: theme.colors.onSurfaceVariant }]}>允许在 {cached.hostName} 上执行此工具？</Text><View style={[styles.requestIdentity, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.primary} name="wrench-outline" size={22} /><View style={styles.requestCopy}><Text style={styles.requestTool}>{cached.displayName}</Text><Text style={[styles.requestWorkspace, { color: theme.colors.onSurfaceVariant }]}>{cached.workspaceName}</Text></View></View><ScrollView bounces={false} style={[styles.requestInput, { backgroundColor: theme.colors.surfaceVariant }]}><Text selectable style={{ color: theme.colors.onSurfaceVariant }}>{cached.normalizedInput}</Text></ScrollView><View style={styles.sheetActions}><Button disabled={resolving} mode="outlined" onPress={() => void resolve('deny')} style={styles.sheetButton}>拒绝</Button><Button disabled={resolving} icon="check" mode="contained" onPress={() => void resolve('allow')} style={styles.sheetButton}>允许</Button></View></GlassPanel></BottomSheetFrame>;
+  return <BottomSheetFrame onClose={props.onClose} onDismiss={props.onDismiss} panelStyle={styles.sheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.approval !== undefined}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.sheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>权限请求</Text><Text style={[styles.sheetDescription, { color: theme.colors.onSurfaceVariant }]}>允许在 {cached.hostName} 上执行此工具？</Text><View style={[styles.requestIdentity, { backgroundColor: theme.colors.surfaceVariant }]}><MaterialCommunityIcons color={theme.colors.primary} name="wrench-outline" size={22} /><View style={styles.requestCopy}><Text style={styles.requestTool}>{cached.displayName}</Text><Text style={[styles.requestWorkspace, { color: theme.colors.onSurfaceVariant }]}>{cached.workspaceName}</Text></View></View><ScrollView bounces={false} style={[styles.requestInput, { backgroundColor: theme.colors.surfaceVariant }]}><Text selectable style={{ color: theme.colors.onSurfaceVariant }}>{cached.normalizedInput}</Text></ScrollView><View style={styles.sheetActions}><Button disabled={resolving} mode="outlined" onPress={() => void resolve('deny')} style={styles.sheetButton}>拒绝</Button><Button disabled={resolving} icon="check" mode="contained" onPress={() => void resolve('allow')} style={styles.sheetButton}>允许</Button></View></GlassPanel></BottomSheetFrame>;
 });
 
-interface InputSheetProps { readonly input: PendingInputViewModel | undefined; readonly reduceMotion: boolean; readonly onClose: () => void; readonly onResolve: (answers: Readonly<Record<string, string>> | undefined) => Promise<void> }
+interface InputSheetProps { readonly input: PendingInputViewModel | undefined; readonly reduceMotion: boolean; readonly onClose: () => void; readonly onDismiss: () => void; readonly onResolve: (answers: Readonly<Record<string, string>> | undefined) => Promise<void> }
 const InputSheet = memo(function InputSheet(props: InputSheetProps): JSX.Element {
   const theme = useTheme<MD3Theme>(); const [answers, setAnswers] = useState<Readonly<Record<string, readonly string[]>>>({}); const [custom, setCustom] = useState<Readonly<Record<string, string>>>({}); const [resolving, setResolving] = useState(false); const [cached, setCached] = useState(props.input);
   useEffect(() => { if (props.input !== undefined) { setCached(props.input); setAnswers({}); setCustom({}); } }, [props.input]);
   if (cached === undefined) return <></>;
   const toggle = (key: string, label: string, multi: boolean): void => setAnswers((current) => { const previous = current[key] ?? []; return { ...current, [key]: multi ? (previous.includes(label) ? previous.filter((value) => value !== label) : [...previous, label]) : [label] }; });
   const submit = async (): Promise<void> => { setResolving(true); try { await props.onResolve(buildStructuredInputAnswers(cached, answers, custom)); } finally { setResolving(false); } };
-  return <BottomSheetFrame onClose={props.onClose} panelStyle={styles.sheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.input !== undefined}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.sheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>需要你的输入</Text><Text style={[styles.sheetDescription, { color: theme.colors.onSurfaceVariant }]}>Cloud 正在等待你回答以下问题</Text><ScrollView bounces={false} contentContainerStyle={styles.questionList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.boundedScroll}>{cached.questions.map((question, index) => <View key={`${cached.id}:question:${index}`} style={styles.questionBlock}><Text variant="labelLarge" style={{ color: theme.colors.primary }}>{question.header}</Text><Text style={styles.questionText}>{question.question}</Text>{question.options.map((option) => { const selected = answers[question.question]?.includes(option.label) === true; return <Pressable key={option.label} accessibilityRole={question.multiSelect ? 'checkbox' : 'radio'} accessibilityState={{ checked: selected }} onPress={() => toggle(question.question, option.label, question.multiSelect)} style={[styles.optionRow, selected ? { borderColor: theme.colors.primary, backgroundColor: theme.colors.primaryContainer } : { borderColor: theme.colors.outlineVariant }]}><MaterialCommunityIcons color={selected ? theme.colors.primary : theme.colors.outline} name={selected ? (question.multiSelect ? 'checkbox-marked' : 'radiobox-marked') : (question.multiSelect ? 'checkbox-blank-outline' : 'radiobox-blank')} size={22} /><View style={styles.optionCopy}><Text style={styles.optionLabel}>{option.label}</Text><Text style={[styles.optionDescription, { color: theme.colors.onSurfaceVariant }]}>{option.description}</Text></View></Pressable>; })}<NativeTextInput accessibilityLabel={`${question.header} 自由输入`} onChangeText={(value) => setCustom((current) => ({ ...current, [question.question]: value }))} placeholder="或输入自定义回答" placeholderTextColor={theme.colors.onSurfaceVariant} style={[styles.customInput, { borderColor: theme.colors.outlineVariant, color: theme.colors.onSurface }]} value={custom[question.question] ?? ''} /></View>)}</ScrollView><View style={styles.sheetActions}><Button disabled={resolving} mode="outlined" onPress={() => void props.onResolve(undefined)} style={styles.sheetButton}>取消</Button><Button disabled={resolving} icon="send" mode="contained" onPress={() => void submit()} style={styles.sheetButton}>提交回答</Button></View></GlassPanel></BottomSheetFrame>;
+  return <BottomSheetFrame onClose={props.onClose} onDismiss={props.onDismiss} panelStyle={styles.sheetMotion} reduceMotion={props.reduceMotion} scrimStyle={styles.modalScrim} visible={props.input !== undefined}><GlassPanel blurIntensity={82} glassEffectStyle="regular" materialElevation={5} materialShape="extraLarge" style={styles.sheet}><View style={[styles.sheetHandle, { backgroundColor: theme.colors.outline }]} /><Text variant="headlineSmall" style={styles.sheetTitle}>需要你的输入</Text><Text style={[styles.sheetDescription, { color: theme.colors.onSurfaceVariant }]}>Cloud 正在等待你回答以下问题</Text><ScrollView bounces={false} contentContainerStyle={styles.questionList} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator style={styles.boundedScroll}>{cached.questions.map((question, index) => <View key={`${cached.id}:question:${index}`} style={styles.questionBlock}><Text variant="labelLarge" style={{ color: theme.colors.primary }}>{question.header}</Text><Text style={styles.questionText}>{question.question}</Text>{question.options.map((option) => { const selected = answers[question.question]?.includes(option.label) === true; return <Pressable key={option.label} accessibilityRole={question.multiSelect ? 'checkbox' : 'radio'} accessibilityState={{ checked: selected }} onPress={() => toggle(question.question, option.label, question.multiSelect)} style={[styles.optionRow, selected ? { borderColor: theme.colors.primary, backgroundColor: theme.colors.primaryContainer } : { borderColor: theme.colors.outlineVariant }]}><MaterialCommunityIcons color={selected ? theme.colors.primary : theme.colors.outline} name={selected ? (question.multiSelect ? 'checkbox-marked' : 'radiobox-marked') : (question.multiSelect ? 'checkbox-blank-outline' : 'radiobox-blank')} size={22} /><View style={styles.optionCopy}><Text style={styles.optionLabel}>{option.label}</Text><Text style={[styles.optionDescription, { color: theme.colors.onSurfaceVariant }]}>{option.description}</Text></View></Pressable>; })}<NativeTextInput accessibilityLabel={`${question.header} 自由输入`} onChangeText={(value) => setCustom((current) => ({ ...current, [question.question]: value }))} placeholder="或输入自定义回答" placeholderTextColor={theme.colors.onSurfaceVariant} style={[styles.customInput, { borderColor: theme.colors.outlineVariant, color: theme.colors.onSurface }]} value={custom[question.question] ?? ''} /></View>)}</ScrollView><View style={styles.sheetActions}><Button disabled={resolving} mode="outlined" onPress={() => void props.onResolve(undefined)} style={styles.sheetButton}>取消</Button><Button disabled={resolving} icon="send" mode="contained" onPress={() => void submit()} style={styles.sheetButton}>提交回答</Button></View></GlassPanel></BottomSheetFrame>;
 });
 
 function toolStatusLabel(status: Extract<ChatPartViewModel, { kind: 'tool' }>['status']): string { switch (status) { case 'running': return '运行中'; case 'ready': return '等待执行'; case 'success': return '已完成'; case 'error': return '失败'; } }

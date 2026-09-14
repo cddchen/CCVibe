@@ -50,6 +50,7 @@ import {
 import {
   createSyncStore,
   createSyncState,
+  setSyncStatus,
   type SyncState,
 } from '../../sync/syncState';
 import { getResourceState } from '../../sync/syncState';
@@ -82,6 +83,11 @@ export interface RuntimeOperationError extends HomeSelectorError {
   readonly chatUri?: ChatUri;
 }
 
+export type ChatSubscriptionState =
+  | { readonly status: 'loading' }
+  | { readonly status: 'ready' }
+  | { readonly status: 'error'; readonly code: string };
+
 export interface ChatOperationError {
   readonly operation: 'send' | 'interrupt' | 'rewind' | 'approval' | 'input' | 'configure';
   readonly code: string;
@@ -103,6 +109,8 @@ export interface CloudRuntimeState {
   readonly selection: RuntimeSelection;
   /** Host-scoped Home workspace ordering preference. */
   readonly workspaceSortPreference: WorkspaceSortPreference;
+  /** Per-chat subscription lifecycle, independent from the Host connection status. */
+  readonly chatSubscriptions: Readonly<Record<string, ChatSubscriptionState>>;
   readonly pendingSend?: PendingSend;
   readonly operationError?: RuntimeOperationError;
   readonly chatOperationError?: ChatOperationError;
@@ -227,6 +235,9 @@ export class CloudRuntime {
   private clientSeq = 0;
   private disposed = false;
   private connectionOperationGeneration = 0;
+  private readonly chatSubscriptionFlights = new Map<string, Promise<boolean>>();
+  private latestChatSubscriptionUri: ChatUri | undefined;
+  private chatSubscriptionGeneration = 0;
   private sessionRefreshFlight: Promise<SessionRefreshResult> | undefined;
 
   public constructor(dependencies: CloudRuntimeDependencies) {
@@ -248,6 +259,7 @@ export class CloudRuntime {
       tokenAvailability: {},
       selection: {},
       workspaceSortPreference: 'default',
+      chatSubscriptions: {},
       refreshingSessions: false,
     });
     this.actionsValue = Object.freeze({
@@ -692,7 +704,13 @@ export class CloudRuntime {
   private disconnect(): void {
     this.beginConnectionOperation();
     this.detachSupervisor(true);
-    this.setState({ phase: this.state.savedConnection === undefined ? 'unconfigured' : 'ready', operationError: undefined });
+    this.setState({
+      phase: this.state.savedConnection === undefined ? 'unconfigured' : 'ready',
+      // Keep last-known-good resources visible while marking transport idle;
+      // a future attach replaces them from a fresh Host snapshot.
+      sync: freezeSyncState(setSyncStatus(this.state.sync, 'idle')),
+      operationError: undefined,
+    });
   }
 
   private retryConnection(): void {
@@ -704,18 +722,61 @@ export class CloudRuntime {
   }
 
   private async subscribeChat(chatUri: ChatUri): Promise<boolean> {
-    const supervisor = this.requireConnectedSupervisor();
-    if (supervisor === undefined) {
-      this.failOperation('subscribe', 'NOT_CONNECTED', chatUri);
-      return false;
-    }
+    this.latestChatSubscriptionUri = chatUri;
+    const key = String(chatUri);
+    const existing = this.chatSubscriptionFlights.get(key);
+    if (existing !== undefined) return existing;
+
+    const generation = this.chatSubscriptionGeneration;
+    this.setState({
+      chatSubscriptions: {
+        ...this.state.chatSubscriptions,
+        [key]: { status: 'loading' },
+      },
+      // A route change should not leave a previous chat's subscribe error
+      // visible while the new chat is loading. The per-chat status remains the
+      // source of truth for the old screen if it is still mounted.
+      ...(this.state.operationError?.operation === 'subscribe' ? { operationError: undefined } : {}),
+    });
+
+    const flight = (async (): Promise<boolean> => {
+      const supervisor = this.requireConnectedSupervisor();
+      if (supervisor === undefined) {
+        this.finishChatSubscription(chatUri, generation, { status: 'error', code: 'NOT_CONNECTED' });
+        return false;
+      }
+      try {
+        await supervisor.subscribe(chatUri);
+        this.finishChatSubscription(chatUri, generation, { status: 'ready' });
+        return true;
+      } catch (error) {
+        this.finishChatSubscription(chatUri, generation, { status: 'error', code: errorCode(error) });
+        return false;
+      }
+    })();
+    this.chatSubscriptionFlights.set(key, flight);
     try {
-      await supervisor.subscribe(chatUri);
-      return true;
-    } catch (error) {
-      this.failOperation('subscribe', errorCode(error), chatUri);
-      return false;
+      return await flight;
+    } finally {
+      if (this.chatSubscriptionFlights.get(key) === flight) this.chatSubscriptionFlights.delete(key);
     }
+  }
+
+  private finishChatSubscription(chatUri: ChatUri, generation: number, status: ChatSubscriptionState): void {
+    if (generation !== this.chatSubscriptionGeneration || this.disposed) return;
+    const key = String(chatUri);
+    const isCurrentRoute = this.latestChatSubscriptionUri === chatUri;
+    this.setState({
+      chatSubscriptions: {
+        ...this.state.chatSubscriptions,
+        [key]: status,
+      },
+      ...(isCurrentRoute && status.status === 'error'
+        ? { operationError: { operation: 'subscribe', code: status.code, chatUri } }
+        : isCurrentRoute && this.state.operationError?.operation === 'subscribe'
+          ? { operationError: undefined }
+          : {}),
+    });
   }
 
   private setWorkspace(workspaceId: string): void {
@@ -1151,7 +1212,7 @@ export class CloudRuntime {
         clientId: this.dependencies.clientId ?? `client-${this.dependencies.createId()}`,
         clientInfo: {
           name: 'Cloud',
-          version: '0.13.0',
+          version: '0.16.0',
           platform: this.dependencies.platform ?? 'unknown',
         },
         store: syncStore,
@@ -1167,7 +1228,16 @@ export class CloudRuntime {
       const catalog = selectRootCatalogFromSync(sync);
       const previousSelection = this.state.selection;
       const selection = normalizeComposerSelection(previousSelection, catalog);
-      this.setState({ sync, selection });
+      const connectionTransitioned = sync.status !== this.state.sync.status
+        && (sync.status === 'connected' || this.state.sync.status === 'connected');
+      const staleSubscribeError = connectionTransitioned && this.state.operationError?.operation === 'subscribe';
+      if (connectionTransitioned) this.resetChatSubscriptionLifecycle();
+      this.setState({
+        sync,
+        selection,
+        ...(connectionTransitioned ? { chatSubscriptions: {} } : {}),
+        ...(staleSubscribeError ? { operationError: undefined } : {}),
+      });
       if (catalog !== undefined && !sameRuntimeSelection(previousSelection, selection)) void this.persistSelection();
     });
     const initialSync = syncStore.getState();
@@ -1309,6 +1379,7 @@ export class CloudRuntime {
   }
 
   private detachSupervisor(stop: boolean): void {
+    this.resetChatSubscriptionLifecycle();
     this.cancelConnectionAttempt?.();
     this.cancelConnectionAttempt = undefined;
     this.removeSyncSubscription?.();
@@ -1316,6 +1387,13 @@ export class CloudRuntime {
     const supervisor = this.supervisor;
     this.supervisor = undefined;
     if (stop) supervisor?.stop();
+    if (Object.keys(this.state.chatSubscriptions).length > 0) this.setState({ chatSubscriptions: {} });
+  }
+
+  private resetChatSubscriptionLifecycle(): void {
+    this.chatSubscriptionGeneration += 1;
+    this.chatSubscriptionFlights.clear();
+    this.latestChatSubscriptionUri = undefined;
   }
 
   private nextClientSeq(): number {
@@ -1657,6 +1735,7 @@ function freezeRuntimeState(state: CloudRuntimeState): CloudRuntimeState {
     sync: freezeSyncState(state.sync),
     savedConnections: Object.freeze([...state.savedConnections]),
     tokenAvailability: Object.freeze({ ...state.tokenAvailability }),
+    chatSubscriptions: Object.freeze({ ...state.chatSubscriptions }),
     ...(state.savedConnection === undefined ? {} : { savedConnection: Object.freeze({ ...state.savedConnection }) }),
     selection: Object.freeze({ ...state.selection }),
     ...(state.pendingSend === undefined ? {} : { pendingSend: Object.freeze({ ...state.pendingSend }) }),

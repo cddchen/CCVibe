@@ -4,6 +4,7 @@ import { useEffect, useState, type JSX } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -38,6 +39,12 @@ const EMPTY_FORM: ConnectionFormValues = Object.freeze({
   token: '',
   developmentMode: false,
 });
+
+// Keep the in-app brand mark on the same stable source as the native launcher
+// icon. The image is decorative because the adjacent Cloud title is the
+// accessible identity for this screen.
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- React Native static assets must use a literal require for Metro.
+const CLOUD_APP_ICON = require('../../../assets/branding/cloud-app-icon.png');
 
 export default function ConnectionScreen(): JSX.Element {
   const router = useRouter();
@@ -278,7 +285,13 @@ export default function ConnectionScreen(): JSX.Element {
             </Pressable>
             <View style={styles.heroCopy}>
               <View style={styles.heroMark}>
-                <MaterialCommunityIcons color="#FFFFFF" name="cloud-outline" size={39} />
+                <Image
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                  resizeMode="cover"
+                  source={CLOUD_APP_ICON}
+                  style={styles.heroImage}
+                />
               </View>
               <Text allowFontScaling style={[styles.heroTitle, { color: theme.colors.onBackground }]}>Cloud</Text>
               <Text allowFontScaling style={[styles.heroSubtitle, { color: theme.colors.onSurfaceVariant }]}>{heroSubtitle}</Text>
@@ -295,6 +308,7 @@ export default function ConnectionScreen(): JSX.Element {
               onConnect={connectHost}
               onOpenEdit={openEdit}
               onOpenNew={openNew}
+              onOpenHelp={() => router.push('/help')}
             />
           ) : (
             <HostEditor
@@ -327,6 +341,7 @@ interface HostListProps {
   readonly onConnect: (host: ConnectionPreferences) => void;
   readonly onOpenEdit: (host: ConnectionPreferences) => void;
   readonly onOpenNew: () => void;
+  readonly onOpenHelp: () => void;
 }
 
 function HostList(props: HostListProps): JSX.Element {
@@ -407,6 +422,27 @@ function HostList(props: HostListProps): JSX.Element {
           </Pressable>
         </View>
       </View>
+      <Pressable
+        accessibilityLabel="帮助：连接 Cloud Host"
+        accessibilityRole="button"
+        disabled={props.disabled}
+        onPress={props.onOpenHelp}
+        style={({ pressed }) => [
+          styles.helpRow,
+          { backgroundColor: props.theme.colors.surface, borderColor: props.theme.colors.outlineVariant },
+          pressed && styles.rowPressed,
+        ]}
+        testID="connection-help"
+      >
+        <View style={[styles.helpIcon, { backgroundColor: props.theme.colors.primaryContainer }]}>
+          <MaterialCommunityIcons color={props.theme.colors.primary} name="help-circle-outline" size={23} />
+        </View>
+        <View style={styles.helpCopy}>
+          <Text allowFontScaling style={[styles.helpTitle, { color: props.theme.colors.onSurface }]}>连接帮助</Text>
+          <Text allowFontScaling style={[styles.helpDescription, { color: props.theme.colors.onSurfaceVariant }]}>查看 Host 安装、组网和安全说明</Text>
+        </View>
+        <MaterialCommunityIcons color={props.theme.colors.onSurfaceVariant} name="arrow-right" size={23} />
+      </Pressable>
       {props.error === undefined ? null : <InlineError message={props.error} theme={props.theme} />}
       <Text allowFontScaling style={[styles.securityNote, { color: props.theme.colors.onSurfaceVariant }]}>列表仅显示 Host，Token 不会显示在列表中。</Text>
     </View>
@@ -649,6 +685,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 4,
   },
+  heroImage: { width: 70, height: 70, borderRadius: 22 },
   heroTitle: { fontSize: 34, lineHeight: 38, fontWeight: '800', letterSpacing: -1.2 },
   heroSubtitle: { marginTop: 5, fontSize: 13, lineHeight: 19 },
   listSection: { gap: 0 },
@@ -678,6 +715,20 @@ const styles = StyleSheet.create({
   addHostRow: { borderBottomWidth: 0 },
   addHostLabel: { flex: 1, fontSize: 15, lineHeight: 21, fontWeight: '700' },
   securityNote: { marginTop: 14, paddingHorizontal: 8, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+  helpRow: {
+    minHeight: 64,
+    marginTop: 14,
+    paddingHorizontal: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  helpIcon: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 14 },
+  helpCopy: { flex: 1, minWidth: 0, gap: 2 },
+  helpTitle: { fontSize: 15, lineHeight: 21, fontWeight: '700' },
+  helpDescription: { fontSize: 12, lineHeight: 18 },
   formSection: { gap: 0 },
   titleRow: { minHeight: 44, marginBottom: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   formTitle: { fontSize: 24, lineHeight: 29, fontWeight: '700', letterSpacing: -0.4 },

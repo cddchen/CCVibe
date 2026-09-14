@@ -1,24 +1,37 @@
-import { useEffect, useRef, useState, type JSX, type ReactNode } from 'react';
-import { Modal, Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+import { useCallback, useEffect, useRef, useState, type JSX, type ReactNode } from 'react';
+import { Modal, Platform, Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import Animated, { Easing, FadeIn, FadeOut, SlideInDown, SlideOutDown } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 
 export const BOTTOM_SHEET_BACKDROP_DURATION_MS = 160;
 export const BOTTOM_SHEET_EXIT_DURATION_MS = 250;
-const MODAL_UNMOUNT_GRACE_MS = 16;
-export const BOTTOM_SHEET_DISMISS_MS = BOTTOM_SHEET_EXIT_DURATION_MS + MODAL_UNMOUNT_GRACE_MS;
-const DEFAULT_SHEET_ENTER_DELAY_MS = 60;
 const SHEET_EASING = Easing.bezier(0.32, 0.72, 0, 1);
 
 export interface BottomSheetMotionProps {
   readonly children: ReactNode;
   readonly reduceMotion: boolean;
-  /** Delay the panel until a separately mounted backdrop has appeared. */
-  readonly enterDelayMs?: number;
+  readonly onExitComplete?: () => void;
   readonly style?: StyleProp<ViewStyle>;
 }
 
-export function BottomSheetBackdrop(props: { readonly style?: StyleProp<ViewStyle> }): JSX.Element {
-  return <Animated.View entering={FadeIn.duration(BOTTOM_SHEET_BACKDROP_DURATION_MS)} exiting={FadeOut.duration(BOTTOM_SHEET_EXIT_DURATION_MS)} pointerEvents="none" style={[StyleSheet.absoluteFill, props.style]} />;
+export function BottomSheetBackdrop(props: {
+  readonly onEnterComplete?: () => void;
+  readonly onExitComplete?: () => void;
+  readonly style?: StyleProp<ViewStyle>;
+}): JSX.Element {
+  const onEnterComplete = props.onEnterComplete;
+  const entering = FadeIn.duration(BOTTOM_SHEET_BACKDROP_DURATION_MS);
+  entering.withCallback((finished) => {
+    'worklet';
+    if (finished && onEnterComplete !== undefined) scheduleOnRN(onEnterComplete);
+  });
+  const onExitComplete = props.onExitComplete;
+  const exiting = FadeOut.duration(BOTTOM_SHEET_EXIT_DURATION_MS);
+  exiting.withCallback((finished) => {
+    'worklet';
+    if (finished && onExitComplete !== undefined) scheduleOnRN(onExitComplete);
+  });
+  return <Animated.View entering={entering} exiting={exiting} pointerEvents="none" style={[StyleSheet.absoluteFill, props.style]} />;
 }
 
 /**
@@ -27,13 +40,17 @@ export function BottomSheetBackdrop(props: { readonly style?: StyleProp<ViewStyl
  * rises from the bottom edge.
  */
 export function BottomSheetMotion(props: BottomSheetMotionProps): JSX.Element {
-  const enterDelayMs = props.enterDelayMs ?? (props.reduceMotion ? 0 : DEFAULT_SHEET_ENTER_DELAY_MS);
   const entering = props.reduceMotion
-    ? FadeIn.duration(120).delay(enterDelayMs)
-    : SlideInDown.duration(300).delay(enterDelayMs).easing(SHEET_EASING);
+    ? FadeIn.duration(120)
+    : SlideInDown.duration(300).easing(SHEET_EASING);
   const exiting = props.reduceMotion
     ? FadeOut.duration(BOTTOM_SHEET_EXIT_DURATION_MS)
     : SlideOutDown.duration(BOTTOM_SHEET_EXIT_DURATION_MS).easing(SHEET_EASING);
+  const onExitComplete = props.onExitComplete;
+  exiting.withCallback((finished) => {
+    'worklet';
+    if (finished && onExitComplete !== undefined) scheduleOnRN(onExitComplete);
+  });
   return (
     <Animated.View
       entering={entering}
@@ -49,34 +66,122 @@ export function BottomSheetMotion(props: BottomSheetMotionProps): JSX.Element {
 export function BottomSheetFrame(props: {
   readonly children: ReactNode;
   readonly containerStyle?: StyleProp<ViewStyle>;
-  readonly enterDelayMs?: number;
   readonly onClose: () => void;
+  /** Called after the native Modal has completed its dismissal. */
+  readonly onDismiss?: () => void;
   readonly panelStyle?: StyleProp<ViewStyle>;
   readonly reduceMotion: boolean;
   readonly scrimStyle?: StyleProp<ViewStyle>;
   readonly visible: boolean;
 }): JSX.Element | null {
-  const [modalMounted, setModalMounted] = useState(props.visible);
-  const [panelMounted, setPanelMounted] = useState(props.visible);
+  const [modalVisible, setModalVisible] = useState(props.visible);
+  const [backdropMounted, setBackdropMounted] = useState(false);
+  const [panelMounted, setPanelMounted] = useState(false);
+  const [motionCycle, setMotionCycle] = useState(0);
   const latestChildren = useRef(props.children);
   const visibleRef = useRef(props.visible);
+  const wasVisibleRef = useRef(false);
+  const dismissalPendingRef = useRef(false);
+  const panelExitPendingRef = useRef(false);
+  const panelMountedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const motionCycleRef = useRef(0);
   visibleRef.current = props.visible;
-  // This is a normal React ref (not an animated shared value); retain the
-  // last rendered tree so a controlled close cannot blank its exit frame.
+  panelMountedRef.current = panelMounted;
+  motionCycleRef.current = motionCycle;
   if (props.visible) latestChildren.current = props.children;
+
+  const advanceMotionCycle = useCallback((): void => {
+    const nextCycle = motionCycleRef.current + 1;
+    motionCycleRef.current = nextCycle;
+    setMotionCycle(nextCycle);
+  }, []);
+
+  const startShow = useCallback((): void => {
+    dismissalPendingRef.current = false;
+    panelExitPendingRef.current = false;
+    advanceMotionCycle();
+    setModalVisible(true);
+    setBackdropMounted(true);
+    panelMountedRef.current = false;
+    setPanelMounted(false);
+  }, [advanceMotionCycle]);
+
+  const notifyDismissed = useCallback((): void => {
+    // On iOS the Modal remains mounted while `visible={false}` until this
+    // callback; Android hides it after the local visible prop is committed.
+    // A show requested during that interval is queued by the effect below, so
+    // an old native event cannot complete a later close cycle.
+    if (!dismissalPendingRef.current) return;
+    dismissalPendingRef.current = false;
+    if (visibleRef.current) {
+      startShow();
+    } else {
+      setBackdropMounted(false);
+      setPanelMounted(false);
+    }
+    props.onDismiss?.();
+  }, [props.onDismiss, startShow]);
+
   useEffect(() => {
+    const wasVisible = wasVisibleRef.current;
+    wasVisibleRef.current = props.visible;
     if (props.visible) {
-      setModalMounted(true);
-      setPanelMounted(true);
+      if (dismissalPendingRef.current) {
+        // If native dismissal has not started yet, cancel the exit and keep
+        // this same Modal owner. Once modalVisible is false, native dismissal
+        // is in flight and notifyDismissed() will reopen it after completion.
+        if (modalVisible) {
+          dismissalPendingRef.current = false;
+          panelExitPendingRef.current = false;
+          advanceMotionCycle();
+          setBackdropMounted(true);
+          panelMountedRef.current = true;
+          setPanelMounted(true);
+        }
+        return;
+      }
+      if (!wasVisible) {
+        startShow();
+        return;
+      }
       return;
     }
-    setPanelMounted(false);
-    const timer = setTimeout(() => { if (!visibleRef.current) setModalMounted(false); }, BOTTOM_SHEET_DISMISS_MS);
-    return () => clearTimeout(timer);
-  }, [props.visible]);
-  if (!modalMounted) return null;
+    if (wasVisible) {
+      dismissalPendingRef.current = true;
+      panelExitPendingRef.current = panelMountedRef.current;
+      setPanelMounted(false);
+      setBackdropMounted(false);
+    }
+  }, [advanceMotionCycle, modalVisible, props.visible, startShow]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const handleBackdropEnterComplete = useCallback((cycle: number): void => {
+    if (!mountedRef.current || !visibleRef.current || dismissalPendingRef.current || motionCycleRef.current !== cycle) return;
+    panelMountedRef.current = true;
+    setPanelMounted(true);
+  }, []);
+
+  const handleBackdropExitComplete = useCallback((cycle: number): void => {
+    if (!mountedRef.current || visibleRef.current || !dismissalPendingRef.current || panelExitPendingRef.current || motionCycleRef.current !== cycle) return;
+    setModalVisible(false);
+  }, []);
+
+  const handlePanelExitComplete = useCallback((cycle: number): void => {
+    if (!mountedRef.current || visibleRef.current || !dismissalPendingRef.current || !panelExitPendingRef.current || motionCycleRef.current !== cycle) return;
+    panelExitPendingRef.current = false;
+    setModalVisible(false);
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios' && !modalVisible && dismissalPendingRef.current) notifyDismissed();
+  }, [modalVisible, notifyDismissed]);
+
   const content = props.visible ? props.children : latestChildren.current;
-  return <Modal animationType="none" onRequestClose={props.onClose} transparent visible><View style={[styles.backdrop, props.containerStyle]}>{panelMounted ? <BottomSheetBackdrop style={props.scrimStyle} /> : null}<Pressable accessibilityLabel="关闭弹窗" onPress={props.onClose} style={StyleSheet.absoluteFill} />{panelMounted ? <BottomSheetMotion enterDelayMs={props.reduceMotion ? 0 : (props.enterDelayMs ?? BOTTOM_SHEET_BACKDROP_DURATION_MS)} reduceMotion={props.reduceMotion} style={props.panelStyle}>{content}</BottomSheetMotion> : null}</View></Modal>;
+  return <Modal animationType="none" onDismiss={notifyDismissed} onRequestClose={props.onClose} transparent visible={modalVisible}><View style={[styles.backdrop, props.containerStyle]}>{backdropMounted ? <BottomSheetBackdrop key={`backdrop-${motionCycle}`} onEnterComplete={() => handleBackdropEnterComplete(motionCycle)} onExitComplete={() => handleBackdropExitComplete(motionCycle)} style={props.scrimStyle} /> : null}<Pressable accessibilityLabel="关闭弹窗" onPress={props.onClose} style={StyleSheet.absoluteFill} />{panelMounted ? <BottomSheetMotion key={`panel-${motionCycle}`} onExitComplete={() => handlePanelExitComplete(motionCycle)} reduceMotion={props.reduceMotion} style={props.panelStyle}>{content}</BottomSheetMotion> : null}</View></Modal>;
 }
 
 const styles = StyleSheet.create({ backdrop: { flex: 1, justifyContent: 'flex-end' } });

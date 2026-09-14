@@ -33,6 +33,7 @@ export default function RootLayout(): JSX.Element {
               <Stack.Screen name="index" />
               <Stack.Screen name="home" />
               <Stack.Screen name="connection" options={{ animation: reducedMotion ? 'fade' : 'slide_from_right' }} />
+              <Stack.Screen name="help" options={{ animation: reducedMotion ? 'fade' : 'slide_from_right' }} />
               <Stack.Screen name="chat/[chatId]" options={{ animation: reducedMotion ? 'fade' : 'default' }} />
             </Stack>
           </CloudRuntimeProvider>

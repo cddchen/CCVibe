@@ -1,2 +1,3 @@
 import { expect, it } from 'vitest'; import { nextRequestSheet } from '../src/features/chat/sheetCoordinator';
 it('serializes approval and input replacements', () => { expect(nextRequestSheet(undefined, 'approval').show).toBe('approval'); expect(nextRequestSheet('approval', 'input').dismissCurrent).toBe(true); expect(nextRequestSheet('input', 'approval').dismissCurrent).toBe(true); expect(nextRequestSheet(undefined, undefined).show).toBeUndefined(); });
+it('keeps the native dismissal gap before mounting the next request kind', () => { expect(nextRequestSheet('approval', undefined).dismissCurrent).toBe(true); expect(nextRequestSheet(undefined, 'input')).toEqual({ dismissCurrent: false, show: 'input' }); });

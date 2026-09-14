@@ -269,6 +269,26 @@ describe('connection settings source contract', () => {
     expect(source).toContain('ellipsizeMode="middle"');
     expect(source).toContain('minHeight: 52');
   });
+
+  it('uses the stable Cloud App Icon asset as a decorative hero mark', () => {
+    const source = readConnectionScreen();
+    const hero = sourceBetween(source, 'return (', '\n}\n\ninterface HostListProps');
+
+    expect(source).toContain("require('../../../assets/branding/cloud-app-icon.png')");
+    expect(hero).toContain('<Image');
+    expect(hero).toContain('source={CLOUD_APP_ICON}');
+    expect(hero).toContain('accessibilityElementsHidden');
+    expect(hero).toContain('importantForAccessibility="no-hide-descendants"');
+    expect(source).not.toContain('name="cloud-outline"');
+
+    const heroMark = sourceBetween(source, 'heroMark: {', 'heroTitle: {');
+    expect(heroMark).toContain('width: 70');
+    expect(heroMark).toContain('height: 70');
+    expect(heroMark).not.toContain('overflow: \'hidden\'');
+
+    const heroImage = sourceBetween(source, 'heroImage: {', 'heroTitle: {');
+    expect(heroImage).toContain('borderRadius: 22');
+  });
 });
 
 describe('connection settings runtime actions', () => {

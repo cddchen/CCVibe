@@ -174,6 +174,20 @@ describe('completed assistant enriched markdown contract', () => {
     expect(rendererAddedSource).not.toContain('findReferenceHeightForRange');
   });
 
+  it('keeps Android selectable Markdown on the platform selection movement method', () => {
+    expect(rendererPatchSource).toContain(
+      'android/src/main/java/com/swmansion/enriched/markdown/utils/text/view/LinkLongPressMovementMethod.kt',
+    );
+    expect(rendererAddedSource).toContain('import android.text.method.ArrowKeyMovementMethod');
+    expect(rendererAddedSource).toContain('class LinkLongPressMovementMethod : ArrowKeyMovementMethod()');
+    expect(rendererAddedSource).toContain('private var pressedLink: LinkSpan? = null');
+    expect(rendererAddedSource).toContain('pressedLink = findLinkSpan(widget, buffer, event)');
+    expect(rendererAddedSource).toContain('tappedLink.onClick(widget)');
+    expect(rendererAddedSource).toContain('isTouchWithinTextBounds');
+    expect(rendererAddedSource).not.toContain('Selection.removeSelection');
+    expect(rendererAddedSource).not.toContain('import android.text.method.LinkMovementMethod');
+  });
+
   it('lets inline code inherit the parent text metrics', () => {
     const inlineCodeStyle = screenSource.slice(screenSource.indexOf('code: {'), screenSource.indexOf('codeBlock: {'));
     expect(inlineCodeStyle).toContain('backgroundColor: theme.colors.surfaceVariant');
